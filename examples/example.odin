@@ -978,6 +978,7 @@ Scene :: struct
 {
     instances: [dynamic]Instance,
     meshes: [dynamic]Mesh,
+    tlas: Tlas,
 }
 
 Instance :: struct
@@ -1099,15 +1100,7 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
         append(&res.instances, instance)
     }
 
-    // Retrieve the first mesh
-    mesh: ^ufbx.Mesh
-    for i in 0..<scene.nodes.count
-    {
-        node := scene.nodes.data[i]
-        if node.is_root || node.mesh == nil { continue }
-        mesh = node.mesh
-        break
-    }
+    res.tlas = create_tlas(ctx, res.instances[:], res.meshes[:])
 
     return res
 }
@@ -1699,10 +1692,128 @@ create_blas :: proc(using ctx: ^Vk_Ctx, positions: Buffer, indices: Buffer, vert
     return blas
 }
 
-create_tlas :: proc() -> Accel_Structure
+create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []Instance, meshes: []Mesh) -> Tlas
 {
-    
-    return {}
+    as: Accel_Structure
+
+    vk_instances := make([]vk.AccelerationStructureInstanceKHR, len(instances), allocator = context.temp_allocator)
+    for &vk_instance, i in vk_instances
+    {
+        instance := instances[i]
+        transform := instance.transform
+
+        vk_transform := vk.TransformMatrixKHR {
+            mat = {
+                { transform[0, 0], transform[0, 1], transform[0, 2], transform[0, 3] },
+                { transform[1, 0], transform[1, 1], transform[1, 2], transform[1, 3] },
+                { transform[2, 0], transform[2, 1], transform[2, 2], transform[2, 3] },
+            }
+        }
+
+        vk_instance = {
+            transform = vk_transform,
+            instanceCustomIndex = u32(i),
+            mask = 0xFF,
+            instanceShaderBindingTableRecordOffset = 0,
+            flags = .TRIANGLE_FACING_CULL_DISABLE,
+            accelerationStructureReference = u64(meshes[instance.mesh_idx].blas.addr)
+        }
+
+        fmt.println(vk_instance.flags)
+    }
+
+    instances_buf := create_buffer(ctx, size_of(vk_instances[0]), len(vk_instances), { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+
+    instances_data := vk.AccelerationStructureGeometryInstancesDataKHR {
+        sType = .ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+        arrayOfPointers = false,
+        data = {
+            deviceAddress = get_buffer_device_address(ctx, instances_buf)
+        }
+    }
+
+    geometry := vk.AccelerationStructureGeometryKHR {
+        sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        geometryType = .INSTANCES,
+        geometry = {
+            instances = instances_data
+        }
+    }
+
+    build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        flags = { .PREFER_FAST_TRACE },
+        geometryCount = 1,
+        pGeometries = &geometry,
+        type = .TOP_LEVEL,
+    }
+
+    primitive_count := u32(len(vk_instances))
+    size_info := vk.AccelerationStructureBuildSizesInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
+    }
+    vk.GetAccelerationStructureBuildSizesKHR(device, .DEVICE, &build_info, &primitive_count, &size_info)
+
+    as.buf = create_buffer(ctx, cast(int) size_info.accelerationStructureSize, 1, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+
+    // Create the scratch buffer for tlas building
+    scratch_buf := create_buffer(ctx, cast(int) size_info.buildScratchSize, 1, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+
+    // Build acceleration structure
+    blas_ci := vk.AccelerationStructureCreateInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        buffer = as.buf.buf,
+        size = size_info.accelerationStructureSize,
+        type = .TOP_LEVEL,
+    }
+    vk_check(vk.CreateAccelerationStructureKHR(device, &blas_ci, nil, &as.handle))
+
+    // TEMPORARY CMD_BUF!!!
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    cmd_buf_bi := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+    range_info := vk.AccelerationStructureBuildRangeInfoKHR {}
+    range_info_ptr := cast([^]vk.AccelerationStructureBuildRangeInfoKHR) &range_info
+
+    build_info.dstAccelerationStructure = as.handle
+    build_info.scratchData.deviceAddress = get_buffer_device_address(ctx, scratch_buf)
+    vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, &range_info_ptr)
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    // Get device address
+    addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        accelerationStructure = as.handle,
+    }
+    as.addr = vk.GetAccelerationStructureDeviceAddressKHR(device, &addr_info)
+
+    return {
+        as = as,
+        instances_buf = instances_buf
+    }
 }
 
 Accel_Structure :: struct
@@ -1710,6 +1821,12 @@ Accel_Structure :: struct
     handle: vk.AccelerationStructureKHR,
     buf: Buffer,
     addr: vk.DeviceAddress
+}
+
+Tlas :: struct
+{
+    as: Accel_Structure,
+    instances_buf: Buffer,
 }
 
 get_buffer_device_address :: proc(using ctx: ^Vk_Ctx, buffer: Buffer) -> vk.DeviceAddress
