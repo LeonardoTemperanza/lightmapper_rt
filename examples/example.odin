@@ -129,6 +129,9 @@ main :: proc()
 
     now_ts := sdl.GetPerformanceCounter()
     max_delta_time: f32 = 1.0 / 10.0  // 10fps
+
+    build_lightmap(&vk_ctx, scene, shaders)
+
     for
     {
         proceed := handle_window_events(window)
@@ -650,6 +653,12 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
     defer delete(gbuffer_world_pos_frag)
     gbuffer_world_normals_frag := load_file("shaders/gbuffer_world_normals.frag.spv", context.allocator)
     defer delete(gbuffer_world_normals_frag)
+    raygen_code := load_file("shaders/raygen.rgen.spv", context.allocator)
+    defer delete(raygen_code)
+    raymiss_code := load_file("shaders/raymiss.rmiss.spv", context.allocator)
+    defer delete(raymiss_code)
+    rayhit_code := load_file("shaders/rayhit.rchit.spv", context.allocator)
+    defer delete(rayhit_code)
 
     {
         shader_cis := [?]vk.ShaderCreateInfoEXT {
@@ -745,6 +754,112 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
         res.gbuffer_world_normals = shaders[6]
     }
 
+    // RT
+    SHADER_UNUSED :: ~u32(0)
+
+    raygen_shader: vk.ShaderModule
+    raymiss_shader: vk.ShaderModule
+    rayhit_shader: vk.ShaderModule
+
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(raygen_code),
+            pCode = auto_cast raw_data(raygen_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raygen_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(raymiss_code),
+            pCode = auto_cast raw_data(raymiss_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raymiss_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(rayhit_code),
+            pCode = auto_cast raw_data(rayhit_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &rayhit_shader))
+    }
+
+    {
+        pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+        }
+        vk_check(vk.CreatePipelineLayout(device, &pipeline_layout_ci, nil, &res.rt_pipeline_layout))
+    }
+
+    rt_pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
+        sType = .RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+        flags = {},
+        stageCount = 3,
+        pStages = raw_data([]vk.PipelineShaderStageCreateInfo {
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .RAYGEN_KHR },
+                module = raygen_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .MISS_KHR },
+                module = raymiss_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .CLOSEST_HIT_KHR },
+                module = rayhit_shader,
+                pName = "main"
+            },
+        }),
+        groupCount = 1,
+        pGroups = raw_data([]vk.RayTracingShaderGroupCreateInfoKHR {
+            {  // Raygen group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 0,
+                closestHitShader = SHADER_UNUSED,
+                anyHitShader = SHADER_UNUSED,
+                intersectionShader = SHADER_UNUSED,
+            },
+            {  // Miss group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 1,
+                closestHitShader = SHADER_UNUSED,
+                anyHitShader = SHADER_UNUSED,
+                intersectionShader = SHADER_UNUSED,
+            },
+            {  // Triangles hit group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .TRIANGLES_HIT_GROUP,
+                generalShader = SHADER_UNUSED,
+                closestHitShader = 2,
+                anyHitShader = SHADER_UNUSED,
+                intersectionShader = SHADER_UNUSED,
+            }
+        }),
+        maxPipelineRayRecursionDepth = 1,
+        pLibraryInfo = nil,
+        pLibraryInterface = nil,
+        pDynamicState = nil,
+        layout = res.rt_pipeline_layout,
+        basePipelineHandle = cast(vk.Pipeline) 0,
+        basePipelineIndex = 0,
+    }
+    vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &rt_pipeline_ci, nil, &res.rt_pipeline))
+
     return res
 }
 
@@ -767,6 +882,10 @@ Shaders :: struct
     uv_space: vk.ShaderEXT,
     gbuffer_world_pos: vk.ShaderEXT,
     gbuffer_world_normals: vk.ShaderEXT,
+
+    // RT
+    rt_pipeline_layout: vk.PipelineLayout,
+    rt_pipeline: vk.Pipeline,
 }
 
 render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, ubo: Buffer, swapchain: Swapchain, shaders: Shaders, scene: Scene)
@@ -1836,4 +1955,9 @@ get_buffer_device_address :: proc(using ctx: ^Vk_Ctx, buffer: Buffer) -> vk.Devi
         buffer = buffer.buf
     }
     return vk.GetBufferDeviceAddress(device, &info)
+}
+
+build_lightmap :: proc(using ctx: ^Vk_Ctx, scene: Scene, shaders: Shaders)
+{
+
 }
