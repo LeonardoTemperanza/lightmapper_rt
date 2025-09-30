@@ -5,9 +5,9 @@
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, rgba32f) uniform image2D outputImage;
 
-struct Payload {
+struct Payload
+{
     vec3 color;
-    int hit;
 };
 
 layout(location = 0) rayPayloadEXT Payload payload;
@@ -22,9 +22,8 @@ void main()
     vec3 dir = normalize(vec3(uv - 0.5, 1.0));
 
     payload.color = vec3(0);
-    payload.hit = 0;
 
     traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, origin, 0.001, dir, 10000.0, 0);
-    vec3 result = payload.hit == 1 ? payload.color : vec3(0.1, 0.1, 0.1);
+    vec3 result = payload.color;
     imageStore(outputImage, pixel, vec4(result, 1.0));
 }

@@ -51,6 +51,8 @@ Vk_Ctx :: struct
     device: vk.Device,
     queue: vk.Queue,
     queue_family_idx: u32,
+    rt_handle_alignment: u32,
+    rt_handle_size: u32,
 }
 
 Vulkan_Per_Frame :: struct
@@ -90,7 +92,7 @@ main :: proc()
         .HIGH_PIXEL_DENSITY,
         .VULKAN,
     }
-    window := sdl.CreateWindow("Lightmapper Example", 1700, 1024, window_flags)
+    window := sdl.CreateWindow("Lightmapper RT Example", 1800, 1800, window_flags)
     ensure(window != nil)
 
     vk.load_proc_addresses_global(cast(rawptr) sdl.Vulkan_GetVkGetInstanceProcAddr())
@@ -131,6 +133,9 @@ main :: proc()
     max_delta_time: f32 = 1.0 / 10.0  // 10fps
 
     build_lightmap(&vk_ctx, scene, shaders)
+
+     // TODO TODO TODO TODO TODO
+    rt_test(&vk_ctx, shaders, vk_frames[0], vk.Image(0)) // TODO TODO TODO
 
     for
     {
@@ -395,6 +400,7 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
         vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        vk.EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,
     }
 
     next: rawptr
@@ -453,11 +459,31 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
     queue: vk.Queue
     vk.GetDeviceQueue(device, queue_family_idx, 0, &queue)
 
+    // Useful constants
+    rt_handle_alignment: u32
+    rt_handle_size: u32
+    {
+        rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
+            sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
+        }
+        properties := vk.PhysicalDeviceProperties2 {
+            sType = .PHYSICAL_DEVICE_PROPERTIES_2,
+            pNext = &rt_properties
+        }
+
+        vk.GetPhysicalDeviceProperties2(chosen_phys_device, &properties)
+
+        rt_handle_alignment = rt_properties.shaderGroupHandleAlignment
+        rt_handle_size      = rt_properties.shaderGroupHandleSize
+    }
+
     return {
         phys_device = chosen_phys_device,
         device = device,
         queue = queue,
         queue_family_idx = queue_family_idx,
+        rt_handle_alignment = rt_handle_alignment,
+        rt_handle_size = rt_handle_size,
     }
 }
 
@@ -860,6 +886,16 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
     }
     vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &rt_pipeline_ci, nil, &res.rt_pipeline))
 
+    // Raytracing resources
+    {
+        // Shader Binding Table
+        group_count := u32(3)
+        size := group_count * rt_handle_size
+        shader_handle_storage := make([]byte, size, allocator = context.temp_allocator)
+        vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, res.rt_pipeline, 0, group_count, int(size), &shader_handle_storage))
+        res.sbt_buf = create_sbt_buffer(ctx, shader_handle_storage, group_count)
+    }
+
     return res
 }
 
@@ -886,6 +922,7 @@ Shaders :: struct
     // RT
     rt_pipeline_layout: vk.PipelineLayout,
     rt_pipeline: vk.Pipeline,
+    sbt_buf: Buffer
 }
 
 render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, ubo: Buffer, swapchain: Swapchain, shaders: Shaders, scene: Scene)
@@ -975,19 +1012,20 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, ubo: Buffer,
     vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_LIST)
     vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
 
+    vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
+    vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
     vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
     sample_mask := vk.SampleMask(1)
     vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
     vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
 
     vk.CmdSetPolygonModeEXT(cmd_buf, .FILL)
-    //vk.CmdSetCullMode(cmd_buf, { .BACK })
     vk.CmdSetCullMode(cmd_buf, {})
     vk.CmdSetFrontFace(cmd_buf, .COUNTER_CLOCKWISE)
 
     vk.CmdSetDepthCompareOp(cmd_buf, .LESS)
-    vk.CmdSetDepthTestEnable(cmd_buf, true)
-    vk.CmdSetDepthWriteEnable(cmd_buf, true)
+    vk.CmdSetDepthTestEnable(cmd_buf, false)
+    vk.CmdSetDepthWriteEnable(cmd_buf, false)
     vk.CmdSetDepthBiasEnable(cmd_buf, false)
     vk.CmdSetDepthClipEnableEXT(cmd_buf, true)
 
@@ -1034,30 +1072,43 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, ubo: Buffer,
 
         vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
     }
+}
 
-    /*
-    for instance, i in scene.instances
-    {
-        mesh := scene.meshes[instance.mesh_idx]
-        offset := vk.DeviceSize(0)
-        vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.verts_gpu.buf, &offset)
-        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.buf, 0, .UINT32)
+rt_test :: proc(using ctx: ^Vk_Ctx, shaders: Shaders, frame: Vulkan_Per_Frame, target_texture: vk.Image)
+{
+    cmd_buf := frame.cmd_buf
 
-        Push :: struct {
-            model_to_world: matrix[4, 4]f32,
-            world_to_view: matrix[4, 4]f32,
-            view_to_proj: matrix[4, 4]f32,
-        }
-        push := Push {
-            model_to_world = instance.transform,
-            world_to_view = world_to_view,
-            view_to_proj = linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false),
-        }
-        vk.CmdPushConstants(cmd_buf, shaders.pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push.model_to_world), &push)
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT }
+    }))
 
-        vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
+    vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline)
+
+    //vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &descriptor_set, 0, nil)
+
+    sbt_addr := u64(get_buffer_device_address(ctx, shaders.sbt_buf))
+
+    raygen_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_handle_alignment)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
     }
-    */
+    raymiss_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_handle_alignment)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    rayhit_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_handle_alignment)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    callable_region := vk.StridedDeviceAddressRegionKHR {}
+
+    vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, 1800, 1800, 1)
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
 }
 
 compute_world_to_view :: proc() -> matrix[4, 4]f32
@@ -1264,10 +1315,30 @@ xform_to_mat :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4
            #force_inline linalg.matrix4_scale(scale))
 }
 
+create_sbt_buffer :: proc(using ctx: ^Vk_Ctx, shader_handle_storage: []byte, num_groups: u32) -> Buffer
+{
+    assert(auto_cast len(shader_handle_storage) == rt_handle_size * num_groups)
+    size := num_groups * rt_handle_alignment
+
+    staging_buf := create_buffer(ctx, 1, size, { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
+    defer destroy_buffer(ctx, &staging_buf)
+
+    data: rawptr
+    vk.MapMemory(device, staging_buf.mem, 0, size, {}, &data)
+    for i in 0..<num_groups {
+        mem.copy(uintptr(data) + i * rt_handle_alignment, &shader_handle_storage[i * rt_handle_size], rt_handle_size)
+    }
+    mem.copy(data, raw_data(verts), cast(int) size)
+    vk.UnmapMemory(device, staging_buf.mem)
+
+    res := create_buffer(ctx, size_of(verts[0]), len(verts), { .VERTEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    copy_buffer(ctx, staging_buf, res, size)
+
+    return res
+}
+
 create_vertex_buffer :: proc(using ctx: ^Vk_Ctx, verts: []$T) -> Buffer
 {
-    //res.length = len(verts)
-    //res.size =
     size := cast(vk.DeviceSize) (len(verts) * size_of(verts[0]))
 
     staging_buf := create_buffer(ctx, size_of(verts[0]), len(verts), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
@@ -1286,8 +1357,6 @@ create_vertex_buffer :: proc(using ctx: ^Vk_Ctx, verts: []$T) -> Buffer
 
 create_index_buffer :: proc(using ctx: ^Vk_Ctx, indices: []u32) -> Buffer
 {
-    //res.length = len(verts)
-    //res.size =
     size := cast(vk.DeviceSize) (len(indices) * size_of(indices[0]))
 
     staging_buf := create_buffer(ctx, size_of(indices[0]), len(indices), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
