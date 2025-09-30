@@ -17,6 +17,9 @@ void main()
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
 
+    imageStore(outputImage, pixel, vec4(1.0f, 0.0f, 1.0f, 1.0f));
+
+    /*
     vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
     vec3 origin = vec3(0, 0, -5);
     vec3 dir = normalize(vec3(uv - 0.5, 1.0));
@@ -26,4 +29,5 @@ void main()
     traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, origin, 0.001, dir, 10000.0, 0);
     vec3 result = payload.color;
     imageStore(outputImage, pixel, vec4(result, 1.0));
+    */
 }

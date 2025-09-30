@@ -53,6 +53,7 @@ Vk_Ctx :: struct
     queue_family_idx: u32,
     rt_handle_alignment: u32,
     rt_handle_size: u32,
+    rt_base_align: u32,
 }
 
 Vulkan_Per_Frame :: struct
@@ -72,6 +73,14 @@ Swapchain :: struct
     image_views: []vk.ImageView,
     present_semaphores: []vk.Semaphore,
 }
+
+GBuffers :: struct
+{
+    world_pos: Image,
+    world_normals: Image,
+}
+
+LIGHTMAP_SIZE :: 4096
 
 main :: proc()
 {
@@ -134,8 +143,48 @@ main :: proc()
 
     build_lightmap(&vk_ctx, scene, shaders)
 
-     // TODO TODO TODO TODO TODO
-    rt_test(&vk_ctx, shaders, vk_frames[0], vk.Image(0)) // TODO TODO TODO
+    desc_pool_ci := vk.DescriptorPoolCreateInfo {
+        sType = .DESCRIPTOR_POOL_CREATE_INFO,
+        flags = { .FREE_DESCRIPTOR_SET },
+        maxSets = 1,
+        poolSizeCount = 2,
+        pPoolSizes = raw_data([]vk.DescriptorPoolSize {
+            {
+                type = .ACCELERATION_STRUCTURE_KHR,
+                descriptorCount = 1
+            },
+            {
+                type = .STORAGE_IMAGE,
+                descriptorCount = 1,
+            }
+        })
+    }
+    desc_pool: vk.DescriptorPool
+    vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &desc_pool))
+
+    lightmap := create_image(&vk_ctx, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R16G16B16A16_SFLOAT,
+        extent = {
+            width = LIGHTMAP_SIZE,
+            height = LIGHTMAP_SIZE,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .STORAGE },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &vk_ctx.queue_family_idx,
+        initialLayout = .UNDEFINED,
+    })
+
+    rt_desc_set := create_rt_desc_set(&vk_ctx, scene.tlas.as.handle, lightmap, desc_pool, shaders.rt_desc_set_layout)
+
+    gbuffers := create_gbuffers(&vk_ctx)
 
     for
     {
@@ -185,42 +234,74 @@ main :: proc()
             pImageMemoryBarriers = &transition_to_color_attachment_barrier,
         })
 
-        depth_attachment := vk.RenderingAttachmentInfo {
-            sType = .RENDERING_ATTACHMENT_INFO,
-            imageView = depth_image_view,
-            imageLayout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            loadOp = .CLEAR,
-            storeOp = .STORE,
-            clearValue = {
-                depthStencil = { 1.0, 0.0 }
+        render_gbuffers(&vk_ctx, cmd_buf, gbuffers, shaders, scene)
+
+        // GBUFFERS BARRIERS
+        gbuffers_barriers := []vk.ImageMemoryBarrier2 {
+            {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = gbuffers.world_pos.img,
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
+                newLayout = .GENERAL,
+                srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                dstStageMask = { .RAY_TRACING_SHADER_KHR },
+                dstAccessMask = { .SHADER_READ },
+            },
+            {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = gbuffers.world_normals.img,
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
+                newLayout = .GENERAL,
+                srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                dstStageMask = { .RAY_TRACING_SHADER_KHR },
+                dstAccessMask = { .SHADER_READ },
             },
         }
-        color_attachment := vk.RenderingAttachmentInfo {
-            sType = .RENDERING_ATTACHMENT_INFO,
-            imageView = swapchain.image_views[image_idx],
-            imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
-            loadOp = .CLEAR,
-            storeOp = .STORE,
-            clearValue = {
-                color = { float32 = { 0.8, 0.8, 0.8, 1 } }
-            }
-        }
-        rendering_info := vk.RenderingInfo {
-            sType = .RENDERING_INFO,
-            renderArea = {
-                offset = { 0, 0 },
-                extent = { swapchain.width, swapchain.height }
+        vk.CmdPipelineBarrier2(cmd_buf, &{
+            sType = .DEPENDENCY_INFO,
+            imageMemoryBarrierCount = u32(len(gbuffers_barriers)),
+            pImageMemoryBarriers = raw_data(gbuffers_barriers),
+        })
+
+        // pathtrace(&vk_ctx, cmd_buf, )
+
+        // LIGHTMAP BARRIER
+        lightmap_barriers := []vk.ImageMemoryBarrier2 {
+            {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = gbuffers.world_pos.img,
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
+                newLayout = .GENERAL,
+                srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                dstStageMask = { .RAY_TRACING_SHADER_KHR },
+                dstAccessMask = { .SHADER_READ },
             },
-            layerCount = 1,
-            colorAttachmentCount = 1,
-            pColorAttachments = &color_attachment,
-            pDepthAttachment = &depth_attachment,
         }
-        vk.CmdBeginRendering(cmd_buf, &rendering_info)
+        vk.CmdPipelineBarrier2(cmd_buf, &{
+            sType = .DEPENDENCY_INFO,
+            imageMemoryBarrierCount = u32(len(gbuffers_barriers)),
+            pImageMemoryBarriers = raw_data(gbuffers_barriers),
+        })
 
-        render_scene(&vk_ctx, cmd_buf, vk_frame.ubo, swapchain, shaders, scene)
-
-        vk.CmdEndRendering(cmd_buf)
+        render_scene(&vk_ctx, cmd_buf, depth_image_view, swapchain.image_views[image_idx], gbuffers, shaders, swapchain, scene)
 
         transition_to_present_src_barrier := vk.ImageMemoryBarrier2 {
             sType = .IMAGE_MEMORY_BARRIER_2,
@@ -299,7 +380,7 @@ create_instance :: proc() -> (vk.Instance, vk.DebugUtilsMessengerEXT)
 
     debug_messenger_ci := vk.DebugUtilsMessengerCreateInfoEXT {
         sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-        messageSeverity = { .WARNING, .ERROR, .INFO },
+        messageSeverity = { .WARNING, .ERROR },
         messageType = { .VALIDATION, .PERFORMANCE },
         pfnUserCallback = vk_debug_callback
     }
@@ -404,38 +485,32 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
     }
 
     next: rawptr
-
     next = &vk.PhysicalDeviceVulkan13Features {
         sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
         pNext = next,
         dynamicRendering = true,
         synchronization2 = true,
     }
-
     next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
         sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
         pNext = next,
         shaderObject = true,
     }
-
     next = &vk.PhysicalDeviceDepthClipEnableFeaturesEXT {
         sType = .PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT,
         pNext = next,
         depthClipEnable = true,
     }
-
     next = &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
         sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
         pNext = next,
         accelerationStructure = true,
     }
-
     next = &vk.PhysicalDeviceRayTracingPipelineFeaturesKHR {
         sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
         pNext = next,
         rayTracingPipeline = true,
     }
-
     next = &vk.PhysicalDeviceBufferDeviceAddressFeatures {
         sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
         pNext = next,
@@ -461,6 +536,7 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
 
     // Useful constants
     rt_handle_alignment: u32
+    rt_base_align: u32
     rt_handle_size: u32
     {
         rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
@@ -474,6 +550,7 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         vk.GetPhysicalDeviceProperties2(chosen_phys_device, &properties)
 
         rt_handle_alignment = rt_properties.shaderGroupHandleAlignment
+        rt_base_align       = rt_properties.shaderGroupBaseAlignment
         rt_handle_size      = rt_properties.shaderGroupHandleSize
     }
 
@@ -483,6 +560,7 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         queue = queue,
         queue_family_idx = queue_family_idx,
         rt_handle_alignment = rt_handle_alignment,
+        rt_base_align = rt_base_align,
         rt_handle_size = rt_handle_size,
     }
 }
@@ -816,8 +894,32 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
     }
 
     {
+        rt_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = {},
+            bindingCount = 2,
+            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .ACCELERATION_STRUCTURE_KHR,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 1,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+            })
+        }
+        vk_check(vk.CreateDescriptorSetLayout(device, &rt_desc_set_layout_ci, nil, &res.rt_desc_set_layout))
+
         pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
             sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            flags = {},
+            setLayoutCount = 1,
+            pSetLayouts = &res.rt_desc_set_layout
         }
         vk_check(vk.CreatePipelineLayout(device, &pipeline_layout_ci, nil, &res.rt_pipeline_layout))
     }
@@ -849,7 +951,7 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
                 pName = "main"
             },
         }),
-        groupCount = 1,
+        groupCount = 3,
         pGroups = raw_data([]vk.RayTracingShaderGroupCreateInfoKHR {
             {  // Raygen group
                 sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
@@ -892,7 +994,7 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
         group_count := u32(3)
         size := group_count * rt_handle_size
         shader_handle_storage := make([]byte, size, allocator = context.temp_allocator)
-        vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, res.rt_pipeline, 0, group_count, int(size), &shader_handle_storage))
+        vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, res.rt_pipeline, 0, group_count, int(size), raw_data(shader_handle_storage)))
         res.sbt_buf = create_sbt_buffer(ctx, shader_handle_storage, group_count)
     }
 
@@ -921,30 +1023,50 @@ Shaders :: struct
 
     // RT
     rt_pipeline_layout: vk.PipelineLayout,
+    rt_desc_set_layout: vk.DescriptorSetLayout,
     rt_pipeline: vk.Pipeline,
     sbt_buf: Buffer
 }
 
-render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, ubo: Buffer, swapchain: Swapchain, shaders: Shaders, scene: Scene)
+render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, gbuffers: GBuffers, shaders: Shaders, swapchain: Swapchain, scene: Scene)
 {
-    when false
-    {
-        shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
-        to_bind := [2]vk.ShaderEXT { shaders.model_to_proj, shaders.lit }
-        vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+    depth_attachment := vk.RenderingAttachmentInfo {
+        sType = .RENDERING_ATTACHMENT_INFO,
+        imageView = depth_view,
+        imageLayout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        loadOp = .CLEAR,
+        storeOp = .STORE,
+        clearValue = {
+            depthStencil = { 1.0, 0.0 }
+        },
     }
-    else when false
-    {
-        shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
-        to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_pos }
-        vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+    color_attachment := vk.RenderingAttachmentInfo {
+        sType = .RENDERING_ATTACHMENT_INFO,
+        imageView = color_view,
+        imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+        loadOp = .CLEAR,
+        storeOp = .STORE,
+        clearValue = {
+            color = { float32 = { 0.8, 0.8, 0.8, 1 } }
+        }
     }
-    else
-    {
-        shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
-        to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_normals }
-        vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+    rendering_info := vk.RenderingInfo {
+        sType = .RENDERING_INFO,
+        renderArea = {
+            offset = { 0, 0 },
+            extent = { swapchain.width, swapchain.height }
+        },
+        layerCount = 1,
+        colorAttachmentCount = 1,
+        pColorAttachments = &color_attachment,
+        pDepthAttachment = &depth_attachment,
     }
+
+    vk.CmdBeginRendering(cmd_buf, &rendering_info)
+
+    shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
+    to_bind := [2]vk.ShaderEXT { shaders.model_to_proj, shaders.lit }
+    vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
 
     viewport := vk.Viewport {
         width = f32(swapchain.width),
@@ -1012,20 +1134,19 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, ubo: Buffer,
     vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_LIST)
     vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
 
-    vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
-    vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
+    vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .DISABLED)
     vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
     sample_mask := vk.SampleMask(1)
     vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
     vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
 
     vk.CmdSetPolygonModeEXT(cmd_buf, .FILL)
-    vk.CmdSetCullMode(cmd_buf, {})
+    vk.CmdSetCullMode(cmd_buf, { .BACK })
     vk.CmdSetFrontFace(cmd_buf, .COUNTER_CLOCKWISE)
 
     vk.CmdSetDepthCompareOp(cmd_buf, .LESS)
-    vk.CmdSetDepthTestEnable(cmd_buf, false)
-    vk.CmdSetDepthWriteEnable(cmd_buf, false)
+    vk.CmdSetDepthTestEnable(cmd_buf, true)
+    vk.CmdSetDepthWriteEnable(cmd_buf, true)
     vk.CmdSetDepthBiasEnable(cmd_buf, false)
     vk.CmdSetDepthClipEnableEXT(cmd_buf, true)
 
@@ -1072,9 +1193,231 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, ubo: Buffer,
 
         vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
     }
+
+    vk.CmdEndRendering(cmd_buf)
 }
 
-rt_test :: proc(using ctx: ^Vk_Ctx, shaders: Shaders, frame: Vulkan_Per_Frame, target_texture: vk.Image)
+render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers, shaders: Shaders, scene: Scene)
+{
+    // World pos
+    {
+        color_attachment := vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView = gbuffers.world_pos.view,
+            imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+            loadOp = .CLEAR,
+            storeOp = .STORE,
+            clearValue = {
+                color = { float32 = { 0.8, 0.8, 0.8, 1 } }
+            }
+        }
+        rendering_info := vk.RenderingInfo {
+            sType = .RENDERING_INFO,
+            renderArea = {
+                offset = { 0, 0 },
+                extent = { gbuffers.world_pos.width, gbuffers.world_pos.height }
+            },
+            layerCount = 1,
+            colorAttachmentCount = 1,
+            pColorAttachments = &color_attachment,
+            pDepthAttachment = nil,
+        }
+
+        vk.CmdBeginRendering(cmd_buf, &rendering_info)
+        defer vk.CmdEndRendering(cmd_buf)
+
+        shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
+        to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_pos }
+        vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+
+        viewport := vk.Viewport {
+            width = f32(gbuffers.world_pos.width),
+            height = f32(gbuffers.world_pos.height),
+            minDepth = 0.0,
+            maxDepth = 1.0,
+        }
+        vk.CmdSetViewportWithCount(cmd_buf, 1, &viewport)
+        scissor := vk.Rect2D {
+            extent = {
+                width = gbuffers.world_pos.width,
+                height = gbuffers.world_pos.height,
+            }
+        }
+        vk.CmdSetScissorWithCount(cmd_buf, 1, &scissor)
+        vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
+
+        vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
+            {  // Positions
+                sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+                binding = 0,
+                stride = size_of([3]f32),
+                inputRate = .VERTEX,
+                divisor = 1,
+            },
+            {  // Normals
+                sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+                binding = 1,
+                stride = size_of([3]f32),
+                inputRate = .VERTEX,
+                divisor = 1,
+            },
+            {  // Lightmap UVs
+                sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+                binding = 2,
+                stride = size_of([2]f32),
+                inputRate = .VERTEX,
+                divisor = 1,
+            },
+        }
+        vert_attributes := [?]vk.VertexInputAttributeDescription2EXT {
+            {
+                sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+                location = 0,
+                binding = 0,
+                format = .R32G32B32_SFLOAT,
+                offset = 0
+            },
+            {
+                sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+                location = 1,
+                binding = 1,
+                format = .R32G32B32_SFLOAT,
+                offset = 0
+            },
+            {
+                sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+                location = 2,
+                binding = 2,
+                format = .R32G32_SFLOAT,
+                offset = 0
+            },
+        }
+        vk.CmdSetVertexInputEXT(cmd_buf, len(vert_input_bindings), &vert_input_bindings[0], len(vert_attributes), &vert_attributes[0])
+        vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_LIST)
+        vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
+
+        vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
+        vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
+        vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
+        sample_mask := vk.SampleMask(1)
+        vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
+        vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
+
+        vk.CmdSetPolygonModeEXT(cmd_buf, .FILL)
+        vk.CmdSetCullMode(cmd_buf, {})
+        vk.CmdSetFrontFace(cmd_buf, .COUNTER_CLOCKWISE)
+
+        vk.CmdSetDepthCompareOp(cmd_buf, .LESS)
+        vk.CmdSetDepthTestEnable(cmd_buf, false)
+        vk.CmdSetDepthWriteEnable(cmd_buf, false)
+        vk.CmdSetDepthBiasEnable(cmd_buf, false)
+        vk.CmdSetDepthClipEnableEXT(cmd_buf, true)
+
+        vk.CmdSetStencilTestEnable(cmd_buf, false)
+        b32_false := b32(false)
+        vk.CmdSetColorBlendEnableEXT(cmd_buf, 0, 1, &b32_false)
+
+        color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
+        vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
+
+        render_viewport_aspect_ratio := f32(1.0)
+
+        world_to_view := compute_world_to_view()
+        view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false)
+
+    //    for instance, i in scene.instances
+        instance := scene.instances[30]
+        loop: {
+            mesh := scene.meshes[instance.mesh_idx]
+
+            if !mesh.lm_uvs_present { break loop }
+
+            offset := vk.DeviceSize(0)
+            vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.buf, &offset)
+            vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.buf, &offset)
+            if mesh.lm_uvs_present {
+                vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.buf, &offset)
+            }
+            vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.buf, 0, .UINT32)
+
+            Push :: struct {
+                model_to_world: matrix[4, 4]f32,
+                normal_mat: matrix[4, 4]f32,
+                world_to_view: matrix[4, 4]f32,
+                view_to_proj: matrix[4, 4]f32,
+            }
+            push := Push {
+                model_to_world = instance.transform,
+                normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
+                world_to_view = world_to_view,
+                view_to_proj = view_to_proj,
+            }
+            vk.CmdPushConstants(cmd_buf, shaders.pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
+
+            vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
+        }
+    }
+
+    // World normal
+    {
+        shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
+        to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_normals }
+        vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+    }
+}
+
+create_rt_desc_set :: proc(using ctx: ^Vk_Ctx, tlas: vk.AccelerationStructureKHR, output_texture: Image, pool: vk.DescriptorPool, layout: vk.DescriptorSetLayout) -> vk.DescriptorSet
+{
+    desc_set_ai := vk.DescriptorSetAllocateInfo {
+        sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+        descriptorPool = pool,
+        descriptorSetCount = 1,
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { layout })
+    }
+
+    desc_set: vk.DescriptorSet
+    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &desc_set))
+
+    update_rt_desc_set(ctx, desc_set, tlas, output_texture)
+
+    return desc_set
+}
+
+update_rt_desc_set :: proc(using ctx: ^Vk_Ctx, to_update: vk.DescriptorSet, tlas: vk.AccelerationStructureKHR, output_texture: Image)
+{
+    as_info := vk.WriteDescriptorSetAccelerationStructureKHR {
+        sType = .WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+        accelerationStructureCount = 1,
+        pAccelerationStructures = raw_data([]vk.AccelerationStructureKHR { tlas })
+    }
+
+    writes := []vk.WriteDescriptorSet {
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = .ACCELERATION_STRUCTURE_KHR,
+            pNext = &as_info,
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 1,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_IMAGE,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = output_texture.view,
+                    imageLayout = .GENERAL,
+                }
+            })
+        }
+    }
+    vk.UpdateDescriptorSets(device, 2, raw_data(writes), 0, nil)
+}
+
+rt_test :: proc(using ctx: ^Vk_Ctx, shaders: Shaders, frame: Vulkan_Per_Frame, desc_set: vk.DescriptorSet)
 {
     cmd_buf := frame.cmd_buf
 
@@ -1085,22 +1428,23 @@ rt_test :: proc(using ctx: ^Vk_Ctx, shaders: Shaders, frame: Vulkan_Per_Frame, t
 
     vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline)
 
-    //vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &descriptor_set, 0, nil)
+    tmp := desc_set
+    vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
 
     sbt_addr := u64(get_buffer_device_address(ctx, shaders.sbt_buf))
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_handle_alignment)),
+        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_base_align)),
         stride = vk.DeviceSize(rt_handle_alignment),
         size = vk.DeviceSize(rt_handle_alignment),
     }
     raymiss_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_handle_alignment)),
+        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_base_align)),
         stride = vk.DeviceSize(rt_handle_alignment),
         size = vk.DeviceSize(rt_handle_alignment),
     }
     rayhit_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_handle_alignment)),
+        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_base_align)),
         stride = vk.DeviceSize(rt_handle_alignment),
         size = vk.DeviceSize(rt_handle_alignment),
     }
@@ -1318,21 +1662,23 @@ xform_to_mat :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4
 create_sbt_buffer :: proc(using ctx: ^Vk_Ctx, shader_handle_storage: []byte, num_groups: u32) -> Buffer
 {
     assert(auto_cast len(shader_handle_storage) == rt_handle_size * num_groups)
-    size := num_groups * rt_handle_alignment
 
-    staging_buf := create_buffer(ctx, 1, size, { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
+    size := num_groups * rt_base_align
+    staging_buf := create_buffer(ctx, 1, int(size), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
     defer destroy_buffer(ctx, &staging_buf)
 
     data: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, size, {}, &data)
-    for i in 0..<num_groups {
-        mem.copy(uintptr(data) + i * rt_handle_alignment, &shader_handle_storage[i * rt_handle_size], rt_handle_size)
+    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
+    for group_idx in 0..<num_groups
+    {
+        mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_base_align)),
+                 &shader_handle_storage[group_idx * rt_handle_size],
+                 int(rt_handle_size))
     }
-    mem.copy(data, raw_data(verts), cast(int) size)
     vk.UnmapMemory(device, staging_buf.mem)
 
-    res := create_buffer(ctx, size_of(verts[0]), len(verts), { .VERTEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-    copy_buffer(ctx, staging_buf, res, size)
+    res := create_buffer(ctx, 1, int(size), { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    copy_buffer(ctx, staging_buf, res, vk.DeviceSize(size))
 
     return res
 }
@@ -1379,6 +1725,15 @@ Buffer :: struct
     mem: vk.DeviceMemory,
 }
 
+Image :: struct
+{
+    img: vk.Image,
+    mem: vk.DeviceMemory,
+    view: vk.ImageView,
+    width: u32,
+    height: u32,
+}
+
 create_buffer :: proc(using ctx: ^Vk_Ctx, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
 {
     res: Buffer
@@ -1394,15 +1749,14 @@ create_buffer :: proc(using ctx: ^Vk_Ctx, el_size: int, count: int, usage: vk.Bu
     mem_requirements: vk.MemoryRequirements
     vk.GetBufferMemoryRequirements(device, res.buf, &mem_requirements)
 
-    next: rawptr
+    alloc_info := vk.MemoryAllocateFlagsInfo {
+        sType = .MEMORY_ALLOCATE_FLAGS_INFO,
+        flags = allocate_flags,
+    }
 
-    if allocate_flags != {}
-    {
-        next = &vk.MemoryAllocateFlagsInfo {
-            sType = .MEMORY_ALLOCATE_FLAGS_INFO,
-            pNext = next,
-            flags = allocate_flags,
-        }
+    next: rawptr
+    if allocate_flags != {} {
+        next = &alloc_info
     }
 
     memory_ai := vk.MemoryAllocateInfo {
@@ -1469,6 +1823,95 @@ destroy_buffer :: proc(using ctx: ^Vk_Ctx, buf: ^Buffer)
     vk.DestroyBuffer(device, buf.buf, nil)
 
     buf^ = {}
+}
+
+create_image :: proc(using ctx: ^Vk_Ctx, ci: vk.ImageCreateInfo) -> Image
+{
+    res: Image
+
+    image_ci := ci
+    vk_check(vk.CreateImage(device, &image_ci, nil, &res.img))
+
+    mem_requirements: vk.MemoryRequirements
+    vk.GetImageMemoryRequirements(device, res.img, &mem_requirements)
+
+    // Create image memory
+    memory_ai := vk.MemoryAllocateInfo {
+        sType = .MEMORY_ALLOCATE_INFO,
+        allocationSize = mem_requirements.size,
+        memoryTypeIndex = find_mem_type(ctx, mem_requirements.memoryTypeBits, { })
+    }
+    vk_check(vk.AllocateMemory(device, &memory_ai, nil, &res.mem))
+    vk.BindImageMemory(device, res.img, res.mem, 0)
+
+    // Perform transition to LAYOUT_GENERAL
+    {
+        cmd_pool_ci := vk.CommandPoolCreateInfo {
+            sType = .COMMAND_POOL_CREATE_INFO,
+            queueFamilyIndex = queue_family_idx,
+            flags = { .TRANSIENT }
+        }
+        cmd_pool: vk.CommandPool
+        vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+        defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+        cmd_buf_ai := vk.CommandBufferAllocateInfo {
+            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+            commandPool = cmd_pool,
+            level = .PRIMARY,
+            commandBufferCount = 1,
+        }
+        cmd_buf: vk.CommandBuffer
+        vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+        defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+        cmd_buf_bi := vk.CommandBufferBeginInfo {
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            flags = { .ONE_TIME_SUBMIT },
+        }
+        vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+        transition_to_general_barrier := vk.ImageMemoryBarrier2 {
+            sType = .IMAGE_MEMORY_BARRIER_2,
+            image = res.img,
+            subresourceRange = {
+                aspectMask = { .COLOR },
+                levelCount = 1,
+                layerCount = 1,
+            },
+            oldLayout = .UNDEFINED,
+            newLayout = .GENERAL,
+            srcStageMask = { .ALL_COMMANDS },
+            srcAccessMask = { .MEMORY_READ },
+            dstStageMask = { .RAY_TRACING_SHADER_KHR },
+            dstAccessMask = { .SHADER_WRITE, .SHADER_READ },
+        }
+        vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
+            sType = .DEPENDENCY_INFO,
+            imageMemoryBarrierCount = 1,
+            pImageMemoryBarriers = &transition_to_general_barrier,
+        })
+
+        vk_check(vk.EndCommandBuffer(cmd_buf))
+    }
+
+    // Create view
+    image_view_ci := vk.ImageViewCreateInfo {
+        sType = .IMAGE_VIEW_CREATE_INFO,
+        image = res.img,
+        viewType = .D2,
+        format = image_ci.format,
+        subresourceRange = {
+            aspectMask = { .COLOR },
+            levelCount = 1,
+            layerCount = 1,
+        }
+    }
+    vk_check(vk.CreateImageView(device, &image_view_ci, nil, &res.view))
+
+    res.width = ci.extent.width
+    res.height = ci.extent.height
+    return res
 }
 
 find_mem_type :: proc(using ctx: ^Vk_Ctx, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
@@ -1906,8 +2349,6 @@ create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []Instance, meshes: []Mesh) -
             flags = .TRIANGLE_FACING_CULL_DISABLE,
             accelerationStructureReference = u64(meshes[instance.mesh_idx].blas.addr)
         }
-
-        fmt.println(vk_instance.flags)
     }
 
     instances_buf := create_buffer(ctx, size_of(vk_instances[0]), len(vk_instances), { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
@@ -2029,4 +2470,52 @@ get_buffer_device_address :: proc(using ctx: ^Vk_Ctx, buffer: Buffer) -> vk.Devi
 build_lightmap :: proc(using ctx: ^Vk_Ctx, scene: Scene, shaders: Shaders)
 {
 
+}
+
+create_gbuffers :: proc(using ctx: ^Vk_Ctx) -> GBuffers
+{
+    world_pos := create_image(ctx, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R32G32B32A32_SFLOAT,
+        extent = {
+            width = 1800,
+            height = 1800,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .STORAGE },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &queue_family_idx,
+        initialLayout = .UNDEFINED,
+    })
+
+    world_normals := create_image(ctx, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R8G8B8A8_UNORM,
+        extent = {
+            width = 1800,
+            height = 1800,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .STORAGE },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &queue_family_idx,
+        initialLayout = .UNDEFINED,
+    })
+
+    return {
+        world_pos,
+        world_normals
+    }
 }
