@@ -7,9 +7,12 @@ layout(location = 2) in vec2 in_lm_uv;
 
 layout(location = 0) out vec4 out_color;
 
+layout(set = 0, binding = 0) uniform sampler2D lightmap;
+
 void main()
 {
     vec3 world_normal = normalize(in_world_normal);
     //out_color = vec4(world_normal * 0.5f + 0.5f, 1);
-    out_color = vec4(in_lm_uv, 0.0f, 1.0f);
+    //out_color = vec4(in_lm_uv, 0.0f, 1.0f);
+    out_color = texture(lightmap, in_lm_uv);
 }

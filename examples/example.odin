@@ -146,16 +146,20 @@ main :: proc()
     desc_pool_ci := vk.DescriptorPoolCreateInfo {
         sType = .DESCRIPTOR_POOL_CREATE_INFO,
         flags = { .FREE_DESCRIPTOR_SET },
-        maxSets = 1,
-        poolSizeCount = 2,
+        maxSets = 50,
+        poolSizeCount = 3,
         pPoolSizes = raw_data([]vk.DescriptorPoolSize {
             {
                 type = .ACCELERATION_STRUCTURE_KHR,
-                descriptorCount = 1
+                descriptorCount = 5,
             },
             {
                 type = .STORAGE_IMAGE,
-                descriptorCount = 1,
+                descriptorCount = 10,
+            },
+            {
+                type = .SAMPLED_IMAGE,
+                descriptorCount = 10,
             }
         })
     }
@@ -175,16 +179,61 @@ main :: proc()
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
-        usage = { .STORAGE },
+        usage = { .STORAGE, .SAMPLED },
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &vk_ctx.queue_family_idx,
         initialLayout = .UNDEFINED,
-    })
+    }, "lightmap")
 
-    rt_desc_set := create_rt_desc_set(&vk_ctx, scene.tlas.as.handle, lightmap, desc_pool, shaders.rt_desc_set_layout)
+
+    // Create linear sampler
+    linear_sampler_ci := vk.SamplerCreateInfo {
+        sType = .SAMPLER_CREATE_INFO,
+        magFilter = .LINEAR,
+        minFilter = .LINEAR,
+        mipmapMode = .LINEAR,
+        addressModeU = .REPEAT,
+        addressModeV = .REPEAT,
+        addressModeW = .REPEAT,
+    }
+
+    linear_sampler: vk.Sampler
+    vk_check(vk.CreateSampler(vk_ctx.device, &linear_sampler_ci, nil, &linear_sampler))
 
     gbuffers := create_gbuffers(&vk_ctx)
+
+    rt_desc_set := create_rt_desc_set(&vk_ctx, scene.tlas.as.handle, lightmap, gbuffers, desc_pool, shaders.rt_desc_set_layout)
+
+    // Create lightmap desc set
+    desc_set_ai := vk.DescriptorSetAllocateInfo {
+        sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+        descriptorPool = desc_pool,
+        descriptorSetCount = 1,
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.lm_desc_set_layout })
+    }
+
+    lm_desc_set: vk.DescriptorSet
+    vk_check(vk.AllocateDescriptorSets(vk_ctx.device, &desc_set_ai, &lm_desc_set))
+
+    // Update lightmap desc set
+    writes := []vk.WriteDescriptorSet {
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = lm_desc_set,
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = .COMBINED_IMAGE_SAMPLER,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = lightmap.view,
+                    imageLayout = .GENERAL,
+                    sampler = linear_sampler,
+                }
+            })
+        }
+    }
+    vk.UpdateDescriptorSets(vk_ctx.device, 1, raw_data(writes), 0, nil)
 
     for
     {
@@ -234,74 +283,145 @@ main :: proc()
             pImageMemoryBarriers = &transition_to_color_attachment_barrier,
         })
 
+        // GBUFFERS BARRIERS
+        {
+            gbuffers_barriers := []vk.ImageMemoryBarrier2 {
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = gbuffers.world_pos.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .UNDEFINED,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .RAY_TRACING_SHADER_KHR },
+                    srcAccessMask = { .SHADER_READ },
+                    dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                    dstAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                },
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = gbuffers.world_normals.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .UNDEFINED,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .RAY_TRACING_SHADER_KHR },
+                    srcAccessMask = { .SHADER_READ },
+                    dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                    dstAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                },
+            }
+            vk.CmdPipelineBarrier2(cmd_buf, &{
+                sType = .DEPENDENCY_INFO,
+                imageMemoryBarrierCount = u32(len(gbuffers_barriers)),
+                pImageMemoryBarriers = raw_data(gbuffers_barriers),
+            })
+        }
+
         render_gbuffers(&vk_ctx, cmd_buf, gbuffers, shaders, scene)
 
         // GBUFFERS BARRIERS
-        gbuffers_barriers := []vk.ImageMemoryBarrier2 {
-            {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                image = gbuffers.world_pos.img,
-                subresourceRange = {
-                    aspectMask = { .COLOR },
-                    levelCount = 1,
-                    layerCount = 1,
+        {
+            gbuffers_barriers := []vk.ImageMemoryBarrier2 {
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = gbuffers.world_pos.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .GENERAL,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                    srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                    dstStageMask = { .RAY_TRACING_SHADER_KHR },
+                    dstAccessMask = { .SHADER_READ },
                 },
-                oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
-                newLayout = .GENERAL,
-                srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
-                dstStageMask = { .RAY_TRACING_SHADER_KHR },
-                dstAccessMask = { .SHADER_READ },
-            },
-            {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                image = gbuffers.world_normals.img,
-                subresourceRange = {
-                    aspectMask = { .COLOR },
-                    levelCount = 1,
-                    layerCount = 1,
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = gbuffers.world_normals.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .GENERAL,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                    srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                    dstStageMask = { .RAY_TRACING_SHADER_KHR },
+                    dstAccessMask = { .SHADER_READ },
                 },
-                oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
-                newLayout = .GENERAL,
-                srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
-                dstStageMask = { .RAY_TRACING_SHADER_KHR },
-                dstAccessMask = { .SHADER_READ },
-            },
+            }
+            vk.CmdPipelineBarrier2(cmd_buf, &{
+                sType = .DEPENDENCY_INFO,
+                imageMemoryBarrierCount = u32(len(gbuffers_barriers)),
+                pImageMemoryBarriers = raw_data(gbuffers_barriers),
+            })
         }
-        vk.CmdPipelineBarrier2(cmd_buf, &{
-            sType = .DEPENDENCY_INFO,
-            imageMemoryBarrierCount = u32(len(gbuffers_barriers)),
-            pImageMemoryBarriers = raw_data(gbuffers_barriers),
-        })
-
-        // pathtrace(&vk_ctx, cmd_buf, )
 
         // LIGHTMAP BARRIER
-        lightmap_barriers := []vk.ImageMemoryBarrier2 {
-            {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                image = gbuffers.world_pos.img,
-                subresourceRange = {
-                    aspectMask = { .COLOR },
-                    levelCount = 1,
-                    layerCount = 1,
+        {
+            lightmap_barrier := []vk.ImageMemoryBarrier2 {
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = lightmap.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .UNDEFINED,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .FRAGMENT_SHADER },
+                    srcAccessMask = { .SHADER_SAMPLED_READ },
+                    dstStageMask = { .RAY_TRACING_SHADER_KHR },
+                    dstAccessMask = { .SHADER_STORAGE_WRITE },
                 },
-                oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
-                newLayout = .GENERAL,
-                srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
-                dstStageMask = { .RAY_TRACING_SHADER_KHR },
-                dstAccessMask = { .SHADER_READ },
-            },
+            }
+            vk.CmdPipelineBarrier2(cmd_buf, &{
+                sType = .DEPENDENCY_INFO,
+                imageMemoryBarrierCount = u32(len(lightmap_barrier)),
+                pImageMemoryBarriers = raw_data(lightmap_barrier),
+            })
         }
-        vk.CmdPipelineBarrier2(cmd_buf, &{
-            sType = .DEPENDENCY_INFO,
-            imageMemoryBarrierCount = u32(len(gbuffers_barriers)),
-            pImageMemoryBarriers = raw_data(gbuffers_barriers),
-        })
 
-        render_scene(&vk_ctx, cmd_buf, depth_image_view, swapchain.image_views[image_idx], gbuffers, shaders, swapchain, scene)
+        pathtrace_iter(&vk_ctx, cmd_buf, rt_desc_set, shaders)
+
+        // LIGHTMAP BARRIER
+        {
+            lightmap_barrier := []vk.ImageMemoryBarrier2 {
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = lightmap.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .GENERAL,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .RAY_TRACING_SHADER_KHR },
+                    srcAccessMask = { .SHADER_STORAGE_WRITE },
+                    dstStageMask = { .FRAGMENT_SHADER },
+                    dstAccessMask = { .SHADER_SAMPLED_READ },
+                },
+            }
+            vk.CmdPipelineBarrier2(cmd_buf, &{
+                sType = .DEPENDENCY_INFO,
+                imageMemoryBarrierCount = u32(len(lightmap_barrier)),
+                pImageMemoryBarriers = raw_data(lightmap_barrier),
+            })
+        }
+
+        render_scene(&vk_ctx, cmd_buf, depth_image_view, swapchain.image_views[image_idx], lm_desc_set, shaders, swapchain, scene)
 
         transition_to_present_src_barrier := vk.ImageMemoryBarrier2 {
             sType = .IMAGE_MEMORY_BARRIER_2,
@@ -734,12 +854,77 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
             size = 256,
         }
     }
-    pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
-        sType = .PIPELINE_LAYOUT_CREATE_INFO,
-        pushConstantRangeCount = u32(len(push_constant_ranges)),
-        pPushConstantRanges = raw_data(push_constant_ranges),
+
+    // Desc set layouts
+    {
+        rt_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = {},
+            bindingCount = 4,
+            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .ACCELERATION_STRUCTURE_KHR,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 1,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 2,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 3,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                }
+            })
+        }
+        vk_check(vk.CreateDescriptorSetLayout(device, &rt_desc_set_layout_ci, nil, &res.rt_desc_set_layout))
+
+        lm_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = {},
+            bindingCount = 1,
+            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .COMBINED_IMAGE_SAMPLER,
+                    descriptorCount = 1,
+                    stageFlags = { .FRAGMENT },
+                },
+            })
+        }
+        vk_check(vk.CreateDescriptorSetLayout(device, &lm_desc_set_layout_ci, nil, &res.lm_desc_set_layout))
     }
-    vk_check(vk.CreatePipelineLayout(device, &pipeline_layout_ci, nil, &res.pipeline_layout))
+
+    // Pipeline layouts
+    {
+        pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            pushConstantRangeCount = u32(len(push_constant_ranges)),
+            pPushConstantRanges = raw_data(push_constant_ranges),
+            setLayoutCount = 1,
+            pSetLayouts = &res.lm_desc_set_layout,
+        }
+        vk_check(vk.CreatePipelineLayout(device, &pipeline_layout_ci, nil, &res.pipeline_layout))
+
+        rt_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            flags = {},
+            setLayoutCount = 1,
+            pSetLayouts = &res.rt_desc_set_layout
+        }
+        vk_check(vk.CreatePipelineLayout(device, &rt_pipeline_layout_ci, nil, &res.rt_pipeline_layout))
+    }
 
     // NOTE: Not using context.temp_allocator because it doesn't guarantee 4 byte alignment,
     // and vulkan requires the alignment of the spirv to be 4 byte.
@@ -764,6 +949,7 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
     rayhit_code := load_file("shaders/rayhit.rchit.spv", context.allocator)
     defer delete(rayhit_code)
 
+    // Create shader objects.
     {
         shader_cis := [?]vk.ShaderCreateInfoEXT {
             {
@@ -799,7 +985,9 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
                 nextStage = { .FRAGMENT },
                 flags = { },
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges)
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 1,
+                pSetLayouts = &res.lm_desc_set_layout
             },
             {
                 sType = .SHADER_CREATE_INFO_EXT,
@@ -811,6 +999,8 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
                 flags = { },
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 1,
+                pSetLayouts = &res.lm_desc_set_layout
             },
             {
                 sType = .SHADER_CREATE_INFO_EXT,
@@ -891,37 +1081,6 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
             pCode = auto_cast raw_data(rayhit_code),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &rayhit_shader))
-    }
-
-    {
-        rt_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags = {},
-            bindingCount = 2,
-            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
-                {
-                    binding = 0,
-                    descriptorType = .ACCELERATION_STRUCTURE_KHR,
-                    descriptorCount = 1,
-                    stageFlags = { .RAYGEN_KHR },
-                },
-                {
-                    binding = 1,
-                    descriptorType = .STORAGE_IMAGE,
-                    descriptorCount = 1,
-                    stageFlags = { .RAYGEN_KHR },
-                },
-            })
-        }
-        vk_check(vk.CreateDescriptorSetLayout(device, &rt_desc_set_layout_ci, nil, &res.rt_desc_set_layout))
-
-        pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
-            sType = .PIPELINE_LAYOUT_CREATE_INFO,
-            flags = {},
-            setLayoutCount = 1,
-            pSetLayouts = &res.rt_desc_set_layout
-        }
-        vk_check(vk.CreatePipelineLayout(device, &pipeline_layout_ci, nil, &res.rt_pipeline_layout))
     }
 
     rt_pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
@@ -1021,14 +1180,17 @@ Shaders :: struct
     gbuffer_world_pos: vk.ShaderEXT,
     gbuffer_world_normals: vk.ShaderEXT,
 
+    // Desc set layouts
+    lm_desc_set_layout: vk.DescriptorSetLayout,
+    rt_desc_set_layout: vk.DescriptorSetLayout,
+
     // RT
     rt_pipeline_layout: vk.PipelineLayout,
-    rt_desc_set_layout: vk.DescriptorSetLayout,
     rt_pipeline: vk.Pipeline,
-    sbt_buf: Buffer
+    sbt_buf: Buffer,
 }
 
-render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, gbuffers: GBuffers, shaders: Shaders, swapchain: Swapchain, scene: Scene)
+render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: Scene)
 {
     depth_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO,
@@ -1157,6 +1319,10 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
     color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
     vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
 
+    // Bind textures
+    tmp := lightmap_desc_set
+    vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.pipeline_layout, 0, 1, &tmp, 0, nil)
+
     render_viewport_aspect_ratio := f32(1.0)
 
     world_to_view := compute_world_to_view()
@@ -1208,7 +1374,7 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
             loadOp = .CLEAR,
             storeOp = .STORE,
             clearValue = {
-                color = { float32 = { 0.8, 0.8, 0.8, 1 } }
+                color = { float32 = { 0.0, 0.0, 0.0, 0.0 } }
             }
         }
         rendering_info := vk.RenderingInfo {
@@ -1297,7 +1463,8 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
         vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
 
         vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
-        vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
+        //vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
+        vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, {})
         vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
         sample_mask := vk.SampleMask(1)
         vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
@@ -1366,7 +1533,36 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
     }
 }
 
-create_rt_desc_set :: proc(using ctx: ^Vk_Ctx, tlas: vk.AccelerationStructureKHR, output_texture: Image, pool: vk.DescriptorPool, layout: vk.DescriptorSetLayout) -> vk.DescriptorSet
+pathtrace_iter :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, rt_desc_set: vk.DescriptorSet, shaders: Shaders)
+{
+    vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline)
+
+    tmp := rt_desc_set
+    vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
+
+    sbt_addr := u64(get_buffer_device_address(ctx, shaders.sbt_buf))
+
+    raygen_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_base_align)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    raymiss_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_base_align)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    rayhit_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_base_align)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    callable_region := vk.StridedDeviceAddressRegionKHR {}
+
+    vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, LIGHTMAP_SIZE, LIGHTMAP_SIZE, 1)
+}
+
+create_rt_desc_set :: proc(using ctx: ^Vk_Ctx, tlas: vk.AccelerationStructureKHR, lightmap: Image, gbuffers: GBuffers, pool: vk.DescriptorPool, layout: vk.DescriptorSetLayout) -> vk.DescriptorSet
 {
     desc_set_ai := vk.DescriptorSetAllocateInfo {
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1378,12 +1574,12 @@ create_rt_desc_set :: proc(using ctx: ^Vk_Ctx, tlas: vk.AccelerationStructureKHR
     desc_set: vk.DescriptorSet
     vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &desc_set))
 
-    update_rt_desc_set(ctx, desc_set, tlas, output_texture)
+    update_rt_desc_set(ctx, desc_set, tlas, lightmap, gbuffers)
 
     return desc_set
 }
 
-update_rt_desc_set :: proc(using ctx: ^Vk_Ctx, to_update: vk.DescriptorSet, tlas: vk.AccelerationStructureKHR, output_texture: Image)
+update_rt_desc_set :: proc(using ctx: ^Vk_Ctx, to_update: vk.DescriptorSet, tlas: vk.AccelerationStructureKHR, lightmap: Image, gbuffers: GBuffers)
 {
     as_info := vk.WriteDescriptorSetAccelerationStructureKHR {
         sType = .WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
@@ -1408,13 +1604,39 @@ update_rt_desc_set :: proc(using ctx: ^Vk_Ctx, to_update: vk.DescriptorSet, tlas
             descriptorType = .STORAGE_IMAGE,
             pImageInfo = raw_data([]vk.DescriptorImageInfo {
                 {
-                    imageView = output_texture.view,
+                    imageView = lightmap.view,
+                    imageLayout = .GENERAL,
+                }
+            })
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 2,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_IMAGE,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = gbuffers.world_pos.view,
+                    imageLayout = .GENERAL,
+                }
+            })
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 3,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_IMAGE,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = gbuffers.world_normals.view,
                     imageLayout = .GENERAL,
                 }
             })
         }
     }
-    vk.UpdateDescriptorSets(device, 2, raw_data(writes), 0, nil)
+    vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
 }
 
 rt_test :: proc(using ctx: ^Vk_Ctx, shaders: Shaders, frame: Vulkan_Per_Frame, desc_set: vk.DescriptorSet)
@@ -1450,7 +1672,7 @@ rt_test :: proc(using ctx: ^Vk_Ctx, shaders: Shaders, frame: Vulkan_Per_Frame, d
     }
     callable_region := vk.StridedDeviceAddressRegionKHR {}
 
-    vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, 1800, 1800, 1)
+    vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, LIGHTMAP_SIZE, LIGHTMAP_SIZE, 1)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 }
@@ -1530,7 +1752,7 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
     defer ufbx.free_scene(scene)
     if scene == nil
     {
-        fmt.printf("%s\n", err.description.data)
+        fmt.printfln("%s", err.description.data)
         panic("Failed to load")
     }
 
@@ -1825,12 +2047,14 @@ destroy_buffer :: proc(using ctx: ^Vk_Ctx, buf: ^Buffer)
     buf^ = {}
 }
 
-create_image :: proc(using ctx: ^Vk_Ctx, ci: vk.ImageCreateInfo) -> Image
+create_image :: proc(using ctx: ^Vk_Ctx, ci: vk.ImageCreateInfo, name := "") -> Image
 {
     res: Image
 
     image_ci := ci
     vk_check(vk.CreateImage(device, &image_ci, nil, &res.img))
+
+    fmt.printfln("Created %v: 0x%x", name, res.img)
 
     mem_requirements: vk.MemoryRequirements
     vk.GetImageMemoryRequirements(device, res.img, &mem_requirements)
@@ -2480,19 +2704,19 @@ create_gbuffers :: proc(using ctx: ^Vk_Ctx) -> GBuffers
         imageType = .D2,
         format = .R32G32B32A32_SFLOAT,
         extent = {
-            width = 1800,
-            height = 1800,
+            width = LIGHTMAP_SIZE,
+            height = LIGHTMAP_SIZE,
             depth = 1,
         },
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
-        usage = { .STORAGE },
+        usage = { .COLOR_ATTACHMENT, .STORAGE },
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &queue_family_idx,
         initialLayout = .UNDEFINED,
-    })
+    }, "gbuf_worldpos")
 
     world_normals := create_image(ctx, {
         sType = .IMAGE_CREATE_INFO,
@@ -2500,19 +2724,19 @@ create_gbuffers :: proc(using ctx: ^Vk_Ctx) -> GBuffers
         imageType = .D2,
         format = .R8G8B8A8_UNORM,
         extent = {
-            width = 1800,
-            height = 1800,
+            width = LIGHTMAP_SIZE,
+            height = LIGHTMAP_SIZE,
             depth = 1,
         },
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
-        usage = { .STORAGE },
+        usage = { .COLOR_ATTACHMENT, .STORAGE },
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &queue_family_idx,
         initialLayout = .UNDEFINED,
-    })
+    }, "gbuf_worldnormals")
 
     return {
         world_pos,
