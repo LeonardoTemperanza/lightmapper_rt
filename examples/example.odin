@@ -82,7 +82,9 @@ GBuffers :: struct
 }
 
 LIGHTMAP_SIZE :: 4096
-LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 4
+LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 16
+LIGHTMAP_MIN_INSTANCE_TEXELS :: 64
+LIGHTMAP_MAX_INSTANCE_TEXELS :: 1024
 
 main :: proc()
 {
@@ -1330,9 +1332,8 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
     world_to_view := compute_world_to_view()
     view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false)
 
-//    for instance, i in scene.instances
-    instance := scene.instances[30]
-    loop: {
+    loop: for instance, i in scene.instances {
+    // instance := scene.instances[30]; loop: {
         mesh := scene.meshes[instance.mesh_idx]
 
         if !mesh.lm_uvs_present { break loop }
@@ -1348,14 +1349,16 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
         Push :: struct {
             model_to_world: matrix[4, 4]f32,
             normal_mat: matrix[4, 4]f32,
-            world_to_view: matrix[4, 4]f32,
-            view_to_proj: matrix[4, 4]f32,
+            world_to_proj: matrix[4, 4]f32,
+            lm_uv_offset: [2]f32,
+            lm_uv_scale: f32,
         }
         push := Push {
             model_to_world = instance.transform,
             normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
-            world_to_view = world_to_view,
-            view_to_proj = view_to_proj,
+            world_to_proj = view_to_proj * world_to_view,
+            lm_uv_offset = instance.lm_offset,
+            lm_uv_scale = instance.lm_scale,
         }
         vk.CmdPushConstants(cmd_buf, shaders.pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
 
@@ -1397,22 +1400,6 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
         shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
         to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_pos }
         vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
-
-        viewport := vk.Viewport {
-            width = f32(gbuffers.world_pos.width),
-            height = f32(gbuffers.world_pos.height),
-            minDepth = 0.0,
-            maxDepth = 1.0,
-        }
-        vk.CmdSetViewportWithCount(cmd_buf, 1, &viewport)
-        scissor := vk.Rect2D {
-            extent = {
-                width = gbuffers.world_pos.width,
-                height = gbuffers.world_pos.height,
-            }
-        }
-        vk.CmdSetScissorWithCount(cmd_buf, 1, &scissor)
-        vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
 
         vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
             {  // Positions
@@ -1472,7 +1459,7 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
         vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
 
         vk.CmdSetPolygonModeEXT(cmd_buf, .FILL)
-        vk.CmdSetCullMode(cmd_buf, { .FRONT })
+        vk.CmdSetCullMode(cmd_buf, {})
         vk.CmdSetFrontFace(cmd_buf, .COUNTER_CLOCKWISE)
 
         vk.CmdSetDepthCompareOp(cmd_buf, .LESS)
@@ -1493,12 +1480,33 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
         world_to_view := compute_world_to_view()
         view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false)
 
-    //    for instance, i in scene.instances
-        instance := scene.instances[30]
-        loop: {
+        loop: for instance, i in scene.instances {
+        // instance := scene.instances[30]; loop: {
             mesh := scene.meshes[instance.mesh_idx]
 
             if !mesh.lm_uvs_present { break loop }
+
+            viewport := vk.Viewport {
+                x = f32(LIGHTMAP_SIZE) * instance.lm_offset.x,
+                y = f32(LIGHTMAP_SIZE) * instance.lm_offset.y,
+                width = f32(LIGHTMAP_SIZE) * instance.lm_scale,
+                height = f32(LIGHTMAP_SIZE) * instance.lm_scale,
+                minDepth = 0.0,
+                maxDepth = 1.0,
+            }
+            vk.CmdSetViewportWithCount(cmd_buf, 1, &viewport)
+            scissor := vk.Rect2D {
+                offset = {
+                    x = i32(f32(LIGHTMAP_SIZE) * instance.lm_offset.x),
+                    y = i32(f32(LIGHTMAP_SIZE) * instance.lm_offset.y),
+                },
+                extent = {
+                    width = u32(f32(LIGHTMAP_SIZE) * instance.lm_scale),
+                    height = u32(f32(LIGHTMAP_SIZE) * instance.lm_scale),
+                }
+            }
+            vk.CmdSetScissorWithCount(cmd_buf, 1, &scissor)
+            vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
 
             offset := vk.DeviceSize(0)
             vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.buf, &offset)
@@ -1511,14 +1519,14 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
             Push :: struct {
                 model_to_world: matrix[4, 4]f32,
                 normal_mat: matrix[4, 4]f32,
-                world_to_view: matrix[4, 4]f32,
-                view_to_proj: matrix[4, 4]f32,
+                lm_uv_offset: [2]f32,
+                lm_uv_scale: f32
             }
             push := Push {
                 model_to_world = instance.transform,
                 normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
-                world_to_view = world_to_view,
-                view_to_proj = view_to_proj,
+                lm_uv_offset = instance.lm_offset,
+                lm_uv_scale = instance.lm_scale,
             }
             vk.CmdPushConstants(cmd_buf, shaders.pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
 
@@ -1722,7 +1730,6 @@ Instance :: struct
 {
     transform: matrix[4, 4]f32,
     mesh_idx: u32,
-    fbx_idx: u32,
     lm_idx: u32,
     lm_offset: [2]f32,
     lm_scale: f32,
@@ -1730,6 +1737,9 @@ Instance :: struct
 
 Mesh :: struct
 {
+    indices_cpu: [dynamic]u32,
+    pos_cpu: [dynamic][3]f32,
+
     pos: Buffer,
     normals: Buffer,
     lm_uvs: Buffer,
@@ -1772,16 +1782,17 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
 
         // Indices
         index_count := 3 * fbx_mesh.num_triangles
-        indices := make([]u32, index_count, allocator = context.temp_allocator)
+        indices := make([dynamic]u32, index_count)
         offset := u32(0)
         for i in 0..<fbx_mesh.faces.count
         {
             face := fbx_mesh.faces.data[i]
-            tris := ufbx.catch_triangulate_face(nil, &indices[offset], uint(index_count), fbx_mesh, face)
-            offset += 3 * tris
+            num_tris := ufbx.catch_triangulate_face(nil, &indices[offset], uint(index_count), fbx_mesh, face)
+            offset += 3 * num_tris
         }
 
-        mesh.indices_gpu = create_index_buffer(ctx, indices)
+        mesh.indices_gpu = create_index_buffer(ctx, indices[:])
+        mesh.indices_cpu = indices
 
         // NOTE: uv_set[0] is the same as fbx_mesh.vertex_uv
         // Find the lightmap UVs
@@ -1796,11 +1807,14 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
 
         // Verts
         vertex_count := fbx_mesh.num_indices
-        pos_buf := make([][3]f32, vertex_count, allocator = context.temp_allocator)
+        pos_buf := make([dynamic][3]f32, vertex_count)
         normals_buf := make([][3]f32, vertex_count, allocator = context.temp_allocator)
         lm_uvs_buf := make([][2]f32, vertex_count, allocator = context.temp_allocator)
         for i in 0..<vertex_count
         {
+            assert(i < fbx_mesh.vertex_position.indices.count)
+            assert(fbx_mesh.vertex_position.indices.data[i] < u32(fbx_mesh.vertex_position.values.count))
+
             pos := fbx_mesh.vertex_position.values.data[fbx_mesh.vertex_position.indices.data[i]]
             norm := fbx_mesh.vertex_normal.values.data[fbx_mesh.vertex_normal.indices.data[i]]
             pos_buf[i] = {f32(pos.x), f32(pos.y), f32(pos.z)}
@@ -1812,8 +1826,9 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
             }
         }
 
-        mesh.pos = create_vertex_buffer(ctx, pos_buf)
+        mesh.pos = create_vertex_buffer(ctx, pos_buf[:])
         mesh.normals = create_vertex_buffer(ctx, normals_buf)
+        mesh.pos_cpu = pos_buf
 
         if lightmap_uv_idx == -1 {
             mesh.lm_uvs_present = false
@@ -1837,7 +1852,6 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
         instance := Instance {
             transform = get_node_world_transform(node),
             mesh_idx = node.mesh.element.typed_id,
-            fbx_idx = u32(i)
         }
         append(&res.instances, instance)
     }
@@ -1854,9 +1868,7 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
 
         for instance, i in res.instances
         {
-            node := scene.nodes.data[instance.fbx_idx]
-
-            rect_size := get_instance_lm_size(instance, node)
+            rect_size := get_instance_lm_size(instance, res.meshes[instance.mesh_idx])
 
             rects[i].id = c.int(i)
             rects[i].w = rect_size
@@ -1881,6 +1893,8 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
 
             if all_fit { break }
 
+            fmt.println("Did not all fit!")
+
             remaining_rects: [dynamic]stbrp.Rect
 
             for rect in rects
@@ -1902,9 +1916,27 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
     return res
 }
 
-get_instance_lm_size :: proc(instance: Instance, node: ^ufbx.Node) -> stbrp.Coord
+get_instance_lm_size :: proc(instance: Instance, mesh: Mesh) -> stbrp.Coord
 {
-    return {}
+    res := f32(0.0)
+    for i := 0; i < len(mesh.indices_cpu); i += 3
+    {
+        idx0 := mesh.indices_cpu[i+0]
+        idx1 := mesh.indices_cpu[i+1]
+        idx2 := mesh.indices_cpu[i+2]
+
+        v0 := (instance.transform * v3_to_v4(mesh.pos_cpu[idx0].xyz, 1.0)).xyz
+        v1 := (instance.transform * v3_to_v4(mesh.pos_cpu[idx1].xyz, 1.0)).xyz
+        v2 := (instance.transform * v3_to_v4(mesh.pos_cpu[idx2].xyz, 1.0)).xyz
+
+        area := linalg.length(linalg.cross(v1 - v0, v2 - v0)) / 2.0
+        res += area
+    }
+
+    size := stbrp.Coord(math.ceil(math.sqrt(res) * LIGHTMAP_TEXELS_PER_WORLD_UNIT))
+    size = clamp(size, LIGHTMAP_MIN_INSTANCE_TEXELS, LIGHTMAP_MAX_INSTANCE_TEXELS)
+    fmt.println(size)
+    return size
 }
 
 get_node_world_transform :: proc(node: ^ufbx.Node) -> matrix[4, 4]f32
@@ -2810,4 +2842,11 @@ create_gbuffers :: proc(using ctx: ^Vk_Ctx) -> GBuffers
     }
 }
 
-// Packing lightmap uvs into one texture space.
+v3_to_v4 :: proc(v: [3]f32, w: Maybe(f32) = nil) -> (res: [4]f32)
+{
+    res.xyz = v.xyz
+    if num, ok := w.?; ok {
+        res.w = num
+    }
+    return
+}
