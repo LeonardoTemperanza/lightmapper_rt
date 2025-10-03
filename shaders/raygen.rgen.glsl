@@ -7,6 +7,14 @@ layout(set = 0, binding = 1, rgba16f) uniform image2D lightmap;
 layout(set = 0, binding = 2, rgba32f) uniform image2D gbuf_worldpos;
 layout(set = 0, binding = 3, rgba8) uniform image2D gbuf_worldnormals;
 
+/*
+layout(push_constant) uniform Push
+{
+    uint sbt_offset;
+    uint sbt_stride;
+}
+*/
+
 struct Payload
 {
     vec3 color;
@@ -29,17 +37,23 @@ void main()
         return;
     }
 
-    imageStore(lightmap, pixel, vec4(1.0f, 0.0f, 1.0f, 1.0f));
+    vec4 gbuf_worldnormals_sample = imageLoad(gbuf_worldnormals, pixel);
+    vec3 world_normal = normalize(gbuf_worldnormals_sample.xyz * 2.0f - 1.0f);
 
-    /*
-    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
-    vec3 origin = vec3(0, 0, -5);
-    vec3 dir = normalize(vec3(uv - 0.5, 1.0));
+    payload.color = vec3(1.0f, 0.0f, 1.0f);  // Initialize to a known value
 
-    payload.color = vec3(0);
+    uint ray_flags = gl_RayFlagsOpaqueEXT;
+    uint cull_mask = 0xFF;
+    uint sbt_record_offset = 0;
+    uint sbt_record_stride = 0;
+    uint miss_index = 0;
+    vec3 origin = world_pos;
+    float t_min = 0.001f;
+    vec3 direction = world_normal;
+    //vec3 direction = vec3(0.0f, 1.0f, 0.0f);
+    float t_max = 10000.0f;
+    const int payload_loc = 0;
+    traceRayEXT(tlas, ray_flags, cull_mask, sbt_record_offset, sbt_record_stride, miss_index, origin, t_min, direction, t_max, payload_loc);
 
-    traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, origin, 0.001, dir, 10000.0, 0);
-    vec3 result = payload.color;
-    imageStore(lightmap, pixel, vec4(result, 1.0));
-    */
+    imageStore(lightmap, pixel, vec4(payload.color, 1.0f));
 }

@@ -13,6 +13,7 @@ hitAttributeEXT vec2 attribs;
 
 void main()
 {
-    vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
-    payload.color = normalize(bary);
+    //vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+    //payload.color = normalize(bary);
+    payload.color = vec3(0.0f);
 }

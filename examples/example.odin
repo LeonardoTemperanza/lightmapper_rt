@@ -1370,6 +1370,56 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
 
 render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers, shaders: Shaders, scene: Scene)
 {
+    vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
+        {  // Positions
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 0,
+            stride = size_of([3]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        },
+        {  // Normals
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 1,
+            stride = size_of([3]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        },
+        {  // Lightmap UVs
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 2,
+            stride = size_of([2]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        },
+    }
+    vert_attributes := [?]vk.VertexInputAttributeDescription2EXT {
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 0,
+            binding = 0,
+            format = .R32G32B32_SFLOAT,
+            offset = 0
+        },
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 1,
+            binding = 1,
+            format = .R32G32B32_SFLOAT,
+            offset = 0
+        },
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 2,
+            binding = 2,
+            format = .R32G32_SFLOAT,
+            offset = 0
+        },
+    }
+    vk.CmdSetVertexInputEXT(cmd_buf, len(vert_input_bindings), &vert_input_bindings[0], len(vert_attributes), &vert_attributes[0])
+    vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_LIST)
+    vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
+
     // World pos
     {
         color_attachment := vk.RenderingAttachmentInfo {
@@ -1401,144 +1451,126 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
         to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_pos }
         vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
 
-        vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
-            {  // Positions
-                sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
-                binding = 0,
-                stride = size_of([3]f32),
-                inputRate = .VERTEX,
-                divisor = 1,
-            },
-            {  // Normals
-                sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
-                binding = 1,
-                stride = size_of([3]f32),
-                inputRate = .VERTEX,
-                divisor = 1,
-            },
-            {  // Lightmap UVs
-                sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
-                binding = 2,
-                stride = size_of([2]f32),
-                inputRate = .VERTEX,
-                divisor = 1,
-            },
-        }
-        vert_attributes := [?]vk.VertexInputAttributeDescription2EXT {
-            {
-                sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
-                location = 0,
-                binding = 0,
-                format = .R32G32B32_SFLOAT,
-                offset = 0
-            },
-            {
-                sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
-                location = 1,
-                binding = 1,
-                format = .R32G32B32_SFLOAT,
-                offset = 0
-            },
-            {
-                sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
-                location = 2,
-                binding = 2,
-                format = .R32G32_SFLOAT,
-                offset = 0
-            },
-        }
-        vk.CmdSetVertexInputEXT(cmd_buf, len(vert_input_bindings), &vert_input_bindings[0], len(vert_attributes), &vert_attributes[0])
-        vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_LIST)
-        vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
-
-        vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
-        vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
-        vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
-        sample_mask := vk.SampleMask(1)
-        vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
-        vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
-
-        vk.CmdSetPolygonModeEXT(cmd_buf, .FILL)
-        vk.CmdSetCullMode(cmd_buf, {})
-        vk.CmdSetFrontFace(cmd_buf, .COUNTER_CLOCKWISE)
-
-        vk.CmdSetDepthCompareOp(cmd_buf, .LESS)
-        vk.CmdSetDepthTestEnable(cmd_buf, false)
-        vk.CmdSetDepthWriteEnable(cmd_buf, false)
-        vk.CmdSetDepthBiasEnable(cmd_buf, false)
-        vk.CmdSetDepthClipEnableEXT(cmd_buf, true)
-
-        vk.CmdSetStencilTestEnable(cmd_buf, false)
-        b32_false := b32(false)
-        vk.CmdSetColorBlendEnableEXT(cmd_buf, 0, 1, &b32_false)
-
-        color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
-        vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
-
-        render_viewport_aspect_ratio := f32(1.0)
-
-        world_to_view := compute_world_to_view()
-        view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false)
-
-        loop: for instance, i in scene.instances {
-        // instance := scene.instances[30]; loop: {
-            mesh := scene.meshes[instance.mesh_idx]
-
-            if !mesh.lm_uvs_present { break loop }
-
-            viewport := vk.Viewport {
-                x = f32(LIGHTMAP_SIZE) * instance.lm_offset.x,
-                y = f32(LIGHTMAP_SIZE) * instance.lm_offset.y,
-                width = f32(LIGHTMAP_SIZE) * instance.lm_scale,
-                height = f32(LIGHTMAP_SIZE) * instance.lm_scale,
-                minDepth = 0.0,
-                maxDepth = 1.0,
-            }
-            vk.CmdSetViewportWithCount(cmd_buf, 1, &viewport)
-            scissor := vk.Rect2D {
-                offset = {
-                    x = i32(f32(LIGHTMAP_SIZE) * instance.lm_offset.x),
-                    y = i32(f32(LIGHTMAP_SIZE) * instance.lm_offset.y),
-                },
-                extent = {
-                    width = u32(f32(LIGHTMAP_SIZE) * instance.lm_scale),
-                    height = u32(f32(LIGHTMAP_SIZE) * instance.lm_scale),
-                }
-            }
-            vk.CmdSetScissorWithCount(cmd_buf, 1, &scissor)
-            vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
-
-            offset := vk.DeviceSize(0)
-            vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.buf, &offset)
-            vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.buf, &offset)
-            if mesh.lm_uvs_present {
-                vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.buf, &offset)
-            }
-            vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.buf, 0, .UINT32)
-
-            Push :: struct {
-                model_to_world: matrix[4, 4]f32,
-                normal_mat: matrix[4, 4]f32,
-                lm_uv_offset: [2]f32,
-                lm_uv_scale: f32
-            }
-            push := Push {
-                model_to_world = instance.transform,
-                normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
-                lm_uv_offset = instance.lm_offset,
-                lm_uv_scale = instance.lm_scale,
-            }
-            vk.CmdPushConstants(cmd_buf, shaders.pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
-
-            vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
-        }
+        draw_gbuffer(ctx, cmd_buf, scene, shaders.pipeline_layout)
     }
 
     // World normal
     {
+        color_attachment := vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView = gbuffers.world_normals.view,
+            imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+            loadOp = .CLEAR,
+            storeOp = .STORE,
+            clearValue = {
+                color = { float32 = { 0.0, 0.0, 0.0, 0.0 } }
+            }
+        }
+        rendering_info := vk.RenderingInfo {
+            sType = .RENDERING_INFO,
+            renderArea = {
+                offset = { 0, 0 },
+                extent = { gbuffers.world_normals.width, gbuffers.world_normals.height }
+            },
+            layerCount = 1,
+            colorAttachmentCount = 1,
+            pColorAttachments = &color_attachment,
+            pDepthAttachment = nil,
+        }
+
+        vk.CmdBeginRendering(cmd_buf, &rendering_info)
+        defer vk.CmdEndRendering(cmd_buf)
+
         shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
         to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_normals }
         vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+
+        draw_gbuffer(ctx, cmd_buf, scene, shaders.pipeline_layout)
+    }
+}
+
+draw_gbuffer :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, scene: Scene, pipeline_layout: vk.PipelineLayout)
+{
+    vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
+    vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
+    vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
+    sample_mask := vk.SampleMask(1)
+    vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
+    vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
+
+    vk.CmdSetPolygonModeEXT(cmd_buf, .FILL)
+    vk.CmdSetCullMode(cmd_buf, {})
+    vk.CmdSetFrontFace(cmd_buf, .COUNTER_CLOCKWISE)
+
+    vk.CmdSetDepthCompareOp(cmd_buf, .LESS)
+    vk.CmdSetDepthTestEnable(cmd_buf, false)
+    vk.CmdSetDepthWriteEnable(cmd_buf, false)
+    vk.CmdSetDepthBiasEnable(cmd_buf, false)
+    vk.CmdSetDepthClipEnableEXT(cmd_buf, true)
+
+    vk.CmdSetStencilTestEnable(cmd_buf, false)
+    b32_false := b32(false)
+    vk.CmdSetColorBlendEnableEXT(cmd_buf, 0, 1, &b32_false)
+
+    color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
+    vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
+
+    render_viewport_aspect_ratio := f32(1.0)
+
+    world_to_view := compute_world_to_view()
+    view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false)
+
+    loop: for instance, i in scene.instances {
+    // instance := scene.instances[30]; loop: {
+        mesh := scene.meshes[instance.mesh_idx]
+
+        if !mesh.lm_uvs_present { break loop }
+
+        viewport := vk.Viewport {
+            x = f32(LIGHTMAP_SIZE) * instance.lm_offset.x,
+            y = f32(LIGHTMAP_SIZE) * instance.lm_offset.y,
+            width = f32(LIGHTMAP_SIZE) * instance.lm_scale,
+            height = f32(LIGHTMAP_SIZE) * instance.lm_scale,
+            minDepth = 0.0,
+            maxDepth = 1.0,
+        }
+        vk.CmdSetViewportWithCount(cmd_buf, 1, &viewport)
+        scissor := vk.Rect2D {
+            offset = {
+                x = i32(f32(LIGHTMAP_SIZE) * instance.lm_offset.x),
+                y = i32(f32(LIGHTMAP_SIZE) * instance.lm_offset.y),
+            },
+            extent = {
+                width = u32(f32(LIGHTMAP_SIZE) * instance.lm_scale),
+                height = u32(f32(LIGHTMAP_SIZE) * instance.lm_scale),
+            }
+        }
+        vk.CmdSetScissorWithCount(cmd_buf, 1, &scissor)
+        vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
+
+        offset := vk.DeviceSize(0)
+        vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.buf, &offset)
+        vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.buf, &offset)
+        if mesh.lm_uvs_present {
+            vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.buf, &offset)
+        }
+        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.buf, 0, .UINT32)
+
+        Push :: struct {
+            model_to_world: matrix[4, 4]f32,
+            normal_mat: matrix[4, 4]f32,
+            lm_uv_offset: [2]f32,
+            lm_uv_scale: f32
+        }
+        push := Push {
+            model_to_world = instance.transform,
+            normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
+            lm_uv_offset = instance.lm_offset,
+            lm_uv_scale = instance.lm_scale,
+        }
+        vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
+
+        vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
     }
 }
 
@@ -1664,26 +1696,35 @@ rt_test :: proc(using ctx: ^Vk_Ctx, shaders: Shaders, frame: Vulkan_Per_Frame, d
 
     sbt_addr := u64(get_buffer_device_address(ctx, shaders.sbt_buf))
 
+    raygen_stride := align_up(auto_cast rt_handle_size, auto_cast rt_handle_alignment)
     raygen_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_base_align)),
-        stride = vk.DeviceSize(rt_handle_alignment),
-        size = vk.DeviceSize(rt_handle_alignment),
+        stride = raygen_stride,
+        size = 1 * raygen_stride,
     }
+    raymiss_stride := align_up(auto_cast rt_handle_size, auto_cast rt_handle_alignment)
     raymiss_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_base_align)),
-        stride = vk.DeviceSize(rt_handle_alignment),
-        size = vk.DeviceSize(rt_handle_alignment),
+        stride = raymiss_stride,
+        size = 1 * raymiss_stride,
     }
+    rayhit_stride := align_up(auto_cast rt_handle_size, auto_cast rt_handle_alignment)
     rayhit_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_base_align)),
-        stride = vk.DeviceSize(rt_handle_alignment),
-        size = vk.DeviceSize(rt_handle_alignment),
+        stride = rayhit_stride,
+        size = 1 * rayhit_stride,
     }
     callable_region := vk.StridedDeviceAddressRegionKHR {}
 
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, LIGHTMAP_SIZE, LIGHTMAP_SIZE, 1)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
+}
+
+align_up :: proc(v: u64, align: u64) -> vk.DeviceSize
+{
+    assert(0 == (align & (align - 1)), "must align to a power of two")
+    return vk.DeviceSize((v + (align - 1)) &~ (align - 1))
 }
 
 compute_world_to_view :: proc() -> matrix[4, 4]f32
@@ -1838,9 +1879,10 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
         }
 
         mesh.idx_count = u32(index_count)
-        append(&res.meshes, mesh)
 
         mesh.blas = create_blas(ctx, mesh.pos, mesh.indices_gpu, u32(len(pos_buf)), u32(len(indices)))
+
+        append(&res.meshes, mesh)
     }
 
     // Loop through instances.
@@ -1894,6 +1936,7 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
             if all_fit { break }
 
             fmt.println("Did not all fit!")
+            assert(false)
 
             remaining_rects: [dynamic]stbrp.Rect
 
@@ -1935,7 +1978,6 @@ get_instance_lm_size :: proc(instance: Instance, mesh: Mesh) -> stbrp.Coord
 
     size := stbrp.Coord(math.ceil(math.sqrt(res) * LIGHTMAP_TEXELS_PER_WORLD_UNIT))
     size = clamp(size, LIGHTMAP_MIN_INSTANCE_TEXELS, LIGHTMAP_MAX_INSTANCE_TEXELS)
-    fmt.println(size)
     return size
 }
 
@@ -1995,10 +2037,62 @@ create_sbt_buffer :: proc(using ctx: ^Vk_Ctx, shader_handle_storage: []byte, num
                  &shader_handle_storage[group_idx * rt_handle_size],
                  int(rt_handle_size))
     }
+    data_tmp := cast([^]byte) data
+    data_slice := data_tmp[:size]
+    fmt.printfln("%x", data_slice)
     vk.UnmapMemory(device, staging_buf.mem)
 
     res := create_buffer(ctx, 1, int(size), { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     copy_buffer(ctx, staging_buf, res, vk.DeviceSize(size))
+
+    // TEMPORARY CMD_BUF!!!
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    cmd_buf_bi := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+    barrier := vk.MemoryBarrier2 {
+        sType = .MEMORY_BARRIER_2,
+        srcStageMask = { .TRANSFER },
+        srcAccessMask = { .TRANSFER_WRITE },
+        dstStageMask = { .RAY_TRACING_SHADER_KHR },
+        dstAccessMask = { .SHADER_READ },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        memoryBarrierCount = 1,
+        pMemoryBarriers = &barrier,
+    })
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(queue))
 
     return res
 }
@@ -2018,6 +2112,55 @@ create_vertex_buffer :: proc(using ctx: ^Vk_Ctx, verts: []$T) -> Buffer
     res := create_buffer(ctx, size_of(verts[0]), len(verts), { .VERTEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     copy_buffer(ctx, staging_buf, res, size)
 
+    // TEMPORARY CMD_BUF!!!
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    cmd_buf_bi := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+    barrier := vk.MemoryBarrier2 {
+        sType = .MEMORY_BARRIER_2,
+        srcStageMask = { .TRANSFER },
+        srcAccessMask = { .TRANSFER_WRITE },
+        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR, .VERTEX_INPUT },
+        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR, .VERTEX_ATTRIBUTE_READ },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        memoryBarrierCount = 1,
+        pMemoryBarriers = &barrier,
+    })
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(queue))
+
     return res
 }
 
@@ -2035,6 +2178,122 @@ create_index_buffer :: proc(using ctx: ^Vk_Ctx, indices: []u32) -> Buffer
 
     res := create_buffer(ctx, size_of(indices[0]), len(indices), { .INDEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     copy_buffer(ctx, staging_buf, res, size)
+
+    // TEMPORARY CMD_BUF!!!
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    cmd_buf_bi := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+    barrier := vk.MemoryBarrier2 {
+        sType = .MEMORY_BARRIER_2,
+        srcStageMask = { .TRANSFER },
+        srcAccessMask = { .TRANSFER_WRITE },
+        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR, .VERTEX_INPUT },
+        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR, .VERTEX_ATTRIBUTE_READ },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        memoryBarrierCount = 1,
+        pMemoryBarriers = &barrier,
+    })
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(queue))
+
+    return res
+}
+
+create_instances_buffer :: proc(using ctx: ^Vk_Ctx, instances: []vk.AccelerationStructureInstanceKHR) -> Buffer
+{
+    size := cast(vk.DeviceSize) (len(instances) * size_of(instances[0]))
+
+    staging_buf := create_buffer(ctx, size_of(instances[0]), len(instances), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
+    defer destroy_buffer(ctx, &staging_buf)
+
+    data: rawptr
+    vk.MapMemory(device, staging_buf.mem, 0, size, {}, &data)
+    mem.copy(data, raw_data(instances), cast(int) size)
+    vk.UnmapMemory(device, staging_buf.mem)
+
+    res := create_buffer(ctx, size_of(instances[0]), len(instances), { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .TRANSFER_DST }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    copy_buffer(ctx, staging_buf, res, size)
+
+    // TEMPORARY CMD_BUF!!!
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    cmd_buf_bi := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+    barrier := vk.MemoryBarrier2 {
+        sType = .MEMORY_BARRIER_2,
+        srcStageMask = { .TRANSFER },
+        srcAccessMask = { .TRANSFER_WRITE },
+        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR },
+        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        memoryBarrierCount = 1,
+        pMemoryBarriers = &barrier,
+    })
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(queue))
 
     return res
 }
@@ -2094,6 +2353,7 @@ create_buffer :: proc(using ctx: ^Vk_Ctx, el_size: int, count: int, usage: vk.Bu
 
 copy_buffer :: proc(using ctx: ^Vk_Ctx, src: Buffer, dst: Buffer, size: vk.DeviceSize)
 {
+    // TEMPORARY CMD_BUF!!!
     cmd_pool_ci := vk.CommandPoolCreateInfo {
         sType = .COMMAND_POOL_CREATE_INFO,
         queueFamilyIndex = queue_family_idx,
@@ -2375,7 +2635,7 @@ create_depth_texture :: proc(using ctx: ^Vk_Ctx, width, height: u32) -> (vk.Imag
         dstStageMask = { .EARLY_FRAGMENT_TESTS },
         dstAccessMask = { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE },
     }
-    vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
+    vk.CmdPipelineBarrier2(cmd_buf, &{
         sType = .DEPENDENCY_INFO,
         imageMemoryBarrierCount = 1,
         pImageMemoryBarriers = &transition_to_depth_barrier,
@@ -2574,7 +2834,10 @@ create_blas :: proc(using ctx: ^Vk_Ctx, positions: Buffer, indices: Buffer, vert
         firstVertex = 0,
         transformOffset = 0,
     }
-    range_info_ptr := cast([^]vk.AccelerationStructureBuildRangeInfoKHR) &range_info
+
+    range_info_ptrs := []^vk.AccelerationStructureBuildRangeInfoKHR {
+        &range_info,
+    }
 
     build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
         sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
@@ -2631,9 +2894,30 @@ create_blas :: proc(using ctx: ^Vk_Ctx, positions: Buffer, indices: Buffer, vert
 
     build_info.dstAccelerationStructure = blas.handle
     build_info.scratchData.deviceAddress = get_buffer_device_address(ctx, scratch_buf)
-    vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, &range_info_ptr)
+    vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
+
+    barrier := vk.MemoryBarrier2 {
+        sType = .MEMORY_BARRIER_2,
+        srcStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR },
+        srcAccessMask = { .ACCELERATION_STRUCTURE_WRITE_KHR },
+        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR },
+        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        memoryBarrierCount = 1,
+        pMemoryBarriers = &barrier,
+    })
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(queue))
 
     // Get device address
     addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
@@ -2641,6 +2925,7 @@ create_blas :: proc(using ctx: ^Vk_Ctx, positions: Buffer, indices: Buffer, vert
         accelerationStructure = blas.handle,
     }
     blas.addr = vk.GetAccelerationStructureDeviceAddressKHR(device, &addr_info)
+    fmt.println("get accel struct addr:", blas.addr)
 
     return blas
 }
@@ -2671,9 +2956,11 @@ create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []Instance, meshes: []Mesh) -
             flags = .TRIANGLE_FACING_CULL_DISABLE,
             accelerationStructureReference = u64(meshes[instance.mesh_idx].blas.addr)
         }
+
+        fmt.println(u64(meshes[instance.mesh_idx].blas.addr))
     }
 
-    instances_buf := create_buffer(ctx, size_of(vk_instances[0]), len(vk_instances), { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    instances_buf := create_instances_buffer(ctx, vk_instances)
 
     instances_data := vk.AccelerationStructureGeometryInstancesDataKHR {
         sType = .ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
@@ -2745,14 +3032,42 @@ create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []Instance, meshes: []Mesh) -
     }
     vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
 
-    range_info := vk.AccelerationStructureBuildRangeInfoKHR {}
-    range_info_ptr := cast([^]vk.AccelerationStructureBuildRangeInfoKHR) &range_info
+    range_info := vk.AccelerationStructureBuildRangeInfoKHR {
+        primitiveCount = u32(len(instances)),
+        primitiveOffset = 0,
+        firstVertex = 0,
+        transformOffset = 0,
+    }
+    range_info_ptrs := []^vk.AccelerationStructureBuildRangeInfoKHR {
+        &range_info
+    }
 
     build_info.dstAccelerationStructure = as.handle
     build_info.scratchData.deviceAddress = get_buffer_device_address(ctx, scratch_buf)
-    vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, &range_info_ptr)
+    vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
+
+    barrier := vk.MemoryBarrier2 {
+        sType = .MEMORY_BARRIER_2,
+        srcStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR },
+        srcAccessMask = { .ACCELERATION_STRUCTURE_WRITE_KHR },
+        dstStageMask = { .RAY_TRACING_SHADER_KHR },
+        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        memoryBarrierCount = 1,
+        pMemoryBarriers = &barrier,
+    })
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(queue))
 
     // Get device address
     addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
