@@ -36,6 +36,7 @@ import "core:mem"
 import "core:c"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
+import stbrp "vendor:stb/rect_pack"
 
 import "ufbx"
 
@@ -81,6 +82,7 @@ GBuffers :: struct
 }
 
 LIGHTMAP_SIZE :: 4096
+LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 4
 
 main :: proc()
 {
@@ -1463,15 +1465,14 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
         vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
 
         vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
-        //vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
-        vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, {})
+        vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
         vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
         sample_mask := vk.SampleMask(1)
         vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
         vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
 
         vk.CmdSetPolygonModeEXT(cmd_buf, .FILL)
-        vk.CmdSetCullMode(cmd_buf, {})
+        vk.CmdSetCullMode(cmd_buf, { .FRONT })
         vk.CmdSetFrontFace(cmd_buf, .COUNTER_CLOCKWISE)
 
         vk.CmdSetDepthCompareOp(cmd_buf, .LESS)
@@ -1721,6 +1722,10 @@ Instance :: struct
 {
     transform: matrix[4, 4]f32,
     mesh_idx: u32,
+    fbx_idx: u32,
+    lm_idx: u32,
+    lm_offset: [2]f32,
+    lm_scale: f32,
 }
 
 Mesh :: struct
@@ -1832,13 +1837,74 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
         instance := Instance {
             transform = get_node_world_transform(node),
             mesh_idx = node.mesh.element.typed_id,
+            fbx_idx = u32(i)
         }
         append(&res.instances, instance)
+    }
+
+    // Pack lightmap uvs.
+    {
+        num_nodes := LIGHTMAP_SIZE
+        tmp_nodes := make([]stbrp.Node, num_nodes, allocator = context.temp_allocator)
+        ctx: stbrp.Context
+        stbrp.init_target(&ctx, LIGHTMAP_SIZE, LIGHTMAP_SIZE, raw_data(tmp_nodes), i32(len(tmp_nodes)))
+
+        rects := make([dynamic]stbrp.Rect, len(res.instances))
+        defer delete(rects)
+
+        for instance, i in res.instances
+        {
+            node := scene.nodes.data[instance.fbx_idx]
+
+            rect_size := get_instance_lm_size(instance, node)
+
+            rects[i].id = c.int(i)
+            rects[i].w = rect_size
+            rects[i].h = rect_size
+        }
+
+        lm_idx := u32(0)
+        for
+        {
+            all_fit := bool(stbrp.pack_rects(&ctx, raw_data(rects), c.int(len(rects))))
+
+            for rect in rects
+            {
+                if !rect.was_packed { continue }
+
+                assert(rect.w == rect.h)
+
+                res.instances[rect.id].lm_idx = lm_idx
+                res.instances[rect.id].lm_offset = { f32(rect.x) / f32(LIGHTMAP_SIZE), f32(rect.y) / f32(LIGHTMAP_SIZE) }
+                res.instances[rect.id].lm_scale = f32(rect.w) / f32(LIGHTMAP_SIZE)
+            }
+
+            if all_fit { break }
+
+            remaining_rects: [dynamic]stbrp.Rect
+
+            for rect in rects
+            {
+                if !rect.was_packed {
+                    append(&remaining_rects, rect)
+                }
+            }
+
+            delete(rects)
+            rects = remaining_rects
+
+            lm_idx += 1
+        }
     }
 
     res.tlas = create_tlas(ctx, res.instances[:], res.meshes[:])
 
     return res
+}
+
+get_instance_lm_size :: proc(instance: Instance, node: ^ufbx.Node) -> stbrp.Coord
+{
+    return {}
 }
 
 get_node_world_transform :: proc(node: ^ufbx.Node) -> matrix[4, 4]f32
@@ -2743,3 +2809,5 @@ create_gbuffers :: proc(using ctx: ^Vk_Ctx) -> GBuffers
         world_normals
     }
 }
+
+// Packing lightmap uvs into one texture space.
