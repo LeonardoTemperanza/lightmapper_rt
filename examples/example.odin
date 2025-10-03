@@ -239,6 +239,8 @@ main :: proc()
     }
     vk.UpdateDescriptorSets(vk_ctx.device, 1, raw_data(writes), 0, nil)
 
+    accum_counter := u32(0)
+
     for
     {
         proceed := handle_window_events(window)
@@ -397,7 +399,8 @@ main :: proc()
             })
         }
 
-        pathtrace_iter(&vk_ctx, cmd_buf, rt_desc_set, shaders)
+        pathtrace_iter(&vk_ctx, cmd_buf, rt_desc_set, shaders, accum_counter)
+        accum_counter += 1
 
         // LIGHTMAP BARRIER
         {
@@ -924,6 +927,13 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
         rt_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
             sType = .PIPELINE_LAYOUT_CREATE_INFO,
             flags = {},
+            pushConstantRangeCount = u32(1),
+            pPushConstantRanges = raw_data([]vk.PushConstantRange {
+                {
+                    stageFlags = { .RAYGEN_KHR },
+                    size = 256,
+                }
+            }),
             setLayoutCount = 1,
             pSetLayouts = &res.rt_desc_set_layout
         }
@@ -1574,7 +1584,7 @@ draw_gbuffer :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, scene: Scene
     }
 }
 
-pathtrace_iter :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, rt_desc_set: vk.DescriptorSet, shaders: Shaders)
+pathtrace_iter :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, rt_desc_set: vk.DescriptorSet, shaders: Shaders, accum_counter: u32)
 {
     vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline)
 
@@ -1599,6 +1609,16 @@ pathtrace_iter :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, rt_desc_se
         size = vk.DeviceSize(rt_handle_alignment),
     }
     callable_region := vk.StridedDeviceAddressRegionKHR {}
+
+    Push :: struct {
+        accum_counter: u32,
+        seed: u32,
+    }
+    push := Push {
+        accum_counter = accum_counter,
+        seed = 0,
+    }
+    vk.CmdPushConstants(cmd_buf, shaders.rt_pipeline_layout, { .RAYGEN_KHR }, 0, size_of(push), &push)
 
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, LIGHTMAP_SIZE, LIGHTMAP_SIZE, 1)
 }
@@ -1890,6 +1910,8 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
     {
         node := scene.nodes.data[i]
         if node.is_root || node.mesh == nil { continue }
+        // TODO TODO TODO TODO TODO remove this
+        if i < 20 { continue }  // Skip giant sphere
 
         instance := Instance {
             transform = get_node_world_transform(node),
