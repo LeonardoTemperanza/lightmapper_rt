@@ -31,1872 +31,769 @@ import "core:math/rand"
 import la "core:math/linalg"
 import intr "base:intrinsics"
 import "core:slice"
+import "core:mem"
+import "core:log"
+import "base:runtime"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
-// General structure and algorithms from: https://github.com/ands/lightmapper
-
-DEBUG_INTERPOLATION :: #config(LM_DEBUG_INTERPOLATION, false)
-
-// The shaders are compiled by the user. This is because
-// there are many different ways and formats to compile shaders in SDL_GPU.
-// The shaders themselves are written in HLSL and can be found in this repository.
-// You can then use SDL_ShaderCross, DXC or SPIRV_Cross to compile it or transpile it
-// to a different format.
-// (I treat compute pipelines like shaders here because they're easy to set up
-// and they don't require any exterior knowledge like graphics pipelines do.)
-// NOTE: Shaders must be released by the user.
-Shaders :: struct
-{
-    hemi_reduce:          ^sdl.GPUComputePipeline,
-    hemi_weighted_reduce: ^sdl.GPUComputePipeline,
-}
-
-destroy_shaders :: proc(device: ^sdl.GPUDevice, shaders: Shaders)
-{
-    sdl.ReleaseGPUComputePipeline(device, shaders.hemi_reduce)
-    sdl.ReleaseGPUComputePipeline(device, shaders.hemi_weighted_reduce)
-}
-
-// API fast-path for creating lightmap textures.
-@(require_results)
-make_lightmap :: proc(device: ^sdl.GPUDevice, size: [2]u32, format: sdl.GPUTextureFormat) -> ^sdl.GPUTexture
-{
-    // Could be sampled for indirect passess, and COLOR_TARGET is needed for blitting.
-    lightmap_usage := sdl.GPUTextureUsageFlags { .SAMPLER, .COLOR_TARGET }
-    lightmap := sdl.CreateGPUTexture(device, {
-        type = .D2,
-        format = format,
-        width = auto_cast size.x,
-        height = auto_cast size.y,
-        layer_count_or_depth = 1,
-        num_levels = 1,  // Lightmaps are rarely minified.
-        usage = lightmap_usage,
-    })
-
-    // Fill in with black pixels.
-    buf_size: u32 = size.x * size.y * sdl.GPUTextureFormatTexelBlockSize(format)
-    transfer_buf := sdl.CreateGPUTransferBuffer(device, {
-        usage = .UPLOAD,
-        size  = buf_size
-    })
-    defer sdl.ReleaseGPUTransferBuffer(device, transfer_buf)
-
-    transfer_dst := sdl.MapGPUTransferBuffer(device, transfer_buf, false)
-    intr.mem_zero(transfer_dst, buf_size)
-    sdl.UnmapGPUTransferBuffer(device, transfer_buf)
-
-    cmd_buf := sdl.AcquireGPUCommandBuffer(device)
-    pass := sdl.BeginGPUCopyPass(cmd_buf)
-    sdl.UploadToGPUTexture(
-        pass,
-        source = {
-            transfer_buffer = transfer_buf,
-            offset = 0,
-        },
-        destination = {
-            texture = lightmap,
-            w = auto_cast size.x,
-            h = auto_cast size.y,
-            d = 1,
-        },
-        cycle = false
-    )
-    sdl.EndGPUCopyPass(pass)
-
-    ok_s := sdl.SubmitGPUCommandBuffer(cmd_buf)
-    assert(ok_s)
-
-    return lightmap
-}
-
-destroy_lightmap :: proc(device: ^sdl.GPUDevice, lightmap: ^sdl.GPUTexture)
-{
-    sdl.ReleaseGPUTexture(device, lightmap)
-}
-
-init_vulkan :: proc()
-{
-    vk.load_proc_addresses(get_proc_address)
-
-    // Create instance
-    {
-        app_info := vk.ApplicationInfo {
-            sType = .APPLICATION_INFO,
-            pApplicationName = "Hello Triangle",
-            applicationVersion = vk.MAKE_VERSION(0, 0, 1),
-            pEngineName = "No Engine",
-            engineVersion = vk.MAKE_VERSION(1, 0, 0),
-            apiVersion = vk.API_VERSION_1_0,
-        }
-
-        glfw_ext := glfw.GetRequiredInstanceExtensions();
-
-        create_info := vk.InstanceCreateInfo {
-            sType = .INSTANCE_CREATE_INFO,
-            pApplicationInfo = &app_info,
-            ppEnabledExtensionNames = raw_data(glfw_ext),
-            enabledExtensionCount = cast(u32)len(glfw_ext),
-        }
-
-        ok_i := vk.CreateInstance(&create_info, nil, &instance)
-        assert(ok_i)
-    }
-
-    // Create surface
-    {
-        surface_create_info := vk.Win32SurfaceCreateInfoKHR {
-            sType = .WIN32_SURFACE_CREATE_INFO_KHR
-            hwnd = // win32 window
-            hinstance = // hinstance
-        }
-
-        ok_s :=
-        assert(ok_s)
-    }
-
-    // Find best physical device
-    {
-
-    }
-
-    // Find queue families
-    {
-
-    }
-
-    // Create logical device
-    {
-        ok_d := vk.CreateDevice(physical_device,
-    }
-}
-
-// Creates the context for this library. Can be used to render multiple lightmaps.
-// You can create a new lightmap with make_lightmap and you can change the current lightmap
-// with set_target_lightmap.
-@(require_results)
-init :: proc(device: ^sdl.GPUDevice,
-             shaders: Shaders,
-             hemisphere_target_format: sdl.GPUTextureFormat,        // Format of the hemisphere renderings, preferably HDR and with alpha.
-             hemisphere_target_depth_format: sdl.GPUTextureFormat,  // Format of the depth of hemisphere renderings.
-             hemisphere_resolution: int = 256,                      // Resolution of the hemisphere renderings.
-             z_near: f32 = 0.001, z_far: f32 = 100,                 // Hemisphere min/max draw distance.
-             background_color: [3]f32 = {},
-             interpolation_passes: int = 4,                         // Hierarchical selective interpolation passes.
-             interpolation_threshold: f32 = 0.01,                   // Error value below which lightmap pixels are interpolated instead of rendered.
-             camera_to_surface_distance_modifier: f32 = 0.0         // Modifier for the height of the rendered hemispheres above the surface.
-                                                                    // -1 -> stick to surface, 0 -> minimum height for interpolated surface normals,
-                                                                    // > 0 -> improves gradients on surfaces with interpolated normals due to the flat surface horizon,
-                                                                    // but may introduce other artifacts.
-             ) -> Context
-{
-    // Validate args
-    assert(hemisphere_resolution == 512 || hemisphere_resolution == 256 || hemisphere_resolution == 128 ||
-           hemisphere_resolution == 64  || hemisphere_resolution == 32  || hemisphere_resolution == 16,
-           "hemisphere_resolution must be a power of 2 and in the [16, 512] range.")
-    assert(z_near < z_far, "z_near must be < z_far.")
-    assert(z_near > 0.0, "z_near must be positive.")
-    assert(camera_to_surface_distance_modifier >= -1.0, "camera_to_surface_distance_modifier must be >= -1.0.")
-    assert(interpolation_passes >= 0 && interpolation_passes <= 8, "interpolation_passes must be in the [0, 8] range.")
-    assert(interpolation_threshold >= 0.0, "interpolation_threshold must be >= 0.")
-    validate_shaders(shaders)
-
-    ctx: Context
-    ctx.device = device
-    ctx.cmd_buf = sdl.AcquireGPUCommandBuffer(ctx.device)
-    ctx.shaders = shaders
-    ctx.validation.ctx_initialized = true
-
-    ctx.interp_threshold = interpolation_threshold
-    ctx.num_passes = 1 + 3 * u32(interpolation_passes)
-    ctx.hemi_params.size = auto_cast hemisphere_resolution
-    ctx.hemi_params.z_near = z_near
-    ctx.hemi_params.z_far  = z_far
-    ctx.hemi_params.cam_to_surface_distance_modifier = camera_to_surface_distance_modifier
-    ctx.hemi_params.clear_color = background_color
-    ctx.hemi_params.batch_count = HEMI_BATCH_TEXTURE_SIZE / (ctx.hemi_params.size * [2]u32{ 3, 1 })
-    ctx.hemi_batch_to_lightmap = make([dynamic][2]u32, ctx.hemi_params.batch_count.y * ctx.hemi_params.batch_count.x,
-                                                       ctx.hemi_params.batch_count.y * ctx.hemi_params.batch_count.x)
-
-    // Build GPU Resources
-
-    // Build textures
-    default_weight_func :: proc(cos_theta: f32, user_data: rawptr) -> f32 { return 1.0 }
-    set_hemisphere_weights(&ctx, default_weight_func, nil)
-
-    target_usages := sdl.GPUTextureUsageFlags { .COLOR_TARGET, .COMPUTE_STORAGE_READ }
-    ensure(sdl.GPUTextureSupportsFormat(device, hemisphere_target_format, .D2, target_usages), "The target format you're currently using is not supported for Lightmapper's usages.")
-    ctx.hemi_batch_texture = sdl.CreateGPUTexture(device, {
-        type = .D2,
-        format = hemisphere_target_format,
-        width = auto_cast HEMI_BATCH_TEXTURE_SIZE.x,
-        height = auto_cast HEMI_BATCH_TEXTURE_SIZE.y,
-        layer_count_or_depth = 1,
-        num_levels = 1,
-        usage = target_usages,
-    })
-
-    depth_usages := sdl.GPUTextureUsageFlags { .DEPTH_STENCIL_TARGET }
-    ensure(sdl.GPUTextureSupportsFormat(device, hemisphere_target_depth_format, .D2, depth_usages), "The depth format you're currently using is not supported for Lightmapper's usages.")
-    ctx.hemi_batch_depth_texture = sdl.CreateGPUTexture(device, {
-        type = .D2,
-        format = hemisphere_target_depth_format,
-        width = auto_cast HEMI_BATCH_TEXTURE_SIZE.x,
-        height = auto_cast HEMI_BATCH_TEXTURE_SIZE.y,
-        layer_count_or_depth = 1,
-        num_levels = 1,
-        usage = depth_usages,
-    })
-
-    reduced_usages := sdl.GPUTextureUsageFlags { .COMPUTE_STORAGE_READ, .COMPUTE_STORAGE_WRITE }
-    ensure(sdl.GPUTextureSupportsFormat(device, .R32G32B32A32_FLOAT, .D2, reduced_usages))
-    for i in 0..<2
-    {
-        ctx.hemi_reduce_textures[i] = sdl.CreateGPUTexture(device, {
-            type = .D2,
-            format = .R32G32B32A32_FLOAT,
-            width = auto_cast HEMI_BATCH_TEXTURE_SIZE.x,
-            height = auto_cast HEMI_BATCH_TEXTURE_SIZE.y,
-            layer_count_or_depth = 1,
-            num_levels = 1,
-            usage = reduced_usages,
-        })
-    }
-
-    return ctx
-}
-
-// Should be called to free resources.
-destroy :: proc(using ctx: ^Context)
-{
-    assert(validation.ctx_initialized, "Attempting to destroy a Lightmapper context without having initialized it first!")
-    assert(!validation.iter_begin, "Forgot to call bake_iterate_end! It must be called after each call to bake_iterate_begin (iff it returns true).")
-    assert(!validation.bake_begin, "Forgot to call bake_end! It must be called after each call to bake_begin.")
-
-    // CPU resources.
-    delete(hemi_batch_to_lightmap)
-
-    // Destroy textures.
-    sdl.ReleaseGPUTexture(device, weights_texture)
-    sdl.ReleaseGPUTexture(device, hemi_batch_texture)
-    sdl.ReleaseGPUTexture(device, hemi_batch_depth_texture)
-    sdl.ReleaseGPUTexture(device, hemi_reduce_textures[0])
-    sdl.ReleaseGPUTexture(device, hemi_reduce_textures[1])
-}
-
-Mesh :: struct
-{
-    positions: Buffer,  // Expected to be a vector3.
-    normals: Buffer,    // Expected to be a vector3.
-    lm_uvs: Buffer,     // Expected to be a vector2.
-    indices: Buffer,    // Expected to be a scalar value.
-    tri_count: int,
-    use_indices: bool,
-}
-
-// "OpenGL style" of specifying buffer format.
-Buffer :: struct
-{
-    data: rawptr,
-    type: Type,
-    stride: u32,
-    offset: uintptr,
-}
-
-Type :: enum
-{
-    None,
-    U8,
-    U16,
-    U32,
-    S8,
-    S16,
-    S32,
-    F32,
-}
-
-set_current_mesh :: proc(ctx: ^Context, mesh: Mesh, model_to_world: matrix[4, 4]f32)
-{
-    ctx.mesh = mesh
-    ctx.mesh_transform = model_to_world
-    ctx.mesh_normal_mat = la.transpose(la.inverse(model_to_world))
-
-    set_cursor_and_rasterizer(ctx, 0)
-}
-
-bake_begin :: proc(using ctx: ^Context, size: [2]u32, format: sdl.GPUTextureFormat)
-{
-    assert(!validation.bake_begin, "Forgot to call bake_lightmap_end after bake_lightmap_begin!")
-    validation.bake_begin = true
-
-    bake_done = false
-    lightmap_size = size
-    lightmap_format = format
-
-    if cmd_buf == nil {
-        cmd_buf = sdl.AcquireGPUCommandBuffer(device)
-    }
-
-    // Create textures
-    final_usages := sdl.GPUTextureUsageFlags { .SAMPLER }
-    ensure(sdl.GPUTextureSupportsFormat(device, lightmap_format, .D2, final_usages))
-    samples_storage.final_result_texture = sdl.CreateGPUTexture(device, {
-        type = .D2,
-        format = .R32G32B32A32_FLOAT,
-        width = auto_cast size.x,
-        height = auto_cast size.y,
-        layer_count_or_depth = 1,
-        num_levels = 1,
-        usage = final_usages,
-    })
-
-    samples_usages := sdl.GPUTextureUsageFlags { .COMPUTE_STORAGE_READ }
-    ensure(sdl.GPUTextureSupportsFormat(device, lightmap_format, .D2, samples_usages))
-    samples_storage.tex = sdl.CreateGPUTexture(device, {
-        type = .D2,
-        format = lightmap_format,
-        width = auto_cast size.x,
-        height = auto_cast size.y,
-        layer_count_or_depth = 1,
-        num_levels = 1,
-        usage = samples_usages,
-    })
-
-    // Create buffers
-    samples_storage.transfer = sdl.CreateGPUTransferBuffer(device, {
-        usage = .DOWNLOAD,
-        size = size.x * size.y * size_of([4]f32),
-    })
-
-    // Allocate CPU resources
-    lightmap = make([dynamic][4]f32, size.x * size.y, size.x * size.y)
-    samples_storage.uv_map = make([dynamic][2]u32, size.x * size.y, size.x * size.y)
-
-    when DEBUG_INTERPOLATION
-    {
-        samples_storage.debug_interp_buf = make([dynamic][4]f32, size.x * size.y, size.x * size.y)
-    }
-}
-
-// NOTE: blit_to is required to have the same size and format as the ones passed to bake_lightmap_begin.
-bake_end :: proc(using ctx: ^Context, blit_to: ^sdl.GPUTexture)
-{
-    assert(validation.bake_begin, "Attempting to call bake_lightmap_end without having called bake_lightmap_begin")
-    validation.bake_begin = false
-
-    // Write to the final result texture (which still
-    // needs to be blitted into the user texture).
-    {
-        mapped := sdl.MapGPUTransferBuffer(device, samples_storage.transfer, false)
-        intr.mem_copy(mapped, raw_data(lightmap), len(lightmap) * size_of(lightmap[0]))
-        sdl.UnmapGPUTransferBuffer(device, samples_storage.transfer)
-
-        pass := sdl.BeginGPUCopyPass(cmd_buf)
-        defer sdl.EndGPUCopyPass(pass)
-
-        src := sdl.GPUTextureTransferInfo {
-            transfer_buffer = samples_storage.transfer,
-            offset = 0,
-        }
-        dst := sdl.GPUTextureRegion {
-            texture = samples_storage.final_result_texture,
-            mip_level = 0,
-            layer = 0,
-            x = 0,
-            y = 0,
-            z = 0,
-            w = lightmap_size.x,
-            h = lightmap_size.y,
-            d = 1,
-        }
-        sdl.UploadToGPUTexture(pass, src, dst, false)
-    }
-
-    // Blit to user texture.
-    {
-        blit_info := sdl.GPUBlitInfo {
-            source = {
-                texture = samples_storage.final_result_texture,
-                mip_level = 0,
-                layer_or_depth_plane = 0,
-                x = 0,
-                y = 0,
-                w = lightmap_size.x,
-                h = lightmap_size.y,
-            },
-            destination = {
-                texture = blit_to,
-                mip_level = 0,
-                layer_or_depth_plane = 0,
-                x = 0,
-                y = 0,
-                w = lightmap_size.x,
-                h = lightmap_size.y,
-            },
-            load_op = .DONT_CARE,
-            clear_color = {},
-            flip_mode = .NONE,
-            filter = .LINEAR,
-            cycle = false,
-        }
-        sdl.BlitGPUTexture(cmd_buf, blit_info)
-    }
-
-    fence_new := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd_buf)
-    assert(fence_new != nil)
-    if fence != nil
-    {
-        ok := sdl.WaitForGPUFences(device, true, &fence, 1)
-        assert(ok)
-        sdl.ReleaseGPUFence(device, fence)
-        fence = nil
-    }
-    ok := sdl.WaitForGPUFences(device, true, &fence_new, 1)
-    assert(ok)
-    sdl.ReleaseGPUFence(device, fence_new)
-    fence_new = nil
-
-    cmd_buf = nil
-
-    // Destroy resources.
-    sdl.ReleaseGPUTexture(device, samples_storage.final_result_texture)
-    samples_storage.final_result_texture = nil
-    sdl.ReleaseGPUTexture(device, samples_storage.tex)
-    samples_storage.tex = nil
-    sdl.ReleaseGPUTransferBuffer(device, samples_storage.transfer)
-    samples_storage.transfer = nil
-    delete(lightmap)
-    lightmap = {}
-    delete(samples_storage.uv_map)
-    samples_storage.uv_map = {}
-
-    when DEBUG_INTERPOLATION
-    {
-        delete(samples_storage.debug_interp_buf)
-        samples_storage.debug_interp_buf = {}
-    }
-}
-
-// Optional: Set material characteristics by specifying cos(theta)-dependent weights for incoming light.
-// NOTE: This is expensive as this builds and uploads a texture so preferably use it on startup.
-Weight_Func_Type :: proc(cos_theta: f32, userdata: rawptr)->f32
-set_hemisphere_weights :: proc(using ctx: ^Context,
-                               weight_func: Weight_Func_Type,
-                               user_data: rawptr,
-                               allocator := context.allocator)
-{
-    sdl.ReleaseGPUTexture(device, weights_texture)
-
-    hemi_size := hemi_params.size
-    weights := make([]f32, hemi_size * hemi_size * 2 * 3, allocator = allocator)
-    defer delete(weights)
-
-    center  := f32(hemi_size - 1) * 0.5
-    sum     := 0.0
-    for y in 0..<hemi_size
-    {
-        // In SDL_GPU +y is down (doesn't matter because we only
-        // need its absolute value, but for future reference...)
-        dy := -(f32(y) - center) / (f32(hemi_size) * 0.5)
-        for x in 0..<hemi_size
-        {
-            dx := (f32(x) - center) / (f32(hemi_size) * 0.5)
-            v := normalize([3]f32 { dx, dy, 1.0 })
-            solid_angle := v.z * v.z * v.z
-
-            w0 := weights[2 * (y * (3 * hemi_size) + x):]
-            w1 := w0[2 * hemi_size:]
-            w2 := w1[2 * hemi_size:]
-
-            // Center weights.
-            w0[0] = solid_angle * weight_func(v.z, user_data)
-            w0[1] = solid_angle
-
-            // Left/Right side weights.
-            w1[0] = solid_angle * weight_func(abs(v.x), user_data)
-            w1[1] = solid_angle
-
-            // Up/Down side weights.
-            w2[0] = solid_angle * weight_func(abs(v.y), user_data)
-            w2[1] = solid_angle
-
-            sum += 3.0 * f64(solid_angle)
-        }
-    }
-
-    // Normalize weights.
-    weights_scale := f32(1.0 / sum)  // (Faster to multiply than to divide)
-    for &w in weights {
-        w *= weights_scale
-    }
-
-    // Upload to GPU.
-    usage  := sdl.GPUTextureUsageFlags { .SAMPLER }
-    type   := sdl.GPUTextureType.D2
-    format := sdl.GPUTextureFormat.R32G32_FLOAT
-    width  := u32(3 * hemi_size)
-    height := u32(hemi_size)
-    ensure(sdl.GPUTextureSupportsFormat(device, format, type, usage))
-    weights_texture = sdl.CreateGPUTexture(device, {
-        type = type,
-        format = format,
-        width = width,
-        height = height,
-        layer_count_or_depth = 1,
-        num_levels = 1,
-        usage = usage
-    })
-
-    transfer_buf := sdl.CreateGPUTransferBuffer(device, {
-        usage = .UPLOAD,
-        size  = auto_cast len(weights) * size_of(f32)
-    })
-    defer sdl.ReleaseGPUTransferBuffer(device, transfer_buf)
-
-    transfer_dst := sdl.MapGPUTransferBuffer(device, transfer_buf, false)
-    intr.mem_copy(transfer_dst, raw_data(weights), len(weights) * size_of(f32))
-    sdl.UnmapGPUTransferBuffer(device, transfer_buf)
-
-    pass := sdl.BeginGPUCopyPass(cmd_buf)
-    sdl.UploadToGPUTexture(
-        pass,
-        source = {
-            transfer_buffer = transfer_buf,
-            offset = 0,
-        },
-        destination = {
-            texture = weights_texture,
-            w = width,
-            h = height,
-            d = 1,
-        },
-        cycle = false
-    )
-    sdl.EndGPUCopyPass(pass)
-}
-
-// This describes how your scene should be rendered
-// for correct/optimal (depending on the parameter) behavior.
-Scene_Render_Params :: struct
-{
-    depth_only: bool,        // Optional, this is to speed the first pass up.
-    render_shadowmap: bool,  // Optional, if you want to include a directional light source.
-
-    viewport_offset: [2]u32,
-    viewport_size:   [2]u32,
-    // NOTE: Assuming left-handed coordinate system.
-    world_to_view: matrix[4, 4]f32,
-    view_to_proj: matrix[4, 4]f32,
-
-    pass: ^sdl.GPURenderPass,
-    cmd_buf: ^sdl.GPUCommandBuffer,
-}
-
-// Can be used like this:
-// for render_params in lm.bake_iterate_begin(lm_ctx)
-bake_iterate_begin :: proc(using ctx: ^Context) -> (params: Scene_Render_Params, proceed: bool)
-{
-    assert(!validation.iter_begin, "Forgot to call bake_iterate_end! It must be called after each call to bake_iterate_begin (iff it returns true).")
-    validation.iter_begin = true
-    validate_context(ctx)
-    assert(validation.bake_begin, "Forgot to call bake_begin!")
-
-    for cursor.hemi_side >= 5
-    {
-        move_to_next_potential_rasterizer_position(ctx)
-        found := find_first_rasterizer_position(ctx)
-        if found
-        {
-            cursor.hemi_side = 0
-            break
-        }
-
-        // There are no valid sample positions on the current triangle,
-        // so try to move onto the next triangle.
-
-        triangles_left := cursor.tri_base_idx + 3 < mesh.tri_count * 3
-        if triangles_left
-        {
-            // Move onto the next triangle.
-            set_cursor_and_rasterizer(ctx, auto_cast cursor.tri_base_idx + 3)
-        }
-        else
-        {
-            // End of pass.
-            when DEBUG_INTERPOLATION
-            {
-                fmt.println("pass", cursor.pass, "done! Stats:")
-                fmt.println("Num interpolated:", samples_storage.num_interpolated, "Num_sampled:", samples_storage.num_sampled)
-                samples_storage.num_interpolated = 0
-                samples_storage.num_sampled = 0
-            }
-
-            cursor.pass += 1
-
-            if bake_pass != nil
-            {
-                sdl.EndGPURenderPass(bake_pass)
-                bake_pass = nil
-            }
-
-            integrate_hemi_batch_and_copy_to_transfer_buf(ctx)
-            cursor.hemi_idx = 0
-            read_back_samples_texture(ctx)
-
-            if cursor.pass < num_passes
-            {
-                if cursor.hemi_idx > 0 && cursor.hemi_side > 0 {
-                    begin_bake_render_pass(ctx, true)
-                }
-
-                // Start the next pass.
-                set_cursor_and_rasterizer(ctx, 0)
-            }
-            else
-            {
-                // We've finished the lightmapping process.
-                bake_done = true
-
-                // Reset baking state.
-                cursor.hemi_idx = 0
-                cursor.pass = 0
-                cursor.hemi_side = 5
-
-                validation.iter_begin = false
-                return {}, false
-            }
-        }
-    }
-
-    // Prepare hemisphere.
-    if cursor.hemi_side == 0
-    {
-        // Prepare hemisphere batch.
-        if cursor.hemi_idx == 0
-        {
-            assert(bake_pass == nil)  // Pass should have ended by now.
-
-            submit_and_recreate_cmd_buf(ctx)
-
-            begin_bake_render_pass(ctx)
-        }
-
-        hemi_batch_to_lightmap[cursor.hemi_idx] = rasterizer.pos
-    }
-
-    viewport_offset, viewport_size, world_to_view, view_to_proj := compute_current_camera(ctx)
-    params.viewport_offset = viewport_offset
-    params.viewport_size   = viewport_size
-    params.world_to_view   = world_to_view
-    params.view_to_proj    = view_to_proj
-    params.pass = bake_pass
-    params.cmd_buf = cmd_buf
-    assert(bake_pass != nil)
-    assert(cmd_buf != nil)
-    return params, true
-}
-
-// Returns a value from 0 to 1.
-bake_progress :: proc(using ctx: ^Context) -> f32
-{
-    if !validation.iter_begin && bake_done do return 1.0
-
-    pass_progress := f32(cursor.tri_base_idx) / (f32(mesh.tri_count) * 3.0)
-    return (f32(cursor.pass) + pass_progress) / f32(num_passes)
-}
-
-// Must be called if and only if bake_iterate_begin returns true. For example:
-// for render_params in lm.bake_iterate_begin(lm_ctx)
-// {
-//     defer lm.bake_iterate_end(lm_ctx)
-//     ...
-// }
-bake_iterate_end :: proc(using ctx: ^Context)
-{
-    assert(validation.iter_begin, "bake_iterate_end should only be called after bake_iterate_begin and iff that returns true!")
-    assert(validation.bake_begin, "Forgot to call bake_begin!")
-    validation.iter_begin = false
-    validate_context(ctx)
-
-    cursor.hemi_side += 1
-
-    if cursor.hemi_side >= 5
-    {
-        cursor.hemi_idx += 1
-        was_last_in_batch := cursor.hemi_idx >= hemi_params.batch_count.x * hemi_params.batch_count.y
-        if was_last_in_batch
-        {
-            if bake_pass != nil
-            {
-                sdl.EndGPURenderPass(bake_pass)
-                bake_pass = nil
-            }
-
-            integrate_hemi_batch_and_copy_to_transfer_buf(ctx)
-            cursor.hemi_idx = 0
-        }
-    }
-}
-
-// Post-processing functions.
-
-// This postprocessing step is important because it eliminates
-// "invalid" pixels, obtained by rendering the back-side of objects.
-postprocess_dilate :: proc(using ctx: ^Context)
-{
-    assert(validation.bake_begin, "Forgot to call bake_begin!")
-    validate_context(ctx)
-
-    output := slice.clone_to_dynamic(lightmap[:])
-    defer
-    {
-        delete(lightmap)
-        lightmap = output
-    }
-
-    for y in 0..<lightmap_size.y
-    {
-        for x in 0..<lightmap_size.x
-        {
-            lm_idx := y * lightmap_size.y + x
-            output_color := lightmap[lm_idx]
-            if output_color == { 0, 0, 0, 0 }
-            {
-                n := 0
-                offsets := [][2]int { {-1, 0}, {0, 1}, {1, 0}, {0, -1} }
-                for offset_idx in 0..<4
-                {
-                    sample_idx := offsets[offset_idx] + {auto_cast x, auto_cast y}
-                    in_bounds_x := sample_idx.x >= 0 && auto_cast sample_idx.x < lightmap_size.x
-                    in_bounds_y := sample_idx.y >= 0 && auto_cast sample_idx.y < lightmap_size.y
-                    if in_bounds_x && in_bounds_y
-                    {
-                        sample := lightmap[sample_idx.y * auto_cast lightmap_size.x + sample_idx.x]
-                        if sample != { 0, 0, 0, 0 }
-                        {
-                            output_color += sample
-                            n += 1
-                        }
-                    }
-                }
-
-                if n > 0
-                {
-                    output_color *= 1.0 / f32(n)
-                }
-            }
-
-            output[lm_idx] = output_color
-        }
-    }
-}
-
-postprocess_box_blur :: proc(using ctx: ^Context)
-{
-    assert(validation.bake_begin, "Forgot to call bake_begin!")
-    validate_context(ctx)
-
-    output := slice.clone_to_dynamic(lightmap[:])
-    defer
-    {
-        delete(lightmap)
-        lightmap = output
-    }
-
-    for y in 0..<lightmap_size.y
-    {
-        for x in 0..<lightmap_size.x
-        {
-            output_color: [4]f32
-            n := 0
-            for offset_y in -1..=1
-            {
-                for offset_x in -1..=1
-                {
-                    sample_idx := [2]int {offset_x, offset_y} + {int(x), int(y)}
-                    in_bounds_x := sample_idx.x >= 0 && sample_idx.x < int(lightmap_size.x)
-                    in_bounds_y := sample_idx.y >= 0 && sample_idx.y < int(lightmap_size.y)
-                    if in_bounds_x && in_bounds_y
-                    {
-                        sample := lightmap[sample_idx.y * int(lightmap_size.x) + sample_idx.x]
-                        if sample != { 0, 0, 0, 0 }
-                        {
-                            output_color += sample
-                            n += 1
-                        }
-                    }
-                }
-            }
-
-            output[y * lightmap_size.x + x] = output_color / f32(n) if n > 0 else 0.0
-        }
-    }
-}
-
-////////////////////////////
-// Internal
-
-// A good introduction to learn some of the theory behind this:
-// http://the-witness.net/news/2010/09/hemicube-rendering-and-integration/
-
 Context :: struct
 {
-    // Settings
-    num_passes: u32,
-    interp_threshold: f32,
-    do_log_stats: bool,
-
-    // Validation
-    validation: Validation,
-
-    // Bound state
-    mesh: Mesh,
-    mesh_transform:  matrix[4, 4]f32,
-    mesh_normal_mat: matrix[4, 4]f32,
-    lightmap_size: [2]u32,
-    lightmap_format: sdl.GPUTextureFormat,
-
-    // Lightmap baking state
-    cursor: Cursor,
-    rasterizer: Rasterizer,
-    tri_sample: Tri_Sample,
-    hemi_params: Hemisphere_Params,
-    hemi_batch_to_lightmap: [dynamic][2]u32,  // hemisphere idx in batch -> lightmap pixel
-    samples_storage: Samples_Storage,
-    // We need to keep a copy on the CPU for irradiance caching.
-    // buf is a buffer which contains packed hemisphere
-    // sample results. This data is then written into the lightmap
-    // using a coordinate transformation (map).
-    lightmap: [dynamic][4]f32,
-    bake_done: bool,
-
-    // GPU Resources
-    device: ^sdl.GPUDevice,
-    cmd_buf: ^sdl.GPUCommandBuffer,
-    fence: ^sdl.GPUFence,  // For double buffering.
-    bake_pass: ^sdl.GPURenderPass,
+    using vk_ctx: Vulkan_Context,
     shaders: Shaders,
-
-    // Textures
-    weights_texture: ^sdl.GPUTexture,  // Holds the weights to convert pixels from hemicube to hemisphere.
-    hemi_batch_texture: ^sdl.GPUTexture,  // Holds many hemispheres (which in turn hold 5 different hemicube sides each)
-    hemi_batch_depth_texture: ^sdl.GPUTexture,
-    hemi_reduce_textures: [2]^sdl.GPUTexture,  // Ping-pong buffers used to run hemisphere reduction steps.
 }
 
-Validation :: struct
+Vulkan_Context :: struct
 {
-    ctx_initialized: bool,
-    bake_begin: bool,
-    iter_begin: bool,
+    phys_device: vk.PhysicalDevice,
+    device: vk.Device,
+    queue: vk.Queue,
+    queue_family_idx: u32,
+    rt_handle_alignment: u32,
+    rt_handle_size: u32,
+    rt_base_align: u32,
 }
 
-Cursor :: struct
-{
-    pass: u32,
-    tri_base_idx: int,  // The index of the first vertex.
-    tri_verts_pos: [3] [3]f32,
-    tri_verts_normal: [3] [3]f32,
-    tri_verts_lm_uv: [3] [2]f32,
+// Initialization
 
-    hemi_idx:  u32,  // Index in the current batch.
-    hemi_side: u32,  // [0, 4], side of the hemicube.
+init_from_scratch :: proc() -> Context
+{
+    return {}
 }
 
-Tri_Sample :: struct
+init_from_vulkan_instance :: proc(vk_ctx: Vulkan_Context) -> Context
 {
-    pos: [3]f32,
-    dir: [3]f32,
-    up:  [3]f32,
+    res: Context
+    res.vk_ctx = vk_ctx
+
+    return res
 }
 
-// This is a conservative rasterizer, meaning if any point
-// of the triangle overlaps with the pixel it will get rasterized.
-Rasterizer :: struct
+// Scene description
+
+Scene :: struct
 {
-    min: [2]u32,
-    max: [2]u32,
-    pos: [2]u32,
+
 }
 
-Samples_Storage :: struct
+// Baking
+
+@(private="file")
+Bake :: struct
 {
-    // Final texture which gets then copied into the user texture.
-    // This is required because the user texture in general is sampleable
-    // (to be able to get multiple bounces) which sadly makes it incompatible
-    // with the compute pipeline in general.
-    final_result_texture: ^sdl.GPUTexture,
-
-    transfer: ^sdl.GPUTransferBuffer,
-    uv_map: [dynamic][2]u32,
-    tex: ^sdl.GPUTexture,  // Final lightmap
-    uv_write_pos: u32,
-
-    using debug: Debug_Samples_Storage,
+    using ctx: ^Context,
 }
 
-when DEBUG_INTERPOLATION
+start_bake :: proc(using ctx: ^Context, lightmap_size: u32, scene: Scene) -> Bake
 {
-    Debug_Samples_Storage :: struct
-    {
-        debug_interp_buf: [dynamic][4]f32,
-        num_interpolated: u32,
-        num_sampled: u32,
-    }
-}
-else
-{
-    Debug_Samples_Storage :: struct {}
+    return {}
 }
 
-HEMI_BATCH_TEXTURE_SIZE :: [2]u32 { 512 * 3, 512 }
-#assert(HEMI_BATCH_TEXTURE_SIZE.x % 3 == 0 && intr.count_ones(HEMI_BATCH_TEXTURE_SIZE.x / 3) == 1,
-        "HEMI_BATCH_TEXTURE_SIZE.x must be 3 * power-of-two!")
-#assert(intr.count_ones(HEMI_BATCH_TEXTURE_SIZE.y) == 1,
-        "HEMI_BATCH_TEXTURE_SIZE.y must be a power of two!")
-
-Hemisphere_Params :: struct
+// If it's 1 it's done.
+progress :: proc(using bake: ^Bake) -> f32
 {
-    z_near: f32,
-    z_far: f32,
-    size: u32,
-    cam_to_surface_distance_modifier: f32,
-    clear_color: [3]f32, // Do i actually need this?
-    batch_count: [2]u32,
+    return 0.0
 }
 
-compute_current_camera :: proc(using ctx: ^Context) -> (viewport_offset: [2]u32, viewport_size: [2]u32, world_to_view: matrix[4, 4]f32, view_to_proj: matrix[4, 4]f32)
+// Cleans up resources if called after progress(bake) == 1.0 and
+// forcibly aborts the baking process if called before progress(bake) == 1.0
+end_bake :: proc(using bake: ^Bake)
 {
-    assert(cursor.hemi_side >= 0 && cursor.hemi_side < 5)
 
-    x := (cursor.hemi_idx % hemi_params.batch_count.x) * hemi_params.size * 3
-    y := (cursor.hemi_idx / hemi_params.batch_count.y) * hemi_params.size
+}
 
-    size := hemi_params.size
-    zn := hemi_params.z_near
-    zf := hemi_params.z_far
+wait_end_of_bake :: proc()
+{
 
-    pos := tri_sample.pos
-    dir := tri_sample.dir
-    up  := tri_sample.up
-    right := cross(dir, up)
+}
 
-    // +-------+---+---+-------+
-    // |       |   |   |   D   |
-    // |   C   | R | L +-------+
-    // |       |   |   |   U   |
-    // +-------+---+---+-------+
-    switch cursor.hemi_side
-    {
-        case 0:  // Center
+get_current_lightmap_view_vk :: proc() -> vk.ImageView
+{
+    return vk.ImageView(0)
+}
+
+get_current_lightmap_view_cpu_buf :: proc() -> []byte
+{
+    return {}
+}
+
+// Internals
+
+Shaders :: struct
+{
+    // GBuffer generation
+    pipeline_layout: vk.PipelineLayout,
+    uv_space: vk.ShaderEXT,
+    gbuffer_world_pos: vk.ShaderEXT,
+    gbuffer_world_normals: vk.ShaderEXT,
+
+    // RT
+    rt_desc_set_layout: vk.DescriptorSetLayout,
+    rt_pipeline_layout: vk.PipelineLayout,
+    rt_pipeline: vk.Pipeline,
+    sbt_buf: Buffer,
+}
+
+Buffer :: struct
+{
+    handle: vk.Buffer,
+    mem: vk.DeviceMemory,
+}
+
+uv_space_vert_code              := #load("shaders/uv_space.vert.spv")
+gbuffer_world_pos_frag_code     := #load("shaders/gbuffer_world_pos.frag.spv")
+gbuffer_world_normals_frag_code := #load("shaders/gbuffer_world_normals.frag.spv")
+raygen_code                     := #load("shaders/raygen.rgen.spv")
+raymiss_code                    := #load("shaders/raymiss.rmiss.spv")
+rayhit_code                     := #load("shaders/rayhit.rchit.spv")
+
+create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
+{
+    res: Shaders
+
+    push_constant_ranges := []vk.PushConstantRange {
         {
-            world_to_view, view_to_proj = compute_matrices(pos, dir, up, -zn, zn, -zn, zn, zn, zf)
-            viewport_offset = { x, y }
-            viewport_size   = { size, size }
-        }
-        case 1:  // Right
-        {
-            world_to_view, view_to_proj = compute_matrices(pos, right, up, -zn, 0, -zn, zn, zn, zf)
-            viewport_offset = { x + size, y }
-            viewport_size   = { size / 2.0, size }
-        }
-        case 2:  // Left
-        {
-            world_to_view, view_to_proj = compute_matrices(pos, -right, up, 0, zn, -zn, zn, zn, zf)
-            viewport_offset = { x + size + size / 2.0, y }
-            viewport_size   = { size / 2.0, size }
-        }
-        case 3:  // Down
-        {
-            // TODO: Mhmmm... "dir" is flipped here. Why does this work?
-            world_to_view, view_to_proj = compute_matrices(pos, -up, -dir, -zn, zn, 0, zn, zn, zf)
-            viewport_offset = { x + size + size, y }
-            viewport_size   = { size, size / 2.0 }
-        }
-        case 4:  // Up
-        {
-            // TODO: Mhmmm... "dir" is flipped here. Why does this work?
-            world_to_view, view_to_proj = compute_matrices(pos, up, dir, -zn, zn, -zn, 0, zn, zf)
-            viewport_offset = { x + size + size, y + size / 2 }
-            viewport_size   = { size, size / 2.0 }
+            stageFlags = { .VERTEX, .FRAGMENT },
+            size = 256,
         }
     }
 
-    return viewport_offset, viewport_size, world_to_view, view_to_proj
-
-    compute_matrices :: proc(pos: [3]f32, dir: [3]f32, up: [3]f32,
-                             l: f32, r: f32, b: f32, t: f32, n: f32, f: f32) ->
-                             (world_to_view: matrix[4, 4]f32, view_to_proj: matrix[4, 4]f32)
+    // Desc set layouts
     {
-        assert(abs(dot(dir, up)) < 0.001)  // Should be perpendicular
-        assert(abs(la.length(dir) - 1.0) < 0.001)  // Should be normalized
-        assert(abs(la.length(up)  - 1.0) < 0.001)  // Should be normalized
-
-        right := cross(up, dir)
-        world_to_view = {
-            right.x, right.y, right.z, dot(right, -pos),
-            up.x,    up.y,    up.z,    dot(up, -pos),
-            dir.x,   dir.y,   dir.z,   dot(dir, -pos),
-            0,       0,       0,       1.0,
-        }
-
-        // Perspective view from frustum.
-        view_to_proj = {
-            2.0 * n / (r - l), 0,                 (r + l) / (r - l),  0,
-            0,                 2.0 * n / (t - b), (t + b) / (t - b),  0,
-            0,                 0,                 (f + n) / (f - n),  -2.0 * f * n / (f - n),
-            0,                 0,                 1,                  0,
-        }
-
-        return world_to_view, view_to_proj
-    }
-}
-
-set_cursor_and_rasterizer :: proc(using ctx: ^Context, tri_idx: i64)
-{
-    cursor.tri_base_idx = auto_cast tri_idx
-
-    verts_indices: [3]i64 = tri_idx
-    if mesh.use_indices {
-        for i in 0..<3 do verts_indices[i] = get_i64_from_buffer(mesh.indices, tri_idx + auto_cast i)
-    } else {
-        for i in 0..<3 do verts_indices[i] = tri_idx + auto_cast i
-    }
-
-    uv_scale := [2]f32 { auto_cast lightmap_size.x, auto_cast lightmap_size.y }
-
-    uv_min: [2]f32 = max(f32)
-    uv_max: [2]f32 = min(f32)
-    for i in 0..<3
-    {
-        cursor.tri_verts_pos[i]    = get_vec3f32_from_buffer(mesh.positions, verts_indices[i])
-        cursor.tri_verts_normal[i] = get_vec3f32_from_buffer(mesh.normals, verts_indices[i])
-        cursor.tri_verts_lm_uv[i]  = get_vec2f32_from_buffer(mesh.lm_uvs, verts_indices[i])
-
-        // Transformations.
-        pos := [4]f32 { cursor.tri_verts_pos[i].x, cursor.tri_verts_pos[i].y, cursor.tri_verts_pos[i].z, 1.0 }
-        cursor.tri_verts_pos[i]    = (mesh_transform * pos).xyz
-        normal := [4]f32 { cursor.tri_verts_normal[i].x, cursor.tri_verts_normal[i].y, cursor.tri_verts_normal[i].z, 1.0 }
-        cursor.tri_verts_normal[i] = (mesh_normal_mat * normal).xyz
-
-        cursor.tri_verts_lm_uv[i] *= uv_scale
-
-        uv_min = { min(uv_min.x, cursor.tri_verts_lm_uv[i].x), min(uv_min.y, cursor.tri_verts_lm_uv[i].y) }
-        uv_max = { max(uv_max.x, cursor.tri_verts_lm_uv[i].x), max(uv_max.y, cursor.tri_verts_lm_uv[i].y) }
-    }
-
-    // Calculate bounding box on lightmap for conservative rasterization.
-    bb_min := la.floor(uv_min)
-    bb_max := la.ceil(uv_max)
-    rasterizer.min.x = max(u32(bb_min.x), 0)
-    rasterizer.min.y = max(u32(bb_min.y), 0)
-    rasterizer.max.x = min(u32(bb_max.x) + 1, u32(lightmap_size.x - 1))
-    rasterizer.max.y = min(u32(bb_max.y) + 1, u32(lightmap_size.y - 1))
-    assert(rasterizer.min.x <= rasterizer.max.x && rasterizer.min.y <= rasterizer.max.y)
-    rasterizer.pos = rasterizer.min + pass_offset(ctx)
-
-    // Check if there are any valid samples on this triangle.
-    if (rasterizer.pos.x <= rasterizer.max.x && rasterizer.pos.y <= rasterizer.max.y &&
-        find_first_rasterizer_position(ctx))
-    {
-        cursor.hemi_side = 0
-    }
-    else
-    {
-        cursor.hemi_side = 5  // Already finished rasterizing this triangle before even having begun.
-    }
-}
-
-// NOTE: This starts new passes, so when calling this function no other pass should be bound.
-integrate_hemi_batch_and_copy_to_transfer_buf :: proc(using ctx: ^Context)
-{
-    if cursor.hemi_idx == 0 do return
-
-    tex_target_idx := 0
-    tex_read_idx   := 1
-
-    reduced_size := hemi_params.size
-
-    // NOTE: Coupled to the shader code.
-    Uniforms :: struct
-    {
-        input_size: [2]u32,
-        output_size: [2]u32,
-    }
-
-    // First pass: Downsample and apply weights.
-    {
-        THREAD_GROUP_SIZE: u32 : 8  // NOTE: Coupled to the shader code.
-        samples_per_group := 1 * THREAD_GROUP_SIZE
-        assert(hemi_params.size > max(hemi_params.batch_count.x, hemi_params.batch_count.y))
-
-        group_count: [2]u32 = hemi_params.size / samples_per_group * hemi_params.batch_count
-        group_count = { max(group_count.x, hemi_params.batch_count.x), max(group_count.y, hemi_params.batch_count.y) }
-
-        uniforms := Uniforms {
-            input_size = reduced_size * hemi_params.batch_count,
-            output_size = group_count,
-        }
-        sdl.PushGPUComputeUniformData(cmd_buf, 0, &uniforms, size_of(uniforms))
-
-        // Read from hemi_batch_texture and write to hemi_reduce_textures[0]
-        storage_write_tex_binding := sdl.GPUStorageTextureReadWriteBinding {
-            texture = hemi_reduce_textures[tex_target_idx],
-            mip_level = 0,
-            layer = 0,
-            cycle = false
-        }
-        pass := sdl.BeginGPUComputePass(cmd_buf, &storage_write_tex_binding, 1, nil, 0)
-        defer sdl.EndGPUComputePass(pass)
-
-        sdl.BindGPUComputePipeline(pass, shaders.hemi_weighted_reduce)
-
-        storage_tex_bindings := []^sdl.GPUTexture { hemi_batch_texture, weights_texture }
-        sdl.BindGPUComputeStorageTextures(pass, 0, &storage_tex_bindings[0], 2)
-
-        assert(group_count.x > 0 && group_count.y > 0)
-        sdl.DispatchGPUCompute(pass, group_count.x, group_count.y, 1)
-
-        reduced_size /= samples_per_group
-    }
-
-    // Swap back textures to undo last iteration.
-    tex_target_idx = tex_read_idx
-    tex_read_idx = (tex_target_idx + 1) % 2
-
-    // Successive passes: non-weighted downsampling passes.
-    for reduced_size > 1
-    {
-        THREAD_GROUP_SIZE: u32 : 8  // NOTE: Coupled to the shader code.
-        num_samples_per_group := 2 * THREAD_GROUP_SIZE
-
-        group_count: [2]u32 = reduced_size / num_samples_per_group * hemi_params.batch_count
-        group_count = { max(group_count.x, hemi_params.batch_count.x), max(group_count.y, hemi_params.batch_count.y) }
-
-        uniforms := Uniforms {
-            input_size = reduced_size * hemi_params.batch_count,
-            output_size = group_count,
-        }
-        sdl.PushGPUComputeUniformData(cmd_buf, 0, &uniforms, size_of(uniforms))
-
-        // Read from hemi_reduce_textures[read] and write to hemi_reduce_textures[target].
-        storage_tex_binding := sdl.GPUStorageTextureReadWriteBinding {
-            texture = hemi_reduce_textures[tex_target_idx],
-            mip_level = 0,
-            layer = 0,
-            cycle = false
-        }
-        pass := sdl.BeginGPUComputePass(cmd_buf, &storage_tex_binding, 1, nil, 0)
-        defer sdl.EndGPUComputePass(pass)
-
-        sdl.BindGPUComputePipeline(pass, shaders.hemi_reduce)
-
-        sdl.BindGPUComputeStorageTextures(pass, 0, &hemi_reduce_textures[tex_read_idx], 1)
-
-        assert(group_count.x > 0 && group_count.y > 0)
-        sdl.DispatchGPUCompute(pass, group_count.x, group_count.y, 1)
-
-        // Swap textures.
-        tex_target_idx = tex_read_idx
-        tex_read_idx = (tex_target_idx + 1) % 2
-
-        reduced_size /= num_samples_per_group
-    }
-
-    // Swap back textures to undo last iteration.
-    tex_target_idx = tex_read_idx
-    tex_read_idx = (tex_target_idx + 1) % 2
-
-    // Copy results to transfer buffer.
-    {
-        pass := sdl.BeginGPUCopyPass(cmd_buf)
-        defer sdl.EndGPUCopyPass(pass)
-
-        // TODO: Results in the optimized version of this
-        // are slightly different? Investigate this...
-        when false
-        {
-            // Slow version, pixel by pixel copy.
-
-            for dst_pixel, idx in hemi_batch_to_lightmap
-            {
-                if auto_cast idx >= cursor.hemi_idx do break
-
-                src_x := u32(idx) % hemi_params.batch_count.x
-                src_y := u32(idx) / hemi_params.batch_count.y
-
-                src := sdl.GPUTextureRegion {
-                    texture = hemi_reduce_textures[tex_target_idx],
-                    mip_level = 0,
-                    layer = 0,
-                    x = src_x,
-                    y = src_y,
-                    z = 0,
-                    w = 1,
-                    h = 1,
-                    d = 1,
-                }
-                dst := sdl.GPUTextureTransferInfo {
-                    transfer_buffer = samples_storage.transfer,
-                    offset = (samples_storage.uv_write_pos + auto_cast idx) * size_of([4]f32),
-                }
-                sdl.DownloadFromGPUTexture(pass, src, dst)
-            }
-
-            // Update uv map.
-            for i in 0..<cursor.hemi_idx {
-                samples_storage.uv_map[samples_storage.uv_write_pos + i] = hemi_batch_to_lightmap[i]
-            }
-
-            samples_storage.uv_write_pos += cursor.hemi_idx
-        }
-        else
-        {
-            // Fast version, batched copies.
-
-            write_pos_old := samples_storage.uv_write_pos
-
-            if cursor.hemi_idx / hemi_params.batch_count.x > 0
-            {
-                total_hemis := hemi_params.batch_count.x * hemi_params.batch_count.y
-                copy_size := hemi_params.batch_count
-                if cursor.hemi_idx < total_hemis {
-                    copy_size.y = cursor.hemi_idx / hemi_params.batch_count.x
-                }
-
-                src := sdl.GPUTextureRegion {
-                    texture = hemi_reduce_textures[tex_target_idx],
-                    mip_level = 0,
-                    layer = 0,
-                    x = 0,
-                    y = 0,
-                    z = 0,
-                    w = copy_size.x,
-                    h = copy_size.y,
-                    d = 1,
-                }
-                dst := sdl.GPUTextureTransferInfo {
-                    transfer_buffer = samples_storage.transfer,
-                    offset = samples_storage.uv_write_pos * size_of([4]f32),
-                }
-                sdl.DownloadFromGPUTexture(pass, src, dst)
-
-                written := copy_size.y * copy_size.x
-                for i, idx in samples_storage.uv_write_pos..<samples_storage.uv_write_pos+written {
-                    samples_storage.uv_map[i] = hemi_batch_to_lightmap[idx]
-                }
-
-                samples_storage.uv_write_pos += written
-            }
-
-            // Copy the last partial row if it exists (most of the time it doesn't).
-            if cursor.hemi_idx % hemi_params.batch_count.x > 0
-            {
-                remaining_copy_size := [2]u32 { cursor.hemi_idx % hemi_params.batch_count.x, 1 }
-                src := sdl.GPUTextureRegion {
-                    texture = hemi_reduce_textures[tex_target_idx],
-                    mip_level = 0,
-                    layer = 0,
-                    x = 0,
-                    y = cursor.hemi_idx / hemi_params.batch_count.x,
-                    z = 0,
-                    w = remaining_copy_size.x,
-                    h = remaining_copy_size.y,
-                    d = 1,
-                }
-                dst := sdl.GPUTextureTransferInfo {
-                    transfer_buffer = samples_storage.transfer,
-                    offset = samples_storage.uv_write_pos * size_of([4]f32),
-                }
-                sdl.DownloadFromGPUTexture(pass, src, dst)
-
-                written := remaining_copy_size.y * remaining_copy_size.x
-                for i, idx in samples_storage.uv_write_pos..<samples_storage.uv_write_pos+written {
-                    samples_storage.uv_map[i] = hemi_batch_to_lightmap[idx]
-                }
-
-                samples_storage.uv_write_pos += written
-            }
-
-            assert(write_pos_old + cursor.hemi_idx == samples_storage.uv_write_pos)
-        }
-    }
-}
-
-find_first_rasterizer_position :: proc(using ctx: ^Context) -> bool
-{
-    for !try_sampling_rasterizer_position(ctx)
-    {
-        move_to_next_potential_rasterizer_position(ctx)
-        if has_rasterizer_finished(ctx) {
-            return false
-        }
-    }
-
-    return true
-}
-
-move_to_next_potential_rasterizer_position :: proc(using ctx: ^Context)
-{
-    step := pass_step_size(ctx)
-    rasterizer.pos.x += step
-    for rasterizer.pos.x >= rasterizer.max.x && !has_rasterizer_finished(ctx)
-    {
-        rasterizer.pos.x = rasterizer.min.x + pass_offset(ctx).x
-        rasterizer.pos.y += step
-    }
-}
-
-// If it returns true, ctx.tri_sample will be filled in.
-try_sampling_rasterizer_position :: proc(using ctx: ^Context) -> bool
-{
-    if has_rasterizer_finished(ctx) do return false
-
-    lm_already_set := lightmap[rasterizer.pos.y * lightmap_size.x + rasterizer.pos.x] != { 0, 0, 0, 0 }
-    if lm_already_set do return false
-
-    // Try computing centroid by clipping the pixel against the triangle.
-    raster_pos := [2]f32 { auto_cast rasterizer.pos.x, auto_cast rasterizer.pos.y }
-    clipped_array, clipped_len := pixel_tri_clip(raster_pos, cursor.tri_verts_lm_uv)
-    if clipped_len <= 0 do return false  // Nothing left.
-
-    clipped := clipped_array[:clipped_len]
-
-    // Compute centroid position and area.
-    // http://the-witness.net/news/2010/09/hemicube-rendering-and-integration/
-    // Centroid sampling basically makes it so we don't clip inside of a wall
-    // for hemisphere rendering of an intersecting floor. (This only works if
-    // geometry is well-formed and there are no intersections)
-    clipped_first := clipped[0]
-    clipped_last  := clipped[len(clipped) - 1]
-    centroid := clipped_first
-    area := clipped_last.x * clipped_first.y - clipped_last.y * clipped_first.x
-    for i in 1..<len(clipped)
-    {
-        centroid += clipped[i]
-        area += clipped[i - 1].x * clipped[i].y - clipped[i - 1].y * clipped[i].x
-    }
-    centroid = centroid / auto_cast len(clipped)
-    area = abs(area / 2.0)
-
-    if area <= 0.0 do return false  // No area left.
-
-    // Compute barycentric coords.
-    uv := to_barycentric(cursor.tri_verts_lm_uv[0], cursor.tri_verts_lm_uv[1], cursor.tri_verts_lm_uv[2], centroid)
-    if math.is_nan(uv.x) || math.is_inf(uv.x) || math.is_nan(uv.y) || math.is_inf(uv.y) {
-        return false // Degenerate case.
-    }
-
-    // Try to interpolate color from neighbors.
-    // (Irradiance caching)
-    if cursor.pass > 0
-    {
-        neighbors: [4][4]f32
-        neighbor_count := 0
-        neighbors_expected := 0
-
-        d := pass_step_size(ctx) / 2
-        dirs := ((cursor.pass - 1) % 3) + 1
-        if dirs & 1 != 0  // Check x-neighbors with distance d
-        {
-            neighbors_expected += 2
-            if rasterizer.pos.x - d >= rasterizer.min.x &&
-               rasterizer.pos.x + d <= rasterizer.max.x
-            {
-                neighbors[neighbor_count + 0] = lightmap[rasterizer.pos.y * auto_cast lightmap_size.x + (rasterizer.pos.x - d)]
-                neighbors[neighbor_count + 1] = lightmap[rasterizer.pos.y * auto_cast lightmap_size.x + (rasterizer.pos.x + d)]
-                neighbor_count += 2
-            }
-        }
-        if dirs & 2 != 0  // Check y-neighbors with distance d
-        {
-            neighbors_expected += 2
-            if rasterizer.pos.y - d >= rasterizer.min.y &&
-               rasterizer.pos.y + d <= rasterizer.max.y
-            {
-                neighbors[neighbor_count + 0] = lightmap[(rasterizer.pos.y - d) * auto_cast lightmap_size.x + rasterizer.pos.x]
-                neighbors[neighbor_count + 1] = lightmap[(rasterizer.pos.y + d) * auto_cast lightmap_size.x + rasterizer.pos.x]
-                neighbor_count += 2
-            }
-        }
-
-        if neighbor_count == neighbors_expected
-        {
-            avg: [4]f32
-            for neighbor_idx in 0..<neighbor_count
-            {
-                avg += neighbors[neighbor_idx]
-            }
-
-            avg /= f32(neighbor_count)
-
-            interpolate := true
-            for neighbor_idx in 0..<neighbor_count
-            {
-                is_zero := true
-                for channel in 0..<4
+        rt_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = {},
+            bindingCount = 4,
+            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
                 {
-                    neighbor := neighbors[neighbor_idx]
-                    if neighbor[channel] != 0.0 {
-                        is_zero = false
-                    }
-                    if abs(neighbor[channel] - avg[channel]) > interp_threshold {
-                        interpolate = false
-                    }
+                    binding = 0,
+                    descriptorType = .ACCELERATION_STRUCTURE_KHR,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 1,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 2,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 3,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
                 }
+            })
+        }
+        vk_check(vk.CreateDescriptorSetLayout(device, &rt_desc_set_layout_ci, nil, &res.rt_desc_set_layout))
+    }
 
-                if is_zero do interpolate = false
-                if !interpolate do break
-            }
+    // Pipeline layouts
+    {
+        rt_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            flags = {},
+            pushConstantRangeCount = u32(1),
+            pPushConstantRanges = raw_data([]vk.PushConstantRange {
+                {
+                    stageFlags = { .RAYGEN_KHR },
+                    size = 256,
+                }
+            }),
+            setLayoutCount = 1,
+            pSetLayouts = &res.rt_desc_set_layout
+        }
+        vk_check(vk.CreatePipelineLayout(device, &rt_pipeline_layout_ci, nil, &res.rt_pipeline_layout))
+    }
 
-            if interpolate
+    // Create shader objects.
+    {
+        shader_cis := [?]vk.ShaderCreateInfoEXT {
             {
-                lightmap[rasterizer.pos.y * auto_cast lightmap_size.x + rasterizer.pos.x] = avg
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(uv_space_vert_code),
+                pCode = raw_data(uv_space_vert_code),
+                pName = "main",
+                stage = { .VERTEX },
+                nextStage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges)
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(gbuffer_world_pos_frag_code),
+                pCode = raw_data(gbuffer_world_pos_frag_code),
+                pName = "main",
+                stage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(gbuffer_world_normals_frag_code),
+                pCode = raw_data(gbuffer_world_normals_frag_code),
+                pName = "main",
+                stage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+            },
+        }
+        shaders: [len(shader_cis)]vk.ShaderEXT
+        vk_check(vk.CreateShadersEXT(device, len(shaders), raw_data(&shader_cis), nil, raw_data(&shaders)))
+        res.uv_space = shaders[0]
+        res.gbuffer_world_pos = shaders[1]
+        res.gbuffer_world_normals = shaders[2]
+    }
 
-                when DEBUG_INTERPOLATION {  // Write green pixel.
-                    samples_storage.debug_interp_buf[rasterizer.pos.y * auto_cast lightmap_size.x + rasterizer.pos.x] = { 0, 1, 0, 1 }
-                    samples_storage.num_interpolated += 1
-                }
+    // RT
+    SHADER_UNUSED :: ~u32(0)
 
-                return false
+    raygen_shader: vk.ShaderModule
+    raymiss_shader: vk.ShaderModule
+    rayhit_shader: vk.ShaderModule
+
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(raygen_code),
+            pCode = auto_cast raw_data(raygen_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raygen_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(raymiss_code),
+            pCode = auto_cast raw_data(raymiss_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raymiss_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(rayhit_code),
+            pCode = auto_cast raw_data(rayhit_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &rayhit_shader))
+    }
+
+    rt_pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
+        sType = .RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+        flags = {},
+        stageCount = 3,
+        pStages = raw_data([]vk.PipelineShaderStageCreateInfo {
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .RAYGEN_KHR },
+                module = raygen_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .MISS_KHR },
+                module = raymiss_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .CLOSEST_HIT_KHR },
+                module = rayhit_shader,
+                pName = "main"
+            },
+        }),
+        groupCount = 3,
+        pGroups = raw_data([]vk.RayTracingShaderGroupCreateInfoKHR {
+            {  // Raygen group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 0,
+                closestHitShader = SHADER_UNUSED,
+                anyHitShader = SHADER_UNUSED,
+                intersectionShader = SHADER_UNUSED,
+            },
+            {  // Miss group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 1,
+                closestHitShader = SHADER_UNUSED,
+                anyHitShader = SHADER_UNUSED,
+                intersectionShader = SHADER_UNUSED,
+            },
+            {  // Triangles hit group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .TRIANGLES_HIT_GROUP,
+                generalShader = SHADER_UNUSED,
+                closestHitShader = 2,
+                anyHitShader = SHADER_UNUSED,
+                intersectionShader = SHADER_UNUSED,
             }
+        }),
+        maxPipelineRayRecursionDepth = 1,
+        pLibraryInfo = nil,
+        pLibraryInterface = nil,
+        pDynamicState = nil,
+        layout = res.rt_pipeline_layout,
+        basePipelineHandle = cast(vk.Pipeline) 0,
+        basePipelineIndex = 0,
+    }
+    vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &rt_pipeline_ci, nil, &res.rt_pipeline))
+
+    // Raytracing resources
+    {
+        // Shader Binding Table
+        group_count := u32(3)
+        size := group_count * rt_handle_size
+        shader_handle_storage := make([]byte, size, allocator = context.temp_allocator)
+        vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, res.rt_pipeline, 0, group_count, int(size), raw_data(shader_handle_storage)))
+        res.sbt_buf = create_sbt_buffer(ctx, shader_handle_storage, group_count)
+    }
+
+    return res
+}
+
+destroy_shaders :: proc(using ctx: ^Vulkan_Context, shaders: ^Shaders)
+{
+    vk.DestroyPipelineLayout(device, shaders.pipeline_layout, nil)
+    vk.DestroyShaderEXT(device, shaders.uv_space, nil)
+    vk.DestroyShaderEXT(device, shaders.gbuffer_world_pos, nil)
+    vk.DestroyShaderEXT(device, shaders.gbuffer_world_normals, nil)
+
+    vk.DestroyDescriptorSetLayout(device, shaders.rt_desc_set_layout, nil)
+    vk.DestroyPipelineLayout(device, shaders.rt_pipeline_layout, nil)
+    vk.DestroyPipeline(device, shaders.rt_pipeline, nil)
+    destroy_buffer(ctx, &shaders.sbt_buf)
+}
+
+create_buffer :: proc(using ctx: ^Vulkan_Context, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
+{
+    res: Buffer
+
+    buf_ci := vk.BufferCreateInfo {
+        sType = .BUFFER_CREATE_INFO,
+        size = cast(vk.DeviceSize) (el_size * count),
+        usage = usage,
+        sharingMode = .EXCLUSIVE,
+    }
+    vk_check(vk.CreateBuffer(device, &buf_ci, nil, &res.handle))
+
+    mem_requirements: vk.MemoryRequirements
+    vk.GetBufferMemoryRequirements(device, res.handle, &mem_requirements)
+
+    alloc_info := vk.MemoryAllocateFlagsInfo {
+        sType = .MEMORY_ALLOCATE_FLAGS_INFO,
+        flags = allocate_flags,
+    }
+
+    next: rawptr
+    if allocate_flags != {} {
+        next = &alloc_info
+    }
+
+    memory_ai := vk.MemoryAllocateInfo {
+        sType = .MEMORY_ALLOCATE_INFO,
+        pNext = next,
+        allocationSize = mem_requirements.size,
+        memoryTypeIndex = find_mem_type(ctx, mem_requirements.memoryTypeBits, properties)
+    }
+    vk_check(vk.AllocateMemory(device, &memory_ai, nil, &res.mem))
+
+    vk.BindBufferMemory(device, res.handle, res.mem, 0)
+
+    return res
+}
+
+copy_buffer :: proc(using ctx: ^Vulkan_Context, src: Buffer, dst: Buffer, size: vk.DeviceSize)
+{
+    // TEMPORARY CMD_BUF!!!
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    cmd_buf_bi := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+    copy_region := vk.BufferCopy {
+        srcOffset = 0,
+        dstOffset = 0,
+        size = size,
+    }
+    vk.CmdCopyBuffer(cmd_buf, src.handle, dst.handle, 1, &copy_region)
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(queue))
+}
+
+destroy_buffer :: proc(using ctx: ^Vulkan_Context, buf: ^Buffer)
+{
+    vk.FreeMemory(device, buf.mem, nil)
+    vk.DestroyBuffer(device, buf.handle, nil)
+
+    buf^ = {}
+}
+
+create_sbt_buffer :: proc(using ctx: ^Vulkan_Context, shader_handle_storage: []byte, num_groups: u32) -> Buffer
+{
+    assert(auto_cast len(shader_handle_storage) == rt_handle_size * num_groups)
+
+    size := num_groups * rt_base_align
+    staging_buf := create_buffer(ctx, 1, int(size), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
+    defer destroy_buffer(ctx, &staging_buf)
+
+    data: rawptr
+    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
+    for group_idx in 0..<num_groups
+    {
+        mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_base_align)),
+                 &shader_handle_storage[group_idx * rt_handle_size],
+                 int(rt_handle_size))
+    }
+    data_tmp := cast([^]byte) data
+    data_slice := data_tmp[:size]
+    fmt.printfln("%x", data_slice)
+    vk.UnmapMemory(device, staging_buf.mem)
+
+    res := create_buffer(ctx, 1, int(size), { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    copy_buffer(ctx, staging_buf, res, vk.DeviceSize(size))
+
+    // TEMPORARY CMD_BUF!!!
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    cmd_buf_bi := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+    barrier := vk.MemoryBarrier2 {
+        sType = .MEMORY_BARRIER_2,
+        srcStageMask = { .TRANSFER },
+        srcAccessMask = { .TRANSFER_WRITE },
+        dstStageMask = { .RAY_TRACING_SHADER_KHR },
+        dstAccessMask = { .SHADER_READ },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        memoryBarrierCount = 1,
+        pMemoryBarriers = &barrier,
+    })
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(queue))
+
+    return res
+}
+
+find_mem_type :: proc(using ctx: ^Vulkan_Context, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
+{
+    mem_properties: vk.PhysicalDeviceMemoryProperties
+    vk.GetPhysicalDeviceMemoryProperties(phys_device, &mem_properties)
+    for i in 0..<mem_properties.memoryTypeCount
+    {
+        if (type_filter & (1 << i) != 0) &&
+           (mem_properties.memoryTypes[i].propertyFlags & properties) == properties {
+            return i
         }
     }
 
-    // Could not interpolate. Must render a hemisphere.
-    // Compute 3D sample position and orientation.
+    panic("Vulkan Error: Could not find suitable memory type!")
+}
 
-    p0 := cursor.tri_verts_pos[0]
-    p1 := cursor.tri_verts_pos[1]
-    p2 := cursor.tri_verts_pos[2]
-    v1 := p1 - p0
-    v2 := p2 - p0
-    tri_sample.pos = p0 + v2 * uv.x + v1 * uv.y
-
-    n0 := cursor.tri_verts_normal[0]
-    n1 := cursor.tri_verts_normal[1]
-    n2 := cursor.tri_verts_normal[2]
-    nv1 := n1 - n0
-    nv2 := n2 - n0
-    tri_sample.dir = normalize(n0 + nv2 * uv.x + nv1 * uv.y)
-    camera_to_surface_distance := (1.0 + hemi_params.cam_to_surface_distance_modifier) * hemi_params.z_near * math.sqrt_f32(2.0)
-    tri_sample.pos += tri_sample.dir * camera_to_surface_distance
-
-    if is_inf(tri_sample.pos) || is_inf(tri_sample.dir) || la.length(tri_sample.dir) < 0.5 {
-        return false
-    }
-
-    up := [3]f32 { 0, 1, 0 }
-    if abs(dot(up, tri_sample.dir)) > 0.8 {
-        up = [3]f32 { 0, 0, 1 }
-    }
-
-    // http://the-witness.net/news/2010/09/hemicube-rendering-and-integration/
-    // Pseudo-random directions fix banding artifacts, though they increase noise.
-    // Noise is much easier to deal with, by smoothing the lightmap a bit.
-    when false
+create_instance :: proc() -> (vk.Instance, vk.DebugUtilsMessengerEXT)
+{
+    when ODIN_DEBUG
     {
-        tri_sample.up = normalize(cross(up, tri_sample.dir))
+        layers := []cstring {
+            "VK_LAYER_KHRONOS_validation",
+        }
     }
     else
     {
-        tri_side := normalize(cross(up, tri_sample.dir))
-        tri_up   := normalize(cross(tri_sample.dir, tri_side))
-        rx := rasterizer.pos.x % 3
-        ry := rasterizer.pos.y % 3
+        layers := []cstring {}
+    }
 
-        // TODO: The 3x3 pattern does not seem to work well here...
-        // investigate why?
+    count: u32
+    instance_extensions := sdl.Vulkan_GetInstanceExtensions(&count)
+    extensions := slice.concatenate([][]cstring {
+        instance_extensions[:count],
 
-        base_angle: f32 = 0.1
-        base_angles := [3][3]f32 {
-            { base_angle, base_angle + 1.0 / 3.0, base_angle + 2.0 / 3.0 },
-            { base_angle + 1.0 / 3.0, base_angle + 2.0 / 3.0, base_angle },
-            { base_angle + 2.0 / 3.0, base_angle, base_angle + 1.0 / 3.0 }
+        {
+            vk.EXT_DEBUG_UTILS_EXTENSION_NAME,
+            vk.KHR_WIN32_SURFACE_EXTENSION_NAME,
         }
-        phi := 2.0 * math.PI * base_angles[ry][rx] + 0.1 * rand.float32()
+    }, context.temp_allocator)
 
-        tri_sample.up = normalize(tri_side * math.cos(phi) + tri_up * math.sin(phi))
+    debug_messenger_ci := vk.DebugUtilsMessengerCreateInfoEXT {
+        sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        messageSeverity = { .WARNING, .ERROR },
+        messageType = { .VALIDATION, .PERFORMANCE },
+        pfnUserCallback = vk_debug_callback
     }
 
-    when DEBUG_INTERPOLATION {  // Write red pixel.
-        samples_storage.debug_interp_buf[rasterizer.pos.y * auto_cast lightmap_size.x + rasterizer.pos.x] = { 1, 0, 0, 1 }
-        samples_storage.num_sampled += 1
-    }
+    next: rawptr
+    next = &debug_messenger_ci
 
-    return true
+    instance: vk.Instance
+    vk_check(vk.CreateInstance(&{
+        sType = .INSTANCE_CREATE_INFO,
+        pApplicationInfo = &{
+            sType = .APPLICATION_INFO,
+            apiVersion = vk.API_VERSION_1_3,
+        },
+        enabledLayerCount = u32(len(layers)),
+        ppEnabledLayerNames = raw_data(layers),
+        enabledExtensionCount = u32(len(extensions)),
+        ppEnabledExtensionNames = raw_data(extensions),
+        pNext = next,
+    }, nil, &instance))
+
+    vk.load_proc_addresses_instance(instance)
+    assert(vk.DestroyInstance != nil, "Failed to load Vulkan instance API")
+
+    debug_messenger: vk.DebugUtilsMessengerEXT
+    vk_check(vk.CreateDebugUtilsMessengerEXT(instance, &debug_messenger_ci, nil, &debug_messenger))
+
+    return instance, debug_messenger
 }
 
-pixel_tri_clip :: proc(pixel_top_left: [2]f32, tri: [3][2]f32) -> (res: [16][2]f32, num: int)
+create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vulkan_Context
 {
-    pixel_poly := [16][2]f32 {
-        pixel_top_left + { 0, 0 },
-        pixel_top_left + { 1, 0 },
-        pixel_top_left + { 1, 1 },
-        pixel_top_left + { 0, 1 },
-        {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
-    }
+    phys_device_count: u32
+    vk_check(vk.EnumeratePhysicalDevices(instance, &phys_device_count, nil))
+    if phys_device_count == 0 do fatal_error("Did not find any GPUs!")
+    phys_devices := make([]vk.PhysicalDevice, phys_device_count, context.temp_allocator)
+    vk_check(vk.EnumeratePhysicalDevices(instance, &phys_device_count, raw_data(phys_devices)))
 
-    n_poly := 4
-    num = n_poly
-    dir := left_of(tri[0], tri[1], tri[2])
-    for i in 0..<3
+    chosen_phys_device: vk.PhysicalDevice
+    queue_family_idx: u32
+    found := false
+    device_loop: for candidate in phys_devices
     {
-        if num == 0 do break
+        queue_family_count: u32
+        vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, nil)
+        queue_families := make([]vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
+        vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, raw_data(queue_families))
 
-        j := i - 1 if i > 0 else 2
-
-        if i != 0
+        for family, i in queue_families
         {
-            for n_poly = 0; n_poly < num; n_poly += 1 {
-                pixel_poly[n_poly] = res[n_poly]
-            }
-        }
+            supports_graphics := .GRAPHICS in family.queueFlags
+            supports_present: b32
+            vk_check(vk.GetPhysicalDeviceSurfaceSupportKHR(candidate, u32(i), surface, &supports_present))
 
-        num = 0
-        v0 := pixel_poly[n_poly - 1]
-        side_0 := left_of(tri[j], tri[i], v0)
-        if side_0 != -dir
-        {
-            res[num] = v0
-            num += 1
-        }
-
-        for k in 0..<n_poly
-        {
-            v1 := pixel_poly[k]
-            side_1 := left_of(tri[j], tri[i], v1)
-            intersect, inter_p := line_intersection(tri[j], tri[i], v0, v1)
-            if side_0 + side_1 == 0 && side_0 != 0 && intersect {
-                res[num] = inter_p
-                num += 1
-            }
-
-            if k == n_poly - 1 do break
-
-            if side_1 != -dir
+            if supports_graphics && supports_present
             {
-                res[num] = v1
-                num += 1
+                chosen_phys_device = candidate
+                queue_family_idx = u32(i)
+                found = true
+                break device_loop
             }
-
-            v0 = v1
-            side_0 = side_1
         }
     }
 
-    return res, num
+    if !found do fatal_error("Could not find suitable GPU.")
 
-    left_of :: proc(a: [2]f32, b: [2]f32, c: [2]f32) -> int
-    {
-        res := cross(b - a, c - b)
-        if res < 0 do return -1
-        if res > 0 do return +1
-        return 0
+    queue_priority := f32(1)
+    queue_create_infos := []vk.DeviceQueueCreateInfo {
+        {
+            sType = .DEVICE_QUEUE_CREATE_INFO,
+            queueFamilyIndex = queue_family_idx,
+            queueCount = 1,
+            pQueuePriorities = &queue_priority,
+        },
     }
 
-    line_intersection :: proc(x0: [2]f32, x1: [2]f32, y0: [2]f32, y1: [2]f32) -> (intersect: bool, p: [2]f32)
-    {
-        dx := x1 - x0
-        dy := y1 - y0
-        d := x0 - y0
-        dyx := cross(dy, dx)
-        if dyx == 0.0 do return false, {}
-
-        dyx = cross(d, dx) / dyx
-        if dyx <= 0 || dyx >= 1 do return false, {}
-
-        p = { y0.x + dyx * dy.x, y0.y + dyx * dy.y }
-        return true, p
+    device_extensions := []cstring {
+        vk.KHR_SWAPCHAIN_EXTENSION_NAME,
+        vk.EXT_SHADER_OBJECT_EXTENSION_NAME,
+        vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        vk.EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,
     }
-}
 
-// From: http://www.blackpawn.com/texts/pointinpoly/
-to_barycentric :: proc(p1: [2]f32, p2: [2]f32, p3: [2]f32, p: [2]f32) -> [2]f32
-{
-    v0 := p3 - p1
-    v1 := p2 - p1
-    v2 := p - p1
-    dot00 := dot(v0, v0)
-    dot01 := dot(v0, v1)
-    dot02 := dot(v0, v2)
-    dot11 := dot(v1, v1)
-    dot12 := dot(v1, v2)
-    inv_denom := 1.0 / (dot00 * dot11 - dot01 * dot01)
-    u := (dot11 * dot02 - dot01 * dot12) * inv_denom
-    v := (dot00 * dot12 - dot01 * dot02) * inv_denom
-    return { u, v }
-}
+    next: rawptr
+    next = &vk.PhysicalDeviceVulkan13Features {
+        sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        pNext = next,
+        dynamicRendering = true,
+        synchronization2 = true,
+    }
+    next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
+        sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        pNext = next,
+        shaderObject = true,
+    }
+    next = &vk.PhysicalDeviceDepthClipEnableFeaturesEXT {
+        sType = .PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT,
+        pNext = next,
+        depthClipEnable = true,
+    }
+    next = &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
+        sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+        pNext = next,
+        accelerationStructure = true,
+    }
+    next = &vk.PhysicalDeviceRayTracingPipelineFeaturesKHR {
+        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+        pNext = next,
+        rayTracingPipeline = true,
+    }
+    next = &vk.PhysicalDeviceBufferDeviceAddressFeatures {
+        sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+        pNext = next,
+        bufferDeviceAddress = true,
+    }
 
-has_rasterizer_finished :: proc(using ctx: ^Context) -> bool
-{
-    return rasterizer.pos.y >= rasterizer.max.y
-}
+    device_ci := vk.DeviceCreateInfo {
+        sType = .DEVICE_CREATE_INFO,
+        pNext = next,
+        queueCreateInfoCount = u32(len(queue_create_infos)),
+        pQueueCreateInfos = raw_data(queue_create_infos),
+        enabledExtensionCount = u32(len(device_extensions)),
+        ppEnabledExtensionNames = raw_data(device_extensions),
+    }
+    device: vk.Device
+    vk_check(vk.CreateDevice(chosen_phys_device, &device_ci, nil, &device))
 
-// Pass order of one 4x4 interpolation patch for two interpolation steps (and the next neighbors right of/below it).
-// 0 4 1 4 0
-// 5 6 5 6 5
-// 2 4 3 4 2
-// 5 6 5 6 5
-// 0 4 1 4 0
+    vk.load_proc_addresses_device(device)
+    if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
 
-pass_step_size :: proc(using ctx: ^Context) -> u32
-{
-    pass_minus_one := cursor.pass - 1 if cursor.pass > 0 else 0
-    shift := u32(num_passes / 3 - pass_minus_one / 3)
-    step: u32 = 1 << shift
-    assert(step > 0)
-    return step
-}
+    queue: vk.Queue
+    vk.GetDeviceQueue(device, queue_family_idx, 0, &queue)
 
-pass_offset :: proc(using ctx: ^Context) -> [2]u32
-{
-    if cursor.pass <= 0 do return { 0, 0 }
+    // Useful constants
+    rt_handle_alignment: u32
+    rt_base_align: u32
+    rt_handle_size: u32
+    {
+        rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
+            sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
+        }
+        properties := vk.PhysicalDeviceProperties2 {
+            sType = .PHYSICAL_DEVICE_PROPERTIES_2,
+            pNext = &rt_properties
+        }
 
-    pass_type := (cursor.pass - 1) % 3
-    half_step := pass_step_size(ctx) >> 1
+        vk.GetPhysicalDeviceProperties2(chosen_phys_device, &properties)
+
+        rt_handle_alignment = rt_properties.shaderGroupHandleAlignment
+        rt_base_align       = rt_properties.shaderGroupBaseAlignment
+        rt_handle_size      = rt_properties.shaderGroupHandleSize
+    }
+
     return {
-        half_step if pass_type != 1 else 0,
-        half_step if pass_type != 0 else 0,
+        phys_device = chosen_phys_device,
+        device = device,
+        queue = queue,
+        queue_family_idx = queue_family_idx,
+        rt_handle_alignment = rt_handle_alignment,
+        rt_base_align = rt_base_align,
+        rt_handle_size = rt_handle_size,
     }
 }
 
-read_back_samples_texture :: proc(using ctx: ^Context)
+vk_check :: proc(result: vk.Result, location := #caller_location)
 {
-    fence_new := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd_buf)
-
-    assert(fence_new != nil)
-    wait_on := []^sdl.GPUFence { fence, fence_new }
-    ok := sdl.WaitForGPUFences(device, true, raw_data(wait_on), auto_cast len(wait_on))
-    assert(ok)
-    cmd_buf = sdl.AcquireGPUCommandBuffer(device)
-    sdl.ReleaseGPUFence(device, fence)
-    fence = nil
-    sdl.ReleaseGPUFence(device, fence_new)
-    fence_new = nil
-
-    mapped := sdl.MapGPUTransferBuffer(device, samples_storage.transfer, false)
-    mapped_typed := cast([^][4]f32)mapped
-    for pos in 0..<samples_storage.uv_write_pos
+    if result != .SUCCESS
     {
-        lm_uv := samples_storage.uv_map[pos]
-        pixel := mapped_typed[pos]
-        validity := pixel[3]
-        cur_lm_pixel := lightmap[lm_uv.y * lightmap_size.x + lm_uv.x]
-        if cur_lm_pixel == { 0, 0, 0, 0 } && validity > 0.9
-        {
-            scale := 1.0 / validity
-            addr := &lightmap[lm_uv.y * lightmap_size.x + lm_uv.x]
-            addr^ = pixel * scale
-            addr^[0] = max(addr^[0], 1.175494e-38)
-            addr^[1] = max(addr^[1], 1.175494e-38)
-            addr^[2] = max(addr^[2], 1.175494e-38)
-            addr^[3] = 1.0
-        }
+        fatal_error("Vulkan failure: %", result, location = location)
     }
-
-    sdl.UnmapGPUTransferBuffer(device, samples_storage.transfer)
-
-    samples_storage.uv_write_pos = 0
 }
 
-@(private="file")
-submit_and_recreate_cmd_buf :: proc(using ctx: ^Context)
+fatal_error :: proc(fmt: string, args: ..any, location := #caller_location)
 {
-    fence_new := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd_buf)
-    assert(fence_new != nil)
-    if fence != nil
-    {
-        ok := sdl.WaitForGPUFences(device, true, &fence, 1)
-        assert(ok)
-        sdl.ReleaseGPUFence(device, fence)
-        fence = nil
+    when ODIN_DEBUG {
+        log.fatal(fmt, args, location = location)
+        runtime.panic("")
+    } else {
+        log.panicf(fmt, args, location = location)
     }
-    fence = fence_new
-    cmd_buf = sdl.AcquireGPUCommandBuffer(device)
 }
 
-@(private="file")
-begin_bake_render_pass :: proc(using ctx: ^Context, keep_old_content := false)
+
+
+vk_debug_callback :: proc "system" (severity: vk.DebugUtilsMessageSeverityFlagsEXT,
+                                    types: vk.DebugUtilsMessageTypeFlagsEXT,
+                                    callback_data: ^vk.DebugUtilsMessengerCallbackDataEXT,
+                                    user_data: rawptr) -> b32
 {
-    color_target := sdl.GPUColorTargetInfo {
-        texture = hemi_batch_texture,
-        clear_color = { hemi_params.clear_color.x, hemi_params.clear_color.y, hemi_params.clear_color.z, 1.0 },
-        load_op = .LOAD if keep_old_content else .CLEAR,
-        store_op = .STORE,
-    }
-    depth_target := sdl.GPUDepthStencilTargetInfo {
-        texture = hemi_batch_depth_texture,
-        clear_depth = 1.0,
-        load_op = .LOAD if keep_old_content else .CLEAR,
-        store_op = .STORE,
-        stencil_load_op = .DONT_CARE,
-        stencil_store_op = .DONT_CARE,
-    }
-    bake_pass = sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, &depth_target)
-}
+    context = runtime.default_context()
+    // TODO
+    //context.logger = vk_logger
 
-@(private="file")
-@(disabled=!ODIN_DEBUG)
-validate_context :: proc(using ctx: ^Context)
-{
-    assert(ctx != nil, "Lightmapper context is null!")
-    assert(validation.ctx_initialized, "Context is not initialized!")
-    assert(mesh != {}, "Mesh is not set!")
-    validate_shaders(shaders)
-}
+    level: log.Level
+    if .ERROR in severity        do level = .Error
+    else if .WARNING in severity do level = .Warning
+    else if .INFO in severity    do level = .Info
+    else                         do level = .Debug
+    log.log(level, callback_data.pMessage)
 
-@(private="file")
-@(disabled=!ODIN_DEBUG)
-validate_shaders :: proc(shaders: Shaders)
-{
-    assert(shaders.hemi_reduce != nil, "The hemi_reduce compute shader is mandatory!")
-    assert(shaders.hemi_weighted_reduce != nil, "The hemi_weighted_reduce compute shader is mandatory!")
-}
-
-// Buffer utils
-get_vec2f32_from_buffer :: proc(buf: Buffer, idx: i64) -> [2]f32
-{
-    assert(buf.type != .None)
-    addr := rawptr(uintptr(buf.data) + buf.offset + uintptr(idx * auto_cast buf.stride))
-    res: [2]f32
-    switch buf.type
-    {
-        case .None: {}
-        case .U8:
-        {
-            res.x = cast(f32)((cast(^[2]u8)addr)[0])
-            res.y = cast(f32)((cast(^[2]u8)addr)[1])
-        }
-        case .U16:
-        {
-            res.x = cast(f32)((cast(^[2]u16)addr)[0])
-            res.y = cast(f32)((cast(^[2]u16)addr)[1])
-        }
-        case .U32:
-        {
-            res.x = cast(f32)((cast(^[2]u32)addr)[0])
-            res.y = cast(f32)((cast(^[2]u32)addr)[1])
-        }
-        case .S8:
-        {
-            res.x = cast(f32)((cast(^[2]i8)addr)[0])
-            res.y = cast(f32)((cast(^[2]i8)addr)[1])
-        }
-        case .S16:
-        {
-            res.x = cast(f32)((cast(^[2]i16)addr)[0])
-            res.y = cast(f32)((cast(^[2]i16)addr)[1])
-        }
-        case .S32:
-        {
-            res.x = cast(f32)((cast(^[2]i32)addr)[0])
-            res.y = cast(f32)((cast(^[2]i32)addr)[1])
-        }
-        case .F32:
-        {
-            res.x = (cast(^[2]f32)addr)[0]
-            res.y = (cast(^[2]f32)addr)[1]
-        }
-    }
-
-    return res
-}
-
-get_vec3f32_from_buffer :: proc(buf: Buffer, idx: i64) -> [3]f32
-{
-    assert(buf.type != .None)
-    addr := rawptr(uintptr(buf.data) + buf.offset + uintptr(idx * auto_cast buf.stride))
-    res: [3]f32
-    switch buf.type
-    {
-        case .None: {}
-        case .U8:
-        {
-            res.x = cast(f32)((cast(^[3]u8)addr)[0])
-            res.y = cast(f32)((cast(^[3]u8)addr)[1])
-            res.z = cast(f32)((cast(^[3]u8)addr)[2])
-        }
-        case .U16:
-        {
-            res.x = cast(f32)((cast(^[3]u16)addr)[0])
-            res.y = cast(f32)((cast(^[3]u16)addr)[1])
-            res.z = cast(f32)((cast(^[3]u16)addr)[2])
-        }
-        case .U32:
-        {
-            res.x = cast(f32)((cast(^[3]u32)addr)[0])
-            res.y = cast(f32)((cast(^[3]u32)addr)[1])
-            res.z = cast(f32)((cast(^[3]u32)addr)[2])
-        }
-        case .S8:
-        {
-            res.x = cast(f32)((cast(^[3]i8)addr)[0])
-            res.y = cast(f32)((cast(^[3]i8)addr)[1])
-            res.z = cast(f32)((cast(^[3]i8)addr)[2])
-        }
-        case .S16:
-        {
-            res.x = cast(f32)((cast(^[3]i16)addr)[0])
-            res.y = cast(f32)((cast(^[3]i16)addr)[1])
-            res.z = cast(f32)((cast(^[3]i16)addr)[2])
-        }
-        case .S32:
-        {
-            res.x = cast(f32)((cast(^[3]i32)addr)[0])
-            res.y = cast(f32)((cast(^[3]i32)addr)[1])
-            res.z = cast(f32)((cast(^[3]i32)addr)[2])
-        }
-        case .F32:
-        {
-            res.x = (cast(^[3]f32)addr)[0]
-            res.y = (cast(^[3]f32)addr)[1]
-            res.z = (cast(^[3]f32)addr)[2]
-        }
-    }
-
-    return res
-}
-
-get_i64_from_buffer :: proc(buf: Buffer, idx: i64) -> i64
-{
-    assert(buf.type != .None)
-    addr := rawptr(uintptr(buf.data) + buf.offset + uintptr(idx * auto_cast buf.stride))
-    res: i64
-    switch buf.type
-    {
-        case .None: {}
-        case .U8:   res = cast(i64)((cast(^u8) addr)^)
-        case .U16:  res = cast(i64)((cast(^u16)addr)^)
-        case .U32:  res = cast(i64)((cast(^u32)addr)^)
-        case .S8:   res = cast(i64)((cast(^i8) addr)^)
-        case .S16:  res = cast(i64)((cast(^i16)addr)^)
-        case .S32:  res = cast(i64)((cast(^i32)addr)^)
-        case .F32:  res = cast(i64)((cast(^f32)addr)^)
-    }
-
-    return res
-}
-
-// Common utils imported from core libraries
-@(private="file")
-dot :: la.dot
-@(private="file")
-cross :: la.cross
-@(private="file")
-normalize :: la.normalize
-
-@(private="file")
-is_inf :: proc(v: [3]f32) -> bool
-{
-    return math.is_inf(v.x) || math.is_inf(v.y) || math.is_inf(v.z)
-}
-
-_fictitious :: proc()
-{
-    // This makes it so -vet doesn't complain about the import of fmt on release mode.
-    // I need the import in debug builds, and there is no way to conditionally import
-    // a package.
-    fmt.println("")
+    return false
 }

@@ -25,7 +25,7 @@ layout(location = 0) rayPayloadEXT HitInfo hit_info;
 #define DEG2RAD PI / 180.0f;
 
 const float T_MIN = 0.001;
-const float T_MAX = 10000.0f;
+const float T_MAX = 50.0f;
 
 uint RNG_STATE = 0;
 
@@ -127,6 +127,16 @@ void main()
     init_rng(pixel.y * size.x + pixel.x);
 
     vec3 color = pathtrace(world_pos, world_normal);
+
+    // Progressive pathtracing.
+    if(push.accum_counter != 0)
+    {
+        float weight = 1.0f / float(push.accum_counter);
+        vec3 prev_color = imageLoad(lightmap, pixel).rgb;
+        color = prev_color * (1.0f - weight) + color * weight;
+        color = max(color, vec3(0.0f));
+    }
+
     imageStore(lightmap, pixel, vec4(color, 1.0f));
 }
 
@@ -154,6 +164,8 @@ void ray_scene_intersection(Ray ray)
 
 vec3 pathtrace(vec3 start_pos, vec3 world_normal)
 {
+    vec3 radiance = vec3(0.0f);
+    vec3 weight = vec3(1.0f);
     Ray ray = Ray(start_pos, -world_normal);
 
     const uint MAX_BOUNCES = 1;
@@ -164,8 +176,15 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
         vec3 incoming = sample_matte(vec3(0.8f), world_normal, outgoing, random_vec2());
         Ray ray = Ray(start_pos, incoming);
         ray_scene_intersection(ray);
+
+        if(!hit_info.hit)
+        {
+            radiance += hit_info.color * weight;
+            break;
+        }
+
         // TODO: Modify ray ori and dir according to hit
     }
 
-    return hit_info.color;
+    return radiance;
 }

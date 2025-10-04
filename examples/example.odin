@@ -37,6 +37,7 @@ import "core:c"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 import stbrp "vendor:stb/rect_pack"
+import lm "../"
 
 import "ufbx"
 
@@ -82,7 +83,7 @@ GBuffers :: struct
 }
 
 LIGHTMAP_SIZE :: 4096
-LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 16
+LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 64
 LIGHTMAP_MIN_INSTANCE_TEXELS :: 64
 LIGHTMAP_MAX_INSTANCE_TEXELS :: 1024
 
@@ -145,7 +146,7 @@ main :: proc()
     now_ts := sdl.GetPerformanceCounter()
     max_delta_time: f32 = 1.0 / 10.0  // 10fps
 
-    build_lightmap(&vk_ctx, scene, shaders)
+    //build_lightmap(&vk_ctx, scene, shaders)
 
     desc_pool_ci := vk.DescriptorPoolCreateInfo {
         sType = .DESCRIPTOR_POOL_CREATE_INFO,
@@ -3124,11 +3125,6 @@ get_buffer_device_address :: proc(using ctx: ^Vk_Ctx, buffer: Buffer) -> vk.Devi
         buffer = buffer.buf
     }
     return vk.GetBufferDeviceAddress(device, &info)
-}
-
-build_lightmap :: proc(using ctx: ^Vk_Ctx, scene: Scene, shaders: Shaders)
-{
-
 }
 
 create_gbuffers :: proc(using ctx: ^Vk_Ctx) -> GBuffers
