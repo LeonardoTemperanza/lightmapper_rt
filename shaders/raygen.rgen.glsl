@@ -25,7 +25,7 @@ layout(location = 0) rayPayloadEXT HitInfo hit_info;
 #define DEG2RAD PI / 180.0f;
 
 const float T_MIN = 0.001;
-const float T_MAX = 50.0f;
+const float T_MAX = 1000000.0f;
 
 uint RNG_STATE = 0;
 

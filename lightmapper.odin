@@ -28,12 +28,13 @@ package lightmapper
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
-import la "core:math/linalg"
+import "core:math/linalg"
 import intr "base:intrinsics"
 import "core:slice"
 import "core:mem"
 import "core:log"
 import "base:runtime"
+import thr "core:thread"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -67,6 +68,8 @@ init_from_vulkan_instance :: proc(vk_ctx: Vulkan_Context) -> Context
     res: Context
     res.vk_ctx = vk_ctx
 
+    res.shaders = create_shaders(&res.vk_ctx)
+
     return res
 }
 
@@ -74,20 +77,107 @@ init_from_vulkan_instance :: proc(vk_ctx: Vulkan_Context) -> Context
 
 Scene :: struct
 {
+    instances: [dynamic]Instance,
+    meshes: [dynamic]Mesh,
+    tlas: Tlas,
+}
+
+/*
+Scene :: union
+{
+    Scene_Vulkan,
+    Scene_CPU
+}
+*/
+
+/*
+Scene_Vulkan :: struct
+{
+    instances:
+}
+*/
+
+Instance :: struct
+{
+    transform: matrix[4, 4]f32,
+    mesh_idx: u32,
+    lm_idx: u32,
+    lm_offset: [2]f32,
+    lm_scale: f32,
+}
+
+Mesh :: struct
+{
+    indices_cpu: [dynamic]u32,
+    pos_cpu: [dynamic][3]f32,
+
+    pos: Buffer,
+    normals: Buffer,
+    lm_uvs: Buffer,
+    indices_gpu: Buffer,
+    idx_count: u32,
+
+    lm_uvs_present: bool,
+
+    blas: Accel_Structure,
+}
+
+Tlas :: struct
+{
+    as: Accel_Structure,
+    instances_buf: Buffer,
+}
+
+Accel_Structure :: struct
+{
+    handle: vk.AccelerationStructureKHR,
+    buf: Buffer,
+    addr: vk.DeviceAddress
+}
+
+Scene_Structures :: struct
+{
 
 }
+
+build_scene_structures :: proc(scene: Scene) -> Scene_Structures
+{
+    return {}
+}
+
+// update_scene_structures
 
 // Baking
 
-@(private="file")
 Bake :: struct
 {
     using ctx: ^Context,
+    thread: ^thr.Thread,
+
+    // Settings
+    num_accums: u32,
+    lightmap_size: u32,
+    scene: Scene,
 }
 
-start_bake :: proc(using ctx: ^Context, lightmap_size: u32, scene: Scene) -> Bake
+start_bake :: proc(using ctx: ^Context, scene: Scene, num_accums: u32, lightmap_size: u32) -> ^Bake
 {
-    return {}
+    bake := new(Bake)
+    bake.ctx = ctx
+
+    bake.num_accums = num_accums
+    bake.lightmap_size = lightmap_size
+
+    bake.thread = thr.create(bake_thread)
+    bake.thread.init_context = context
+    bake.thread.user_index = 0
+    bake.thread.data = bake
+
+    // Copy the scene and stuff.
+    // TODO: Scene preprocessing. I think we should build the blas and tlas here...?
+
+    thr.start(bake.thread)
+    return bake
 }
 
 // If it's 1 it's done.
@@ -96,21 +186,29 @@ progress :: proc(using bake: ^Bake) -> f32
     return 0.0
 }
 
-// Cleans up resources if called after progress(bake) == 1.0 and
-// forcibly aborts the baking process if called before progress(bake) == 1.0
-end_bake :: proc(using bake: ^Bake)
+abort_bake :: proc(using bake: ^Bake)
 {
 
 }
 
-wait_end_of_bake :: proc()
+wait_end_of_bake :: proc(using bake: ^Bake)
 {
-
+    thr.join(bake.thread)
 }
 
-get_current_lightmap_view_vk :: proc() -> vk.ImageView
+cleanup_bake :: proc(using bake: ^Bake)
+{
+    free(bake)
+}
+
+acquire_lightmap_view_vk :: proc(using bake: ^Bake) -> vk.ImageView
 {
     return vk.ImageView(0)
+}
+
+release_lightmap_view_vk :: proc(using bake: ^Bake)
+{
+
 }
 
 get_current_lightmap_view_cpu_buf :: proc() -> []byte
@@ -119,6 +217,475 @@ get_current_lightmap_view_cpu_buf :: proc() -> []byte
 }
 
 // Internals
+
+bake_thread :: proc(t: ^thr.Thread)
+{
+    ctx := cast(^Bake) t.data
+    bake_main(ctx)
+}
+
+bake_main :: proc(using bake: ^Bake)
+{
+    // Setup
+    // Create queue and command buffer here!
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+
+    semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
+    acquire_semaphore: vk.Semaphore
+    vk_check(vk.CreateSemaphore(device, &semaphore_ci, nil, &acquire_semaphore))
+
+    fence_ci := vk.FenceCreateInfo {
+        sType = .FENCE_CREATE_INFO,
+        flags = { .SIGNALED },
+    }
+    fence: vk.Fence
+    vk_check(vk.CreateFence(device, &fence_ci, nil, &fence))
+
+    gbufs := create_gbuffers(bake)
+
+    lightmap := create_image(ctx, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R16G16B16A16_SFLOAT,
+        extent = {
+            width = lightmap_size,
+            height = lightmap_size,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .STORAGE, .SAMPLED },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &vk_ctx.queue_family_idx,
+        initialLayout = .UNDEFINED,
+    }, "lightmap")
+
+    // RT Descriptor set.
+    desc_pool_ci := vk.DescriptorPoolCreateInfo {
+        sType = .DESCRIPTOR_POOL_CREATE_INFO,
+        flags = { .FREE_DESCRIPTOR_SET },
+        maxSets = 50,
+        poolSizeCount = 3,
+        pPoolSizes = raw_data([]vk.DescriptorPoolSize {
+            {
+                type = .ACCELERATION_STRUCTURE_KHR,
+                descriptorCount = 5,
+            },
+            {
+                type = .STORAGE_IMAGE,
+                descriptorCount = 10,
+            },
+            {
+                type = .SAMPLED_IMAGE,
+                descriptorCount = 10,
+            }
+        })
+    }
+    desc_pool: vk.DescriptorPool
+    vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &desc_pool))
+
+    desc_set_ai := vk.DescriptorSetAllocateInfo {
+        sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+        descriptorPool = desc_pool,
+        descriptorSetCount = 1,
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.rt_desc_set_layout })
+    }
+
+    rt_desc_set: vk.DescriptorSet
+    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &rt_desc_set))
+
+    update_rt_desc_set(device, rt_desc_set, scene.tlas.as.handle, lightmap, gbufs)
+
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }))
+
+    // Render gbuffers
+    render_gbuffers(bake, cmd_buf, gbufs)
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    for iter in 0..<num_accums
+    {
+        // If signalled to stop, stop.
+
+        vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            flags = { .ONE_TIME_SUBMIT },
+        }))
+
+        // GBuffers barriers
+        {
+            gbufs_barriers := []vk.ImageMemoryBarrier2 {
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = gbufs.world_pos.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .GENERAL,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                    srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                    dstStageMask = { .RAY_TRACING_SHADER_KHR },
+                    dstAccessMask = { .SHADER_READ },
+                },
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = gbufs.world_normals.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .GENERAL,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                    srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                    dstStageMask = { .RAY_TRACING_SHADER_KHR },
+                    dstAccessMask = { .SHADER_READ },
+                },
+            }
+            vk.CmdPipelineBarrier2(cmd_buf, &{
+                sType = .DEPENDENCY_INFO,
+                imageMemoryBarrierCount = u32(len(gbufs_barriers)),
+                pImageMemoryBarriers = raw_data(gbufs_barriers),
+            })
+        }
+
+        // LIGHTMAP BARRIER
+        {
+            lightmap_barrier := []vk.ImageMemoryBarrier2 {
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = lightmap.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .UNDEFINED,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .FRAGMENT_SHADER },
+                    srcAccessMask = { .SHADER_SAMPLED_READ },
+                    dstStageMask = { .RAY_TRACING_SHADER_KHR },
+                    dstAccessMask = { .SHADER_STORAGE_WRITE, .SHADER_STORAGE_READ },
+                },
+            }
+            vk.CmdPipelineBarrier2(cmd_buf, &{
+                sType = .DEPENDENCY_INFO,
+                imageMemoryBarrierCount = u32(len(lightmap_barrier)),
+                pImageMemoryBarriers = raw_data(lightmap_barrier),
+            })
+        }
+
+        pathtrace_iter(bake, cmd_buf, rt_desc_set, iter)
+
+        // Lightmap barrier
+        {
+            lightmap_barrier := []vk.ImageMemoryBarrier2 {
+                {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = lightmap.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .GENERAL,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .RAY_TRACING_SHADER_KHR },
+                    srcAccessMask = { .SHADER_STORAGE_WRITE },
+                    dstStageMask = { .FRAGMENT_SHADER },
+                    dstAccessMask = { .SHADER_SAMPLED_READ },
+                },
+            }
+            vk.CmdPipelineBarrier2(cmd_buf, &{
+                sType = .DEPENDENCY_INFO,
+                imageMemoryBarrierCount = u32(len(lightmap_barrier)),
+                pImageMemoryBarriers = raw_data(lightmap_barrier),
+            })
+        }
+
+        vk_check(vk.EndCommandBuffer(cmd_buf))
+
+        wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
+        submit_info := vk.SubmitInfo {
+            sType = .SUBMIT_INFO,
+            //waitSemaphoreCount = 1,
+            //pWaitSemaphores = &vk_frame.acquire_semaphore,
+            pWaitDstStageMask = &wait_stage_flags,
+            commandBufferCount = 1,
+            pCommandBuffers = &cmd_buf,
+            //signalSemaphoreCount = 1,
+            //pSignalSemaphores = &present_semaphore,
+        }
+        vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, fence))
+    }
+
+    // Cleanup
+}
+
+render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers)
+{
+    vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
+        {  // Positions
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 0,
+            stride = size_of([3]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        },
+        {  // Normals
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 1,
+            stride = size_of([3]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        },
+        {  // Lightmap UVs
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 2,
+            stride = size_of([2]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        },
+    }
+    vert_attributes := [?]vk.VertexInputAttributeDescription2EXT {
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 0,
+            binding = 0,
+            format = .R32G32B32_SFLOAT,
+            offset = 0
+        },
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 1,
+            binding = 1,
+            format = .R32G32B32_SFLOAT,
+            offset = 0
+        },
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 2,
+            binding = 2,
+            format = .R32G32_SFLOAT,
+            offset = 0
+        },
+    }
+    vk.CmdSetVertexInputEXT(cmd_buf, len(vert_input_bindings), &vert_input_bindings[0], len(vert_attributes), &vert_attributes[0])
+    vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_LIST)
+    vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
+
+    // World pos
+    {
+        color_attachment := vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView = gbuffers.world_pos.view,
+            imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+            loadOp = .CLEAR,
+            storeOp = .STORE,
+            clearValue = {
+                color = { float32 = { 0.0, 0.0, 0.0, 0.0 } }
+            }
+        }
+        rendering_info := vk.RenderingInfo {
+            sType = .RENDERING_INFO,
+            renderArea = {
+                offset = { 0, 0 },
+                extent = { gbuffers.world_pos.width, gbuffers.world_pos.height }
+            },
+            layerCount = 1,
+            colorAttachmentCount = 1,
+            pColorAttachments = &color_attachment,
+            pDepthAttachment = nil,
+        }
+
+        vk.CmdBeginRendering(cmd_buf, &rendering_info)
+        defer vk.CmdEndRendering(cmd_buf)
+
+        shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
+        to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_pos }
+        vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+
+        draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
+    }
+
+    // World normal
+    {
+        color_attachment := vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView = gbuffers.world_normals.view,
+            imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+            loadOp = .CLEAR,
+            storeOp = .STORE,
+            clearValue = {
+                color = { float32 = { 0.0, 0.0, 0.0, 0.0 } }
+            }
+        }
+        rendering_info := vk.RenderingInfo {
+            sType = .RENDERING_INFO,
+            renderArea = {
+                offset = { 0, 0 },
+                extent = { gbuffers.world_normals.width, gbuffers.world_normals.height }
+            },
+            layerCount = 1,
+            colorAttachmentCount = 1,
+            pColorAttachments = &color_attachment,
+            pDepthAttachment = nil,
+        }
+
+        vk.CmdBeginRendering(cmd_buf, &rendering_info)
+        defer vk.CmdEndRendering(cmd_buf)
+
+        shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
+        to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_normals }
+        vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+
+        draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
+    }
+}
+
+draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout)
+{
+    vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
+    vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
+    vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
+    sample_mask := vk.SampleMask(1)
+    vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
+    vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
+
+    vk.CmdSetPolygonModeEXT(cmd_buf, .FILL)
+    vk.CmdSetCullMode(cmd_buf, {})
+    vk.CmdSetFrontFace(cmd_buf, .COUNTER_CLOCKWISE)
+
+    vk.CmdSetDepthCompareOp(cmd_buf, .LESS)
+    vk.CmdSetDepthTestEnable(cmd_buf, false)
+    vk.CmdSetDepthWriteEnable(cmd_buf, false)
+    vk.CmdSetDepthBiasEnable(cmd_buf, false)
+    vk.CmdSetDepthClipEnableEXT(cmd_buf, true)
+
+    vk.CmdSetStencilTestEnable(cmd_buf, false)
+    b32_false := b32(false)
+    vk.CmdSetColorBlendEnableEXT(cmd_buf, 0, 1, &b32_false)
+
+    color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
+    vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
+
+    for instance, i in scene.instances
+    {
+        mesh := scene.meshes[instance.mesh_idx]
+
+        if !mesh.lm_uvs_present { continue }
+
+        viewport := vk.Viewport {
+            x = f32(lightmap_size) * instance.lm_offset.x,
+            y = f32(lightmap_size) * instance.lm_offset.y,
+            width = f32(lightmap_size) * instance.lm_scale,
+            height = f32(lightmap_size) * instance.lm_scale,
+            minDepth = 0.0,
+            maxDepth = 1.0,
+        }
+        vk.CmdSetViewportWithCount(cmd_buf, 1, &viewport)
+        scissor := vk.Rect2D {
+            offset = {
+                x = i32(f32(lightmap_size) * instance.lm_offset.x),
+                y = i32(f32(lightmap_size) * instance.lm_offset.y),
+            },
+            extent = {
+                width = u32(f32(lightmap_size) * instance.lm_scale),
+                height = u32(f32(lightmap_size) * instance.lm_scale),
+            }
+        }
+        vk.CmdSetScissorWithCount(cmd_buf, 1, &scissor)
+        vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
+
+        offset := vk.DeviceSize(0)
+        vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
+        vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
+        if mesh.lm_uvs_present {
+            vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
+        }
+        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.handle, 0, .UINT32)
+
+        Push :: struct {
+            model_to_world: matrix[4, 4]f32,
+            normal_mat: matrix[4, 4]f32,
+            lm_uv_offset: [2]f32,
+            lm_uv_scale: f32
+        }
+        push := Push {
+            model_to_world = instance.transform,
+            normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
+            lm_uv_offset = instance.lm_offset,
+            lm_uv_scale = instance.lm_scale,
+        }
+        vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
+
+        vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
+    }
+}
+
+pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, rt_desc_set: vk.DescriptorSet, accum_counter: u32)
+{
+    vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline)
+
+    tmp := rt_desc_set
+    vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
+
+    sbt_addr := u64(get_buffer_device_address(device, shaders.sbt_buf))
+
+    raygen_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_base_align)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    raymiss_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_base_align)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    rayhit_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_base_align)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    callable_region := vk.StridedDeviceAddressRegionKHR {}
+
+    Push :: struct {
+        accum_counter: u32,
+        seed: u32,
+    }
+    push := Push {
+        accum_counter = accum_counter,
+        seed = 0,
+    }
+    vk.CmdPushConstants(cmd_buf, shaders.rt_pipeline_layout, { .RAYGEN_KHR }, 0, size_of(push), &push)
+
+    vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
+}
 
 Shaders :: struct
 {
@@ -381,6 +948,160 @@ destroy_shaders :: proc(using ctx: ^Vulkan_Context, shaders: ^Shaders)
     vk.DestroyPipelineLayout(device, shaders.rt_pipeline_layout, nil)
     vk.DestroyPipeline(device, shaders.rt_pipeline, nil)
     destroy_buffer(ctx, &shaders.sbt_buf)
+}
+
+GBuffers :: struct
+{
+    world_pos: Image,
+    world_normals: Image,
+}
+
+create_gbuffers :: proc(using bake: ^Bake) -> GBuffers
+{
+    world_pos := create_image(ctx, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R32G32B32A32_SFLOAT,
+        extent = {
+            width = lightmap_size,
+            height = lightmap_size,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .COLOR_ATTACHMENT, .STORAGE },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &queue_family_idx,
+        initialLayout = .UNDEFINED,
+    }, "gbuf_worldpos")
+
+    world_normals := create_image(ctx, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R8G8B8A8_UNORM,
+        extent = {
+            width = lightmap_size,
+            height = lightmap_size,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .COLOR_ATTACHMENT, .STORAGE },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &queue_family_idx,
+        initialLayout = .UNDEFINED,
+    }, "gbuf_worldnormals")
+
+    return {
+        world_pos,
+        world_normals
+    }
+}
+
+Image :: struct
+{
+    img: vk.Image,
+    mem: vk.DeviceMemory,
+    view: vk.ImageView,
+    width: u32,
+    height: u32,
+}
+
+create_image :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo, name := "") -> Image
+{
+    res: Image
+
+    image_ci := ci
+    vk_check(vk.CreateImage(device, &image_ci, nil, &res.img))
+
+    fmt.printfln("Created %v: 0x%x", name, res.img)
+
+    mem_requirements: vk.MemoryRequirements
+    vk.GetImageMemoryRequirements(device, res.img, &mem_requirements)
+
+    // Create image memory
+    memory_ai := vk.MemoryAllocateInfo {
+        sType = .MEMORY_ALLOCATE_INFO,
+        allocationSize = mem_requirements.size,
+        memoryTypeIndex = find_mem_type(ctx, mem_requirements.memoryTypeBits, { })
+    }
+    vk_check(vk.AllocateMemory(device, &memory_ai, nil, &res.mem))
+    vk.BindImageMemory(device, res.img, res.mem, 0)
+
+    // Perform transition to LAYOUT_GENERAL
+    {
+        cmd_pool_ci := vk.CommandPoolCreateInfo {
+            sType = .COMMAND_POOL_CREATE_INFO,
+            queueFamilyIndex = queue_family_idx,
+            flags = { .TRANSIENT }
+        }
+        cmd_pool: vk.CommandPool
+        vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+        defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+        cmd_buf_ai := vk.CommandBufferAllocateInfo {
+            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+            commandPool = cmd_pool,
+            level = .PRIMARY,
+            commandBufferCount = 1,
+        }
+        cmd_buf: vk.CommandBuffer
+        vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+        defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+        cmd_buf_bi := vk.CommandBufferBeginInfo {
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            flags = { .ONE_TIME_SUBMIT },
+        }
+        vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+        transition_to_general_barrier := vk.ImageMemoryBarrier2 {
+            sType = .IMAGE_MEMORY_BARRIER_2,
+            image = res.img,
+            subresourceRange = {
+                aspectMask = { .COLOR },
+                levelCount = 1,
+                layerCount = 1,
+            },
+            oldLayout = .UNDEFINED,
+            newLayout = .GENERAL,
+            srcStageMask = { .ALL_COMMANDS },
+            srcAccessMask = { .MEMORY_READ },
+            dstStageMask = { .RAY_TRACING_SHADER_KHR },
+            dstAccessMask = { .SHADER_WRITE, .SHADER_READ },
+        }
+        vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
+            sType = .DEPENDENCY_INFO,
+            imageMemoryBarrierCount = 1,
+            pImageMemoryBarriers = &transition_to_general_barrier,
+        })
+
+        vk_check(vk.EndCommandBuffer(cmd_buf))
+    }
+
+    // Create view
+    image_view_ci := vk.ImageViewCreateInfo {
+        sType = .IMAGE_VIEW_CREATE_INFO,
+        image = res.img,
+        viewType = .D2,
+        format = image_ci.format,
+        subresourceRange = {
+            aspectMask = { .COLOR },
+            levelCount = 1,
+            layerCount = 1,
+        }
+    }
+    vk_check(vk.CreateImageView(device, &image_view_ci, nil, &res.view))
+
+    res.width = ci.extent.width
+    res.height = ci.extent.height
+    return res
 }
 
 create_buffer :: proc(using ctx: ^Vulkan_Context, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
@@ -759,6 +1480,75 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vulkan_Cont
     }
 }
 
+get_buffer_device_address :: proc(device: vk.Device, buffer: Buffer) -> vk.DeviceAddress
+{
+    info := vk.BufferDeviceAddressInfo {
+        sType = .BUFFER_DEVICE_ADDRESS_INFO,
+        buffer = buffer.handle
+    }
+    return vk.GetBufferDeviceAddress(device, &info)
+}
+
+update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas: vk.AccelerationStructureKHR, lightmap: Image, gbuffers: GBuffers)
+{
+    as_info := vk.WriteDescriptorSetAccelerationStructureKHR {
+        sType = .WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+        accelerationStructureCount = 1,
+        pAccelerationStructures = raw_data([]vk.AccelerationStructureKHR { tlas })
+    }
+
+    writes := []vk.WriteDescriptorSet {
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = .ACCELERATION_STRUCTURE_KHR,
+            pNext = &as_info,
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 1,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_IMAGE,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = lightmap.view,
+                    imageLayout = .GENERAL,
+                }
+            })
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 2,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_IMAGE,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = gbuffers.world_pos.view,
+                    imageLayout = .GENERAL,
+                }
+            })
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 3,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_IMAGE,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = gbuffers.world_normals.view,
+                    imageLayout = .GENERAL,
+                }
+            })
+        }
+    }
+    vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
+}
+
 vk_check :: proc(result: vk.Result, location := #caller_location)
 {
     if result != .SUCCESS
@@ -776,8 +1566,6 @@ fatal_error :: proc(fmt: string, args: ..any, location := #caller_location)
         log.panicf(fmt, args, location = location)
     }
 }
-
-
 
 vk_debug_callback :: proc "system" (severity: vk.DebugUtilsMessageSeverityFlagsEXT,
                                     types: vk.DebugUtilsMessageTypeFlagsEXT,

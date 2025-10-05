@@ -36,7 +36,6 @@ import "core:mem"
 import "core:c"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
-import stbrp "vendor:stb/rect_pack"
 import lm "../"
 
 import "ufbx"
@@ -64,7 +63,6 @@ Vulkan_Per_Frame :: struct
     acquire_semaphore: vk.Semaphore,
     cmd_pool: vk.CommandPool,
     cmd_buf: vk.CommandBuffer,
-    ubo: Buffer,
 }
 
 Swapchain :: struct
@@ -83,9 +81,6 @@ GBuffers :: struct
 }
 
 LIGHTMAP_SIZE :: 4096
-LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 64
-LIGHTMAP_MIN_INSTANCE_TEXELS :: 64
-LIGHTMAP_MAX_INSTANCE_TEXELS :: 1024
 
 main :: proc()
 {
@@ -138,15 +133,13 @@ main :: proc()
     defer destroy_shaders(&vk_ctx, shaders)
 
     scene := load_scene_fbx(&vk_ctx, "D:/lightmapper_test_scenes/ArchVis_RT.fbx")
-    defer destroy_scene(&vk_ctx, &scene)
+    // defer destroy_scene(&vk_ctx, &scene)
 
     vk_frames := create_vk_frames(&vk_ctx)
     frame_idx := u32(0)
 
     now_ts := sdl.GetPerformanceCounter()
     max_delta_time: f32 = 1.0 / 10.0  // 10fps
-
-    //build_lightmap(&vk_ctx, scene, shaders)
 
     desc_pool_ci := vk.DescriptorPoolCreateInfo {
         sType = .DESCRIPTOR_POOL_CREATE_INFO,
@@ -190,7 +183,6 @@ main :: proc()
         pQueueFamilyIndices = &vk_ctx.queue_family_idx,
         initialLayout = .UNDEFINED,
     }, "lightmap")
-
 
     // Create linear sampler
     linear_sampler_ci := vk.SamplerCreateInfo {
@@ -242,6 +234,24 @@ main :: proc()
 
     accum_counter := u32(0)
 
+    lm_vk_ctx := lm.Vulkan_Context {
+        phys_device = vk_ctx.phys_device,
+        device = vk_ctx.device,
+        queue = vk_ctx.queue,
+        queue_family_idx = vk_ctx.queue_family_idx,
+        rt_handle_alignment = vk_ctx.rt_handle_alignment,
+        rt_handle_size = vk_ctx.rt_handle_size,
+        rt_base_align = vk_ctx.rt_base_align,
+    }
+    lm_ctx := lm.init_from_vulkan_instance(lm_vk_ctx)
+
+    lm_scene := lm.Scene {
+        instances = scene.instances,
+        meshes = scene.meshes,
+        tlas = scene.tlas,
+    }
+    lm.start_bake(&lm_ctx, lm_scene, 100, 4096)
+
     for
     {
         proceed := handle_window_events(window)
@@ -290,6 +300,7 @@ main :: proc()
             pImageMemoryBarriers = &transition_to_color_attachment_barrier,
         })
 
+/*
         // GBUFFERS BARRIERS
         {
             gbuffers_barriers := []vk.ImageMemoryBarrier2 {
@@ -428,7 +439,7 @@ main :: proc()
                 pImageMemoryBarriers = raw_data(lightmap_barrier),
             })
         }
-
+*/
         render_scene(&vk_ctx, cmd_buf, depth_image_view, swapchain.image_views[image_idx], lm_desc_set, shaders, swapchain, scene)
 
         transition_to_present_src_barrier := vk.ImageMemoryBarrier2 {
@@ -834,9 +845,6 @@ create_vk_frames :: proc(using ctx: ^Vk_Ctx) -> [NUM_FRAMES_IN_FLIGHT]Vulkan_Per
             flags = { .SIGNALED },
         }
         vk_check(vk.CreateFence(device, &fence_ci, nil, &frame.fence))
-
-        // Create per-frame UBO
-        frame.ubo = create_buffer(ctx, 1, size_of(Frame_Data), { .UNIFORM_BUFFER }, { .HOST_COHERENT, .HOST_VISIBLE }, {})
     }
 
     return res
@@ -1205,7 +1213,7 @@ Shaders :: struct
     sbt_buf: Buffer,
 }
 
-render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: Scene)
+render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: lm.Scene)
 {
     depth_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO,
@@ -1350,12 +1358,12 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
         if !mesh.lm_uvs_present { break loop }
 
         offset := vk.DeviceSize(0)
-        vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.buf, &offset)
-        vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.buf, &offset)
+        vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
+        vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
         if mesh.lm_uvs_present {
-            vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.buf, &offset)
+            vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
         }
-        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.buf, 0, .UINT32)
+        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.handle, 0, .UINT32)
 
         Push :: struct {
             model_to_world: matrix[4, 4]f32,
@@ -1379,7 +1387,7 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
     vk.CmdEndRendering(cmd_buf)
 }
 
-render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers, shaders: Shaders, scene: Scene)
+render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers, shaders: Shaders, scene: lm.Scene)
 {
     vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
         {  // Positions
@@ -1500,7 +1508,7 @@ render_gbuffers :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, gbuffers:
     }
 }
 
-draw_gbuffer :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, scene: Scene, pipeline_layout: vk.PipelineLayout)
+draw_gbuffer :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, scene: lm.Scene, pipeline_layout: vk.PipelineLayout)
 {
     vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
     vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
@@ -1560,12 +1568,12 @@ draw_gbuffer :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, scene: Scene
         vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
 
         offset := vk.DeviceSize(0)
-        vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.buf, &offset)
-        vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.buf, &offset)
+        vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
+        vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
         if mesh.lm_uvs_present {
-            vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.buf, &offset)
+            vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
         }
-        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.buf, 0, .UINT32)
+        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.handle, 0, .UINT32)
 
         Push :: struct {
             model_to_world: matrix[4, 4]f32,
@@ -1781,240 +1789,7 @@ load_file :: proc(filename: string, allocator: runtime.Allocator) -> []byte
 /////////////////////////////////////
 // Scene loading. This part can be ignored.
 
-Scene :: struct
-{
-    instances: [dynamic]Instance,
-    meshes: [dynamic]Mesh,
-    tlas: Tlas,
-}
-
-Instance :: struct
-{
-    transform: matrix[4, 4]f32,
-    mesh_idx: u32,
-    lm_idx: u32,
-    lm_offset: [2]f32,
-    lm_scale: f32,
-}
-
-Mesh :: struct
-{
-    indices_cpu: [dynamic]u32,
-    pos_cpu: [dynamic][3]f32,
-
-    pos: Buffer,
-    normals: Buffer,
-    lm_uvs: Buffer,
-    indices_gpu: Buffer,
-    idx_count: u32,
-
-    lm_uvs_present: bool,
-
-    blas: Accel_Structure,
-}
-
-load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> Scene
-{
-    // Load the .fbx file
-    opts := ufbx.Load_Opts {
-        target_unit_meters = 1,
-        target_axes = {
-            right = .POSITIVE_X,
-            up = .POSITIVE_Y,
-            front = .NEGATIVE_Z,
-        }
-    }
-    err: ufbx.Error
-    scene := ufbx.load_file(path, &opts, &err)
-    defer ufbx.free_scene(scene)
-    if scene == nil
-    {
-        fmt.printfln("%s", err.description.data)
-        panic("Failed to load")
-    }
-
-    res: Scene
-
-    // Loop through meshes.
-    for i in 0..<scene.meshes.count
-    {
-        fbx_mesh := scene.meshes.data[i]
-
-        mesh: Mesh
-
-        // Indices
-        index_count := 3 * fbx_mesh.num_triangles
-        indices := make([dynamic]u32, index_count)
-        offset := u32(0)
-        for i in 0..<fbx_mesh.faces.count
-        {
-            face := fbx_mesh.faces.data[i]
-            num_tris := ufbx.catch_triangulate_face(nil, &indices[offset], uint(index_count), fbx_mesh, face)
-            offset += 3 * num_tris
-        }
-
-        mesh.indices_gpu = create_index_buffer(ctx, indices[:])
-        mesh.indices_cpu = indices
-
-        // NOTE: uv_set[0] is the same as fbx_mesh.vertex_uv
-        // Find the lightmap UVs
-        lightmap_uv_idx := -1
-        for i in 0..<fbx_mesh.uv_sets.count
-        {
-            uv_set := fbx_mesh.uv_sets.data[i]
-            if uv_set.name.data == "LightMapUV" {
-                lightmap_uv_idx = int(uv_set.index)
-            }
-        }
-
-        // Verts
-        vertex_count := fbx_mesh.num_indices
-        pos_buf := make([dynamic][3]f32, vertex_count)
-        normals_buf := make([][3]f32, vertex_count, allocator = context.temp_allocator)
-        lm_uvs_buf := make([][2]f32, vertex_count, allocator = context.temp_allocator)
-        for i in 0..<vertex_count
-        {
-            assert(i < fbx_mesh.vertex_position.indices.count)
-            assert(fbx_mesh.vertex_position.indices.data[i] < u32(fbx_mesh.vertex_position.values.count))
-
-            pos := fbx_mesh.vertex_position.values.data[fbx_mesh.vertex_position.indices.data[i]]
-            norm := fbx_mesh.vertex_normal.values.data[fbx_mesh.vertex_normal.indices.data[i]]
-            pos_buf[i] = {f32(pos.x), f32(pos.y), f32(pos.z)}
-            normals_buf[i] = {f32(norm.x), f32(norm.y), f32(norm.z)}
-            if lightmap_uv_idx != -1 {
-                uv_set := fbx_mesh.uv_sets.data[lightmap_uv_idx]
-                lm_uv := uv_set.vertex_uv.values.data[uv_set.vertex_uv.indices.data[i]]
-                lm_uvs_buf[i] = {f32(lm_uv.x), f32(lm_uv.y)}
-            }
-        }
-
-        mesh.pos = create_vertex_buffer(ctx, pos_buf[:])
-        mesh.normals = create_vertex_buffer(ctx, normals_buf)
-        mesh.pos_cpu = pos_buf
-
-        if lightmap_uv_idx == -1 {
-            mesh.lm_uvs_present = false
-        } else {
-            mesh.lm_uvs_present = true
-            mesh.lm_uvs = create_vertex_buffer(ctx, lm_uvs_buf)
-        }
-
-        mesh.idx_count = u32(index_count)
-
-        mesh.blas = create_blas(ctx, mesh.pos, mesh.indices_gpu, u32(len(pos_buf)), u32(len(indices)))
-
-        append(&res.meshes, mesh)
-    }
-
-    // Loop through instances.
-    for i in 0..<scene.nodes.count
-    {
-        node := scene.nodes.data[i]
-        if node.is_root || node.mesh == nil { continue }
-        // TODO TODO TODO TODO TODO remove this
-        if i < 20 { continue }  // Skip giant sphere
-
-        instance := Instance {
-            transform = get_node_world_transform(node),
-            mesh_idx = node.mesh.element.typed_id,
-        }
-        append(&res.instances, instance)
-    }
-
-    // Pack lightmap uvs.
-    {
-        num_nodes := LIGHTMAP_SIZE
-        tmp_nodes := make([]stbrp.Node, num_nodes, allocator = context.temp_allocator)
-        ctx: stbrp.Context
-        stbrp.init_target(&ctx, LIGHTMAP_SIZE, LIGHTMAP_SIZE, raw_data(tmp_nodes), i32(len(tmp_nodes)))
-
-        rects := make([dynamic]stbrp.Rect, len(res.instances))
-        defer delete(rects)
-
-        for instance, i in res.instances
-        {
-            rect_size := get_instance_lm_size(instance, res.meshes[instance.mesh_idx])
-
-            rects[i].id = c.int(i)
-            rects[i].w = rect_size
-            rects[i].h = rect_size
-        }
-
-        lm_idx := u32(0)
-        for
-        {
-            all_fit := bool(stbrp.pack_rects(&ctx, raw_data(rects), c.int(len(rects))))
-
-            for rect in rects
-            {
-                if !rect.was_packed { continue }
-
-                assert(rect.w == rect.h)
-
-                res.instances[rect.id].lm_idx = lm_idx
-                res.instances[rect.id].lm_offset = { f32(rect.x) / f32(LIGHTMAP_SIZE), f32(rect.y) / f32(LIGHTMAP_SIZE) }
-                res.instances[rect.id].lm_scale = f32(rect.w) / f32(LIGHTMAP_SIZE)
-            }
-
-            if all_fit { break }
-
-            fmt.println("Did not all fit!")
-            assert(false)
-
-            remaining_rects: [dynamic]stbrp.Rect
-
-            for rect in rects
-            {
-                if !rect.was_packed {
-                    append(&remaining_rects, rect)
-                }
-            }
-
-            delete(rects)
-            rects = remaining_rects
-
-            lm_idx += 1
-        }
-    }
-
-    res.tlas = create_tlas(ctx, res.instances[:], res.meshes[:])
-
-    return res
-}
-
-get_instance_lm_size :: proc(instance: Instance, mesh: Mesh) -> stbrp.Coord
-{
-    res := f32(0.0)
-    for i := 0; i < len(mesh.indices_cpu); i += 3
-    {
-        idx0 := mesh.indices_cpu[i+0]
-        idx1 := mesh.indices_cpu[i+1]
-        idx2 := mesh.indices_cpu[i+2]
-
-        v0 := (instance.transform * v3_to_v4(mesh.pos_cpu[idx0].xyz, 1.0)).xyz
-        v1 := (instance.transform * v3_to_v4(mesh.pos_cpu[idx1].xyz, 1.0)).xyz
-        v2 := (instance.transform * v3_to_v4(mesh.pos_cpu[idx2].xyz, 1.0)).xyz
-
-        area := linalg.length(linalg.cross(v1 - v0, v2 - v0)) / 2.0
-        res += area
-    }
-
-    size := stbrp.Coord(math.ceil(math.sqrt(res) * LIGHTMAP_TEXELS_PER_WORLD_UNIT))
-    size = clamp(size, LIGHTMAP_MIN_INSTANCE_TEXELS, LIGHTMAP_MAX_INSTANCE_TEXELS)
-    return size
-}
-
-get_node_world_transform :: proc(node: ^ufbx.Node) -> matrix[4, 4]f32
-{
-    if node == nil { return 1 }
-
-    local := xform_to_mat(node.local_transform.translation, transmute(quaternion256) node.local_transform.rotation, node.local_transform.scale)
-
-    if node.is_root { return local }
-
-    return get_node_world_transform(node.parent) * local
-}
-
+/*
 destroy_mesh :: proc(using ctx: ^Vk_Ctx, mesh: ^Mesh)
 {
     destroy_buffer(ctx, &mesh.pos)
@@ -2036,6 +1811,7 @@ destroy_scene :: proc(using ctx: ^Vk_Ctx, scene: ^Scene)
     delete(scene.meshes)
     scene^ = {}
 }
+*/
 
 xform_to_mat :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4, 4]f32
 {
@@ -2060,9 +1836,6 @@ create_sbt_buffer :: proc(using ctx: ^Vk_Ctx, shader_handle_storage: []byte, num
                  &shader_handle_storage[group_idx * rt_handle_size],
                  int(rt_handle_size))
     }
-    data_tmp := cast([^]byte) data
-    data_slice := data_tmp[:size]
-    fmt.printfln("%x", data_slice)
     vk.UnmapMemory(device, staging_buf.mem)
 
     res := create_buffer(ctx, 1, int(size), { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
@@ -2948,12 +2721,12 @@ create_blas :: proc(using ctx: ^Vk_Ctx, positions: Buffer, indices: Buffer, vert
         accelerationStructure = blas.handle,
     }
     blas.addr = vk.GetAccelerationStructureDeviceAddressKHR(device, &addr_info)
-    fmt.println("get accel struct addr:", blas.addr)
+    // fmt.println("get accel struct addr:", blas.addr)
 
     return blas
 }
 
-create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []Instance, meshes: []Mesh) -> Tlas
+create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []lm.Instance, meshes: []lm.Mesh) -> Tlas
 {
     as: Accel_Structure
 
@@ -2979,8 +2752,6 @@ create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []Instance, meshes: []Mesh) -
             flags = .TRIANGLE_FACING_CULL_DISABLE,
             accelerationStructureReference = u64(meshes[instance.mesh_idx].blas.addr)
         }
-
-        fmt.println(u64(meshes[instance.mesh_idx].blas.addr))
     }
 
     instances_buf := create_instances_buffer(ctx, vk_instances)
