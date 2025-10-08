@@ -58,12 +58,29 @@ Vulkan_Context :: struct
 
 // Initialization
 
+// Initializes this library with its own Vulkan context.
+// Only really makes sense for projects not using Vulkan.
 init_from_scratch :: proc() -> Context
 {
     return {}
 }
 
-init_from_vulkan_instance :: proc(vk_ctx: Vulkan_Context) -> Context
+// Initializes this library with an already existing Vulkan context.
+// NOTE: This library is completely asynchronous, so use a separate queue here!
+init_from_vulkan_context :: proc(phys_device: vk.PhysicalDevice, device: vk.Device, queue: vk.Queue, queue_family_idx: u32) -> Context
+{
+    res: Context
+    res.vk_ctx.phys_device = phys_device
+    res.vk_ctx.device = device
+    res.vk_ctx.queue = queue
+    res.vk_ctx.queue_family_idx = queue_family_idx
+
+    res.shaders = create_shaders(&res.vk_ctx)
+
+    return res
+}
+
+init_test :: proc(vk_ctx: Vulkan_Context) -> Context
 {
     res: Context
     res.vk_ctx = vk_ctx
@@ -158,9 +175,19 @@ Bake :: struct
     num_accums: u32,
     lightmap_size: u32,
     scene: Scene,
+
+    acquired_view: bool,
 }
 
-start_bake :: proc(using ctx: ^Context, scene: Scene, num_accums: u32, lightmap_size: u32) -> ^Bake
+// Starts a baking process in a separate thread.
+//
+// Inputs:
+// - lightmap_size: Size in pixels of the lightmap to be built.
+// - num_accums: Number of accumulations for pathtracing.
+// - num_samples_per_pixel: Number of pathtrace samples per pixel done on each accumulation.
+start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_Structures,
+                   lightmap_size: u32 = 4096, num_accums: u32 = 200, num_samples_per_pixel: u32 = 1,
+                   ) -> ^Bake
 {
     bake := new(Bake)
     bake.ctx = ctx
@@ -172,30 +199,38 @@ start_bake :: proc(using ctx: ^Context, scene: Scene, num_accums: u32, lightmap_
     bake.thread.init_context = context
     bake.thread.user_index = 0
     bake.thread.data = bake
-
-    // Copy the scene and stuff.
-    // TODO: Scene preprocessing. I think we should build the blas and tlas here...?
+    bake.scene = scene
 
     thr.start(bake.thread)
     return bake
 }
 
-// If it's 1 it's done.
+// Reports the process, in percentage, in [0, 1].
 progress :: proc(using bake: ^Bake) -> f32
 {
     return 0.0
 }
 
-abort_bake :: proc(using bake: ^Bake)
+// Stops the baking process before it is complete.
+stop_bake :: proc(using bake: ^Bake)
 {
 
 }
 
+pause_bake :: proc(using bake: ^Bake)
+{
+
+}
+
+// Stops the current thread until the entire bake is finished.
 wait_end_of_bake :: proc(using bake: ^Bake)
 {
     thr.join(bake.thread)
 }
 
+// Cleans up all temporary resources linked to the
+// lightmap baking process.
+// Must be called after each start_bake!
 cleanup_bake :: proc(using bake: ^Bake)
 {
     free(bake)
@@ -209,11 +244,6 @@ acquire_lightmap_view_vk :: proc(using bake: ^Bake) -> vk.ImageView
 release_lightmap_view_vk :: proc(using bake: ^Bake)
 {
 
-}
-
-get_current_lightmap_view_cpu_buf :: proc() -> []byte
-{
-    return {}
 }
 
 // Internals
@@ -319,13 +349,39 @@ bake_main :: proc(using bake: ^Bake)
         flags = { .ONE_TIME_SUBMIT },
     }))
 
-    // Render gbuffers
+    // Lightmap backbuffer
+    lightmap_backbuffer := create_image(ctx, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R16G16B16A16_SFLOAT,
+        extent = {
+            width = lightmap_size,
+            height = lightmap_size,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .STORAGE, .SAMPLED },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &vk_ctx.queue_family_idx,
+        initialLayout = .UNDEFINED,
+    }, "lightmap_backbuffer")
+
+    // GBuffers
     render_gbuffers(bake, cmd_buf, gbufs)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
+    // Pathtracing
     for iter in 0..<num_accums
     {
+        vk_check(vk.WaitForFences(vk_ctx.device, 1, &fence, true, max(u64)))
+        vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
+        vk_check(vk.ResetCommandPool(vk_ctx.device, cmd_pool, {}))
+
         // If signalled to stop, stop.
 
         vk_check(vk.BeginCommandBuffer(cmd_buf, &{
@@ -344,7 +400,7 @@ bake_main :: proc(using bake: ^Bake)
                         levelCount = 1,
                         layerCount = 1,
                     },
-                    oldLayout = .GENERAL,
+                    oldLayout = .UNDEFINED,
                     newLayout = .GENERAL,
                     srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
                     srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
@@ -359,7 +415,7 @@ bake_main :: proc(using bake: ^Bake)
                         levelCount = 1,
                         layerCount = 1,
                     },
-                    oldLayout = .GENERAL,
+                    oldLayout = .UNDEFINED,
                     newLayout = .GENERAL,
                     srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
                     srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
@@ -442,6 +498,11 @@ bake_main :: proc(using bake: ^Bake)
             //pSignalSemaphores = &present_semaphore,
         }
         vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, fence))
+
+        // Submit results to backbuffer, if available.
+        {
+            
+        }
     }
 
     // Cleanup
@@ -690,6 +751,7 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, rt_desc_set
 Shaders :: struct
 {
     // GBuffer generation
+    lm_desc_set_layout: vk.DescriptorSetLayout,
     pipeline_layout: vk.PipelineLayout,
     uv_space: vk.ShaderEXT,
     gbuffer_world_pos: vk.ShaderEXT,
@@ -708,13 +770,6 @@ Buffer :: struct
     mem: vk.DeviceMemory,
 }
 
-uv_space_vert_code              := #load("shaders/uv_space.vert.spv")
-gbuffer_world_pos_frag_code     := #load("shaders/gbuffer_world_pos.frag.spv")
-gbuffer_world_normals_frag_code := #load("shaders/gbuffer_world_normals.frag.spv")
-raygen_code                     := #load("shaders/raygen.rgen.spv")
-raymiss_code                    := #load("shaders/raymiss.rmiss.spv")
-rayhit_code                     := #load("shaders/rayhit.rchit.spv")
-
 create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
 {
     res: Shaders
@@ -728,6 +783,21 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
 
     // Desc set layouts
     {
+        lm_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = {},
+            bindingCount = 1,
+            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .COMBINED_IMAGE_SAMPLER,
+                    descriptorCount = 1,
+                    stageFlags = { .FRAGMENT },
+                },
+            })
+        }
+        vk_check(vk.CreateDescriptorSetLayout(device, &lm_desc_set_layout_ci, nil, &res.lm_desc_set_layout))
+
         rt_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             flags = {},
@@ -764,6 +834,15 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
 
     // Pipeline layouts
     {
+        pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            pushConstantRangeCount = u32(len(push_constant_ranges)),
+            pPushConstantRanges = raw_data(push_constant_ranges),
+            setLayoutCount = 1,
+            pSetLayouts = &res.lm_desc_set_layout,
+        }
+        vk_check(vk.CreatePipelineLayout(device, &pipeline_layout_ci, nil, &res.pipeline_layout))
+
         rt_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
             sType = .PIPELINE_LAYOUT_CREATE_INFO,
             flags = {},
@@ -780,14 +859,35 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         vk_check(vk.CreatePipelineLayout(device, &rt_pipeline_layout_ci, nil, &res.rt_pipeline_layout))
     }
 
+    uv_space_vert_code              := #load("shaders/uv_space.vert.spv")
+    gbuffer_world_pos_frag_code     := #load("shaders/gbuffer_world_pos.frag.spv")
+    gbuffer_world_normals_frag_code := #load("shaders/gbuffer_world_normals.frag.spv")
+    raygen_code                     := #load("shaders/raygen.rgen.spv")
+    raymiss_code                    := #load("shaders/raymiss.rmiss.spv")
+    rayhit_code                     := #load("shaders/rayhit.rchit.spv")
+
+    // NOTE: #load(<string-path>, <type>) produces unaligned reads and writes (https://github.com/odin-lang/Odin/issues/5771)
+    uv_space_vert_code_aligned: []byte = mem.make_aligned([]byte, len(uv_space_vert_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(uv_space_vert_code_aligned), raw_data(uv_space_vert_code), len(uv_space_vert_code))
+    gbuffer_world_pos_frag_code_aligned: []byte = mem.make_aligned([]byte, len(gbuffer_world_pos_frag_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(gbuffer_world_pos_frag_code_aligned), raw_data(gbuffer_world_pos_frag_code), len(gbuffer_world_pos_frag_code))
+    gbuffer_world_normals_frag_code_aligned: []byte = mem.make_aligned([]byte, len(gbuffer_world_normals_frag_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(gbuffer_world_normals_frag_code_aligned), raw_data(gbuffer_world_normals_frag_code), len(gbuffer_world_normals_frag_code))
+    raygen_code_aligned: []byte = mem.make_aligned([]byte, len(raygen_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(raygen_code_aligned), raw_data(raygen_code), len(raygen_code))
+    raymiss_code_aligned: []byte = mem.make_aligned([]byte, len(raymiss_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(raymiss_code_aligned), raw_data(raymiss_code), len(raymiss_code))
+    rayhit_code_aligned: []byte = mem.make_aligned([]byte, len(rayhit_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(rayhit_code_aligned), raw_data(rayhit_code), len(rayhit_code))
+
     // Create shader objects.
     {
         shader_cis := [?]vk.ShaderCreateInfoEXT {
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
-                codeSize = len(uv_space_vert_code),
-                pCode = raw_data(uv_space_vert_code),
+                codeSize = len(uv_space_vert_code_aligned) * size_of(uv_space_vert_code_aligned[0]),
+                pCode = raw_data(uv_space_vert_code_aligned),
                 pName = "main",
                 stage = { .VERTEX },
                 nextStage = { .FRAGMENT },
@@ -798,8 +898,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
-                codeSize = len(gbuffer_world_pos_frag_code),
-                pCode = raw_data(gbuffer_world_pos_frag_code),
+                codeSize = len(gbuffer_world_pos_frag_code_aligned) * size_of(gbuffer_world_pos_frag_code_aligned[0]),
+                pCode = raw_data(gbuffer_world_pos_frag_code_aligned),
                 pName = "main",
                 stage = { .FRAGMENT },
                 flags = { },
@@ -809,8 +909,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
-                codeSize = len(gbuffer_world_normals_frag_code),
-                pCode = raw_data(gbuffer_world_normals_frag_code),
+                codeSize = len(gbuffer_world_normals_frag_code_aligned) * size_of(gbuffer_world_normals_frag_code_aligned[0]),
+                pCode = raw_data(gbuffer_world_normals_frag_code_aligned),
                 pName = "main",
                 stage = { .FRAGMENT },
                 flags = { },
@@ -826,6 +926,7 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     }
 
     // RT
+    // NOTE: The constant is wrong, this is now fixed but not in the latest release.
     SHADER_UNUSED :: ~u32(0)
 
     raygen_shader: vk.ShaderModule
@@ -836,8 +937,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         shader_module_ci := vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             flags = {},
-            codeSize = len(raygen_code),
-            pCode = auto_cast raw_data(raygen_code),
+            codeSize = len(raygen_code_aligned) * size_of(raygen_code_aligned[0]),
+            pCode = auto_cast raw_data(raygen_code_aligned),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raygen_shader))
     }
@@ -845,8 +946,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         shader_module_ci := vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             flags = {},
-            codeSize = len(raymiss_code),
-            pCode = auto_cast raw_data(raymiss_code),
+            codeSize = len(raymiss_code_aligned) * size_of(raymiss_code_aligned[0]),
+            pCode = auto_cast raw_data(raymiss_code_aligned),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raymiss_shader))
     }
@@ -854,8 +955,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         shader_module_ci := vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             flags = {},
-            codeSize = len(rayhit_code),
-            pCode = auto_cast raw_data(rayhit_code),
+            codeSize = len(rayhit_code_aligned) * size_of(rayhit_code_aligned[0]),
+            pCode = auto_cast raw_data(rayhit_code_aligned),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &rayhit_shader))
     }
@@ -1212,9 +1313,6 @@ create_sbt_buffer :: proc(using ctx: ^Vulkan_Context, shader_handle_storage: []b
                  &shader_handle_storage[group_idx * rt_handle_size],
                  int(rt_handle_size))
     }
-    data_tmp := cast([^]byte) data
-    data_slice := data_tmp[:size]
-    fmt.printfln("%x", data_slice)
     vk.UnmapMemory(device, staging_buf.mem)
 
     res := create_buffer(ctx, 1, int(size), { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })

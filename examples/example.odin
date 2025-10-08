@@ -51,6 +51,7 @@ Vk_Ctx :: struct
     phys_device: vk.PhysicalDevice,
     device: vk.Device,
     queue: vk.Queue,
+    lm_queue: vk.Queue,
     queue_family_idx: u32,
     rt_handle_alignment: u32,
     rt_handle_size: u32,
@@ -237,20 +238,20 @@ main :: proc()
     lm_vk_ctx := lm.Vulkan_Context {
         phys_device = vk_ctx.phys_device,
         device = vk_ctx.device,
-        queue = vk_ctx.queue,
+        queue = vk_ctx.lm_queue,
         queue_family_idx = vk_ctx.queue_family_idx,
         rt_handle_alignment = vk_ctx.rt_handle_alignment,
         rt_handle_size = vk_ctx.rt_handle_size,
         rt_base_align = vk_ctx.rt_base_align,
     }
-    lm_ctx := lm.init_from_vulkan_instance(lm_vk_ctx)
+    lm_ctx := lm.init_test(lm_vk_ctx)
 
     lm_scene := lm.Scene {
         instances = scene.instances,
         meshes = scene.meshes,
         tlas = scene.tlas,
     }
-    lm.start_bake(&lm_ctx, lm_scene, 100, 4096)
+    lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 200, 1)
 
     for
     {
@@ -609,7 +610,7 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         {
             sType = .DEVICE_QUEUE_CREATE_INFO,
             queueFamilyIndex = queue_family_idx,
-            queueCount = 1,
+            queueCount = 2,
             pQueuePriorities = &queue_priority,
         },
     }
@@ -672,6 +673,8 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
 
     queue: vk.Queue
     vk.GetDeviceQueue(device, queue_family_idx, 0, &queue)
+    lm_queue: vk.Queue
+    vk.GetDeviceQueue(device, queue_family_idx, 1, &lm_queue)
 
     // Useful constants
     rt_handle_alignment: u32
@@ -697,6 +700,7 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         phys_device = chosen_phys_device,
         device = device,
         queue = queue,
+        lm_queue = lm_queue,
         queue_family_idx = queue_family_idx,
         rt_handle_alignment = rt_handle_alignment,
         rt_base_align = rt_base_align,
