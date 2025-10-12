@@ -40,8 +40,8 @@ import lm "../"
 
 import "ufbx"
 
-NUM_FRAMES_IN_FLIGHT :: 2
-NUM_SWAPCHAIN_IMAGES :: 3
+NUM_FRAMES_IN_FLIGHT :: 1
+NUM_SWAPCHAIN_IMAGES :: 2
 
 vk_logger: log.Logger
 glfw_logger: log.Logger
@@ -165,26 +165,6 @@ main :: proc()
     desc_pool: vk.DescriptorPool
     vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &desc_pool))
 
-    lightmap := create_image(&vk_ctx, {
-        sType = .IMAGE_CREATE_INFO,
-        flags = {},
-        imageType = .D2,
-        format = .R16G16B16A16_SFLOAT,
-        extent = {
-            width = LIGHTMAP_SIZE,
-            height = LIGHTMAP_SIZE,
-            depth = 1,
-        },
-        mipLevels = 1,
-        arrayLayers = 1,
-        samples = { ._1 },
-        usage = { .STORAGE, .SAMPLED },
-        sharingMode = .EXCLUSIVE,
-        queueFamilyIndexCount = 1,
-        pQueueFamilyIndices = &vk_ctx.queue_family_idx,
-        initialLayout = .UNDEFINED,
-    }, "lightmap")
-
     // Create linear sampler
     linear_sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
@@ -199,9 +179,23 @@ main :: proc()
     linear_sampler: vk.Sampler
     vk_check(vk.CreateSampler(vk_ctx.device, &linear_sampler_ci, nil, &linear_sampler))
 
-    gbuffers := create_gbuffers(&vk_ctx)
+    lm_vk_ctx := lm.Vulkan_Context {
+        phys_device = vk_ctx.phys_device,
+        device = vk_ctx.device,
+        queue = vk_ctx.lm_queue,
+        queue_family_idx = vk_ctx.queue_family_idx,
+        rt_handle_alignment = vk_ctx.rt_handle_alignment,
+        rt_handle_size = vk_ctx.rt_handle_size,
+        rt_base_align = vk_ctx.rt_base_align,
+    }
+    lm_ctx := lm.init_test(lm_vk_ctx)
 
-    rt_desc_set := create_rt_desc_set(&vk_ctx, scene.tlas.as.handle, lightmap, gbuffers, desc_pool, shaders.rt_desc_set_layout)
+    lm_scene := lm.Scene {
+        instances = scene.instances,
+        meshes = scene.meshes,
+        tlas = scene.tlas,
+    }
+    bake := lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 200, 1)
 
     // Create lightmap desc set
     desc_set_ai := vk.DescriptorSetAllocateInfo {
@@ -224,7 +218,7 @@ main :: proc()
             descriptorType = .COMBINED_IMAGE_SAMPLER,
             pImageInfo = raw_data([]vk.DescriptorImageInfo {
                 {
-                    imageView = lightmap.view,
+                    imageView = bake.lightmap_backbuffer.view,
                     imageLayout = .GENERAL,
                     sampler = linear_sampler,
                 }
@@ -233,28 +227,10 @@ main :: proc()
     }
     vk.UpdateDescriptorSets(vk_ctx.device, 1, raw_data(writes), 0, nil)
 
-    accum_counter := u32(0)
-
-    lm_vk_ctx := lm.Vulkan_Context {
-        phys_device = vk_ctx.phys_device,
-        device = vk_ctx.device,
-        queue = vk_ctx.lm_queue,
-        queue_family_idx = vk_ctx.queue_family_idx,
-        rt_handle_alignment = vk_ctx.rt_handle_alignment,
-        rt_handle_size = vk_ctx.rt_handle_size,
-        rt_base_align = vk_ctx.rt_base_align,
-    }
-    lm_ctx := lm.init_test(lm_vk_ctx)
-
-    lm_scene := lm.Scene {
-        instances = scene.instances,
-        meshes = scene.meshes,
-        tlas = scene.tlas,
-    }
-    lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 200, 1)
-
     for
     {
+        //fmt.println("frame", frame_idx)
+
         proceed := handle_window_events(window)
         if !proceed do break
 
@@ -265,6 +241,8 @@ main :: proc()
         vk_frame := vk_frames[frame_idx]
         vk_check(vk.WaitForFences(vk_ctx.device, 1, &vk_frame.fence, true, max(u64)))
         vk_check(vk.ResetFences(vk_ctx.device, 1, &vk_frame.fence))
+
+        lm_info := lm.acquire_next_lightmap_view_vk(bake)
 
         image_idx: u32
         vk_check(vk.AcquireNextImageKHR(vk_ctx.device, swapchain.handle, max(u64), vk_frame.acquire_semaphore, 0, &image_idx))
@@ -301,146 +279,6 @@ main :: proc()
             pImageMemoryBarriers = &transition_to_color_attachment_barrier,
         })
 
-/*
-        // GBUFFERS BARRIERS
-        {
-            gbuffers_barriers := []vk.ImageMemoryBarrier2 {
-                {
-                    sType = .IMAGE_MEMORY_BARRIER_2,
-                    image = gbuffers.world_pos.img,
-                    subresourceRange = {
-                        aspectMask = { .COLOR },
-                        levelCount = 1,
-                        layerCount = 1,
-                    },
-                    oldLayout = .UNDEFINED,
-                    newLayout = .GENERAL,
-                    srcStageMask = { .RAY_TRACING_SHADER_KHR },
-                    srcAccessMask = { .SHADER_READ },
-                    dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                    dstAccessMask = { .COLOR_ATTACHMENT_WRITE },
-                },
-                {
-                    sType = .IMAGE_MEMORY_BARRIER_2,
-                    image = gbuffers.world_normals.img,
-                    subresourceRange = {
-                        aspectMask = { .COLOR },
-                        levelCount = 1,
-                        layerCount = 1,
-                    },
-                    oldLayout = .UNDEFINED,
-                    newLayout = .GENERAL,
-                    srcStageMask = { .RAY_TRACING_SHADER_KHR },
-                    srcAccessMask = { .SHADER_READ },
-                    dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                    dstAccessMask = { .COLOR_ATTACHMENT_WRITE },
-                },
-            }
-            vk.CmdPipelineBarrier2(cmd_buf, &{
-                sType = .DEPENDENCY_INFO,
-                imageMemoryBarrierCount = u32(len(gbuffers_barriers)),
-                pImageMemoryBarriers = raw_data(gbuffers_barriers),
-            })
-        }
-
-        render_gbuffers(&vk_ctx, cmd_buf, gbuffers, shaders, scene)
-
-        // GBUFFERS BARRIERS
-        {
-            gbuffers_barriers := []vk.ImageMemoryBarrier2 {
-                {
-                    sType = .IMAGE_MEMORY_BARRIER_2,
-                    image = gbuffers.world_pos.img,
-                    subresourceRange = {
-                        aspectMask = { .COLOR },
-                        levelCount = 1,
-                        layerCount = 1,
-                    },
-                    oldLayout = .GENERAL,
-                    newLayout = .GENERAL,
-                    srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                    srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
-                    dstStageMask = { .RAY_TRACING_SHADER_KHR },
-                    dstAccessMask = { .SHADER_READ },
-                },
-                {
-                    sType = .IMAGE_MEMORY_BARRIER_2,
-                    image = gbuffers.world_normals.img,
-                    subresourceRange = {
-                        aspectMask = { .COLOR },
-                        levelCount = 1,
-                        layerCount = 1,
-                    },
-                    oldLayout = .GENERAL,
-                    newLayout = .GENERAL,
-                    srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                    srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
-                    dstStageMask = { .RAY_TRACING_SHADER_KHR },
-                    dstAccessMask = { .SHADER_READ },
-                },
-            }
-            vk.CmdPipelineBarrier2(cmd_buf, &{
-                sType = .DEPENDENCY_INFO,
-                imageMemoryBarrierCount = u32(len(gbuffers_barriers)),
-                pImageMemoryBarriers = raw_data(gbuffers_barriers),
-            })
-        }
-
-        // LIGHTMAP BARRIER
-        {
-            lightmap_barrier := []vk.ImageMemoryBarrier2 {
-                {
-                    sType = .IMAGE_MEMORY_BARRIER_2,
-                    image = lightmap.img,
-                    subresourceRange = {
-                        aspectMask = { .COLOR },
-                        levelCount = 1,
-                        layerCount = 1,
-                    },
-                    oldLayout = .UNDEFINED,
-                    newLayout = .GENERAL,
-                    srcStageMask = { .FRAGMENT_SHADER },
-                    srcAccessMask = { .SHADER_SAMPLED_READ },
-                    dstStageMask = { .RAY_TRACING_SHADER_KHR },
-                    dstAccessMask = { .SHADER_STORAGE_WRITE },
-                },
-            }
-            vk.CmdPipelineBarrier2(cmd_buf, &{
-                sType = .DEPENDENCY_INFO,
-                imageMemoryBarrierCount = u32(len(lightmap_barrier)),
-                pImageMemoryBarriers = raw_data(lightmap_barrier),
-            })
-        }
-
-        pathtrace_iter(&vk_ctx, cmd_buf, rt_desc_set, shaders, accum_counter)
-        accum_counter += 1
-
-        // LIGHTMAP BARRIER
-        {
-            lightmap_barrier := []vk.ImageMemoryBarrier2 {
-                {
-                    sType = .IMAGE_MEMORY_BARRIER_2,
-                    image = lightmap.img,
-                    subresourceRange = {
-                        aspectMask = { .COLOR },
-                        levelCount = 1,
-                        layerCount = 1,
-                    },
-                    oldLayout = .GENERAL,
-                    newLayout = .GENERAL,
-                    srcStageMask = { .RAY_TRACING_SHADER_KHR },
-                    srcAccessMask = { .SHADER_STORAGE_WRITE },
-                    dstStageMask = { .FRAGMENT_SHADER },
-                    dstAccessMask = { .SHADER_SAMPLED_READ },
-                },
-            }
-            vk.CmdPipelineBarrier2(cmd_buf, &{
-                sType = .DEPENDENCY_INFO,
-                imageMemoryBarrierCount = u32(len(lightmap_barrier)),
-                pImageMemoryBarriers = raw_data(lightmap_barrier),
-            })
-        }
-*/
         render_scene(&vk_ctx, cmd_buf, depth_image_view, swapchain.image_views[image_idx], lm_desc_set, shaders, swapchain, scene)
 
         transition_to_present_src_barrier := vk.ImageMemoryBarrier2 {
@@ -467,15 +305,40 @@ main :: proc()
         vk_check(vk.EndCommandBuffer(cmd_buf))
 
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
+        next: rawptr
+        next = &vk.TimelineSemaphoreSubmitInfo {
+            sType = .TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            pNext = next,
+            waitSemaphoreValueCount = 2,
+            pWaitSemaphoreValues = raw_data([]u64 {
+                0,
+                lm_info.wait_value
+            }),
+            signalSemaphoreValueCount = 2,
+            pSignalSemaphoreValues = raw_data([]u64 {
+                0,
+                lm_info.signal_value,
+            })
+        }
         submit_info := vk.SubmitInfo {
             sType = .SUBMIT_INFO,
-            waitSemaphoreCount = 1,
-            pWaitSemaphores = &vk_frame.acquire_semaphore,
-            pWaitDstStageMask = &wait_stage_flags,
+            pNext = next,
             commandBufferCount = 1,
             pCommandBuffers = &cmd_buf,
-            signalSemaphoreCount = 1,
-            pSignalSemaphores = &present_semaphore,
+            waitSemaphoreCount = 2,
+            pWaitSemaphores = raw_data([]vk.Semaphore {
+                vk_frame.acquire_semaphore,
+                lm_info.sem,
+            }),
+            pWaitDstStageMask = raw_data([]vk.PipelineStageFlags {
+                wait_stage_flags,
+                wait_stage_flags,
+            }),
+            signalSemaphoreCount = 2,
+            pSignalSemaphores = raw_data([]vk.Semaphore {
+                present_semaphore,
+                lm_info.sem
+            }),
         }
         vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, vk_frame.fence))
 
@@ -655,6 +518,11 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
         pNext = next,
         bufferDeviceAddress = true,
+    }
+    next = &vk.PhysicalDeviceTimelineSemaphoreFeatures {
+        sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+        pNext = next,
+        timelineSemaphore = true,
     }
 
     device_ci := vk.DeviceCreateInfo {

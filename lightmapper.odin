@@ -33,6 +33,7 @@ import intr "base:intrinsics"
 import "core:slice"
 import "core:mem"
 import "core:log"
+import "core:sync"
 import "base:runtime"
 import thr "core:thread"
 
@@ -171,12 +172,20 @@ Bake :: struct
     using ctx: ^Context,
     thread: ^thr.Thread,
 
+    // Resources
+    mutex: ^sync.Mutex,
+    sem: vk.Semaphore,
+    lightmap_backbuffer: Image,
+
+    // Synchronization counters
+    submission_counter: u64,
+    last_pathtrace_value: u64,
+    last_usage_value: u64,
+
     // Settings
     num_accums: u32,
     lightmap_size: u32,
     scene: Scene,
-
-    acquired_view: bool,
 }
 
 // Starts a baking process in a separate thread.
@@ -200,6 +209,42 @@ start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_St
     bake.thread.user_index = 0
     bake.thread.data = bake
     bake.scene = scene
+
+    bake.mutex = new(sync.Mutex)
+
+    next: rawptr
+    next = &vk.SemaphoreTypeCreateInfo {
+        sType = .SEMAPHORE_TYPE_CREATE_INFO,
+        pNext = next,
+        semaphoreType = .TIMELINE,
+        initialValue = 0,
+    }
+    sem_ci := vk.SemaphoreCreateInfo {
+        sType = .SEMAPHORE_CREATE_INFO,
+        pNext = next
+    }
+    vk_check(vk.CreateSemaphore(device, &sem_ci, nil, &bake.sem))
+
+    // Lightmap backbuffer
+    bake.lightmap_backbuffer = create_image(ctx, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R16G16B16A16_SFLOAT,
+        extent = {
+            width = lightmap_size,
+            height = lightmap_size,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .STORAGE, .SAMPLED, .TRANSFER_DST },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &vk_ctx.queue_family_idx,
+        initialLayout = .UNDEFINED,
+    }, "lightmap_backbuffer")
 
     thr.start(bake.thread)
     return bake
@@ -233,17 +278,35 @@ wait_end_of_bake :: proc(using bake: ^Bake)
 // Must be called after each start_bake!
 cleanup_bake :: proc(using bake: ^Bake)
 {
+    free(mutex)
     free(bake)
 }
 
-acquire_lightmap_view_vk :: proc(using bake: ^Bake) -> vk.ImageView
+// Semaphore is owned by this library and shouldn't be destroyed.
+View_Info :: struct
 {
-    return vk.ImageView(0)
+    sem: vk.Semaphore,
+    wait_value: u64,
+    signal_value: u64,
 }
-
-release_lightmap_view_vk :: proc(using bake: ^Bake)
+acquire_next_lightmap_view_vk :: proc(using bake: ^Bake) -> View_Info
 {
+    res: View_Info
 
+    {
+        sync.mutex_lock(mutex)
+        defer sync.mutex_unlock(mutex)
+
+        submission_counter += 1
+        res.signal_value = submission_counter
+        res.wait_value = last_pathtrace_value
+        last_usage_value = res.signal_value
+    }
+
+    fmt.println("usage waiting on", res.wait_value, "and signaling", res.signal_value)
+
+    res.sem = sem
+    return res
 }
 
 // Internals
@@ -257,11 +320,12 @@ bake_thread :: proc(t: ^thr.Thread)
 bake_main :: proc(using bake: ^Bake)
 {
     // Setup
-    // Create queue and command buffer here!
+
+    // Create queue and command buffers
     cmd_pool_ci := vk.CommandPoolCreateInfo {
         sType = .COMMAND_POOL_CREATE_INFO,
         queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
+        flags = { .RESET_COMMAND_BUFFER }
     }
     cmd_pool: vk.CommandPool
     vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
@@ -274,10 +338,6 @@ bake_main :: proc(using bake: ^Bake)
     }
     cmd_buf: vk.CommandBuffer
     vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-
-    semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
-    acquire_semaphore: vk.Semaphore
-    vk_check(vk.CreateSemaphore(device, &semaphore_ci, nil, &acquire_semaphore))
 
     fence_ci := vk.FenceCreateInfo {
         sType = .FENCE_CREATE_INFO,
@@ -301,7 +361,7 @@ bake_main :: proc(using bake: ^Bake)
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
-        usage = { .STORAGE, .SAMPLED },
+        usage = { .STORAGE, .SAMPLED, .TRANSFER_SRC },
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &vk_ctx.queue_family_idx,
@@ -349,41 +409,18 @@ bake_main :: proc(using bake: ^Bake)
         flags = { .ONE_TIME_SUBMIT },
     }))
 
-    // Lightmap backbuffer
-    lightmap_backbuffer := create_image(ctx, {
-        sType = .IMAGE_CREATE_INFO,
-        flags = {},
-        imageType = .D2,
-        format = .R16G16B16A16_SFLOAT,
-        extent = {
-            width = lightmap_size,
-            height = lightmap_size,
-            depth = 1,
-        },
-        mipLevels = 1,
-        arrayLayers = 1,
-        samples = { ._1 },
-        usage = { .STORAGE, .SAMPLED },
-        sharingMode = .EXCLUSIVE,
-        queueFamilyIndexCount = 1,
-        pQueueFamilyIndices = &vk_ctx.queue_family_idx,
-        initialLayout = .UNDEFINED,
-    }, "lightmap_backbuffer")
-
     // GBuffers
     render_gbuffers(bake, cmd_buf, gbufs)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
-    // Pathtracing
+    vk_check(vk.WaitForFences(vk_ctx.device, 1, &fence, true, max(u64)))
+    vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
+    vk_check(vk.ResetCommandPool(vk_ctx.device, cmd_pool, {}))
+
+    // Pathtrace loop
     for iter in 0..<num_accums
     {
-        vk_check(vk.WaitForFences(vk_ctx.device, 1, &fence, true, max(u64)))
-        vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
-        vk_check(vk.ResetCommandPool(vk_ctx.device, cmd_pool, {}))
-
-        // If signalled to stop, stop.
-
         vk_check(vk.BeginCommandBuffer(cmd_buf, &{
             sType = .COMMAND_BUFFER_BEGIN_INFO,
             flags = { .ONE_TIME_SUBMIT },
@@ -430,7 +467,7 @@ bake_main :: proc(using bake: ^Bake)
             })
         }
 
-        // LIGHTMAP BARRIER
+        // Lightmap barrier
         {
             lightmap_barrier := []vk.ImageMemoryBarrier2 {
                 {
@@ -484,28 +521,112 @@ bake_main :: proc(using bake: ^Bake)
             })
         }
 
+        // Blit to command buffer
+        {
+            transition_to_general_barrier := vk.ImageMemoryBarrier2 {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = lightmap_backbuffer.img,
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .UNDEFINED,
+                newLayout = .GENERAL,
+                srcStageMask = { .ALL_COMMANDS },
+                srcAccessMask = { .MEMORY_READ },
+                dstStageMask = { .TRANSFER },
+                dstAccessMask = { .MEMORY_WRITE },
+            }
+            vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
+                sType = .DEPENDENCY_INFO,
+                imageMemoryBarrierCount = 1,
+                pImageMemoryBarriers = &transition_to_general_barrier,
+            })
+
+            copy_info := vk.CopyImageInfo2 {
+                sType = .COPY_IMAGE_INFO_2,
+                srcImage = lightmap.img,
+                srcImageLayout = .GENERAL,
+                dstImage = lightmap_backbuffer.img,
+                dstImageLayout = .GENERAL,
+                regionCount = 1,
+                pRegions = &vk.ImageCopy2 {
+                    sType = .IMAGE_COPY_2,
+                    srcSubresource = vk.ImageSubresourceLayers {
+                        aspectMask = { .COLOR },
+                        mipLevel = 0,
+                        baseArrayLayer = 0,
+                        layerCount = 1,
+                    },
+                    dstSubresource = vk.ImageSubresourceLayers {
+                        aspectMask = { .COLOR },
+                        mipLevel = 0,
+                        baseArrayLayer = 0,
+                        layerCount = 1,
+                    },
+                    extent = {
+                        width = lightmap_size,
+                        height = lightmap_size,
+                        depth = 1,
+                    }
+                },
+            }
+            vk.CmdCopyImage2(cmd_buf, &copy_info)
+        }
+
         vk_check(vk.EndCommandBuffer(cmd_buf))
 
+        wait_value: u64
+        signal_value: u64
+        {
+            sync.mutex_lock(mutex)
+            defer sync.mutex_unlock(mutex)
+
+            submission_counter += 1
+            wait_value = last_usage_value
+            signal_value = submission_counter
+        }
+
+        fmt.println("pathtrace waiting on", wait_value, "and signaling", signal_value)
+
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
+        next: rawptr
+        next = &vk.TimelineSemaphoreSubmitInfo {
+            sType = .TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            pNext = next,
+            waitSemaphoreValueCount = 1,
+            pWaitSemaphoreValues = &wait_value,
+            signalSemaphoreValueCount = 1,
+            pSignalSemaphoreValues = &signal_value,
+        }
         submit_info := vk.SubmitInfo {
             sType = .SUBMIT_INFO,
-            //waitSemaphoreCount = 1,
-            //pWaitSemaphores = &vk_frame.acquire_semaphore,
+            pNext = next,
             pWaitDstStageMask = &wait_stage_flags,
             commandBufferCount = 1,
             pCommandBuffers = &cmd_buf,
-            //signalSemaphoreCount = 1,
-            //pSignalSemaphores = &present_semaphore,
+            waitSemaphoreCount = 1,
+            pWaitSemaphores = &sem,
         }
         vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, fence))
 
-        // Submit results to backbuffer, if available.
+        vk_check(vk.WaitForFences(vk_ctx.device, 1, &fence, true, max(u64)))
+        vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
+        vk_check(vk.ResetCommandPool(vk_ctx.device, cmd_pool, {}))
+
         {
-            
+            sync.mutex_lock(mutex)
+            defer sync.mutex_unlock(mutex)
+
+            last_pathtrace_value = signal_value
         }
     }
 
     // Cleanup
+    {
+
+    }
 }
 
 render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers)

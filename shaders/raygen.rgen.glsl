@@ -106,6 +106,64 @@ vec3 sample_hemisphere_cos(vec3 normal, vec2 ruv)
 
 vec3 pathtrace(vec3 world_pos, vec3 world_normal);
 
+
+
+vec3 sample_matte(vec3 color, vec3 normal, vec3 outgoing, vec2 rn)
+{
+    vec3 up_normal = dot(normal, outgoing) > 0.0f ? normal : -normal;
+    return sample_hemisphere_cos(up_normal, rn);
+}
+
+// Stores result in payload.
+void ray_scene_intersection(Ray ray)
+{
+    uint ray_flags = gl_RayFlagsOpaqueEXT;
+    uint cull_mask = 0xFF;
+    uint sbt_record_offset = 0;
+    uint sbt_record_stride = 0;
+    uint miss_index = 0;
+    vec3 origin = ray.ori;
+    float t_min = T_MIN;
+    vec3 direction = ray.dir;
+    float t_max = T_MAX;
+    const int payload_loc = 0;
+    traceRayEXT(tlas, ray_flags, cull_mask, sbt_record_offset, sbt_record_stride, miss_index, origin, t_min, direction, t_max, payload_loc);
+}
+
+vec3 pathtrace(vec3 start_pos, vec3 world_normal)
+{
+    vec3 radiance = vec3(0.0f);
+    vec3 weight = vec3(1.0f);
+    // Ray ray = Ray(start_pos, -world_normal);
+    vec3 outgoing = -world_normal;
+    vec3 incoming = sample_matte(vec3(0.8f), world_normal, outgoing, random_vec2());
+    Ray ray = Ray(start_pos, incoming);
+    ray_scene_intersection(ray);
+    return hit_info.color;
+
+
+/*    const uint MAX_BOUNCES = 1;
+    for(uint bounce = 0; bounce < MAX_BOUNCES; ++bounce)
+    {
+        vec3 outgoing = -ray.dir;
+
+        vec3 incoming = sample_matte(vec3(0.8f), world_normal, outgoing, random_vec2());
+        Ray ray = Ray(start_pos, incoming);
+        ray_scene_intersection(ray);
+
+        if(!hit_info.hit)
+        {
+            radiance += hit_info.color * weight;
+            break;
+        }
+
+        // TODO: Modify ray ori and dir according to hit
+    }
+
+    return radiance;
+*/
+}
+
 void main()
 {
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
@@ -138,53 +196,4 @@ void main()
     }
 
     imageStore(lightmap, pixel, vec4(color, 1.0f));
-}
-
-vec3 sample_matte(vec3 color, vec3 normal, vec3 outgoing, vec2 rn)
-{
-    vec3 up_normal = dot(normal, outgoing) > 0.0f ? normal : -normal;
-    return sample_hemisphere_cos(up_normal, rn);
-}
-
-// Stores result in payload.
-void ray_scene_intersection(Ray ray)
-{
-    uint ray_flags = gl_RayFlagsOpaqueEXT;
-    uint cull_mask = 0xFF;
-    uint sbt_record_offset = 0;
-    uint sbt_record_stride = 0;
-    uint miss_index = 0;
-    vec3 origin = ray.ori;
-    float t_min = T_MIN;
-    vec3 direction = ray.dir;
-    float t_max = T_MAX;
-    const int payload_loc = 0;
-    traceRayEXT(tlas, ray_flags, cull_mask, sbt_record_offset, sbt_record_stride, miss_index, origin, t_min, direction, t_max, payload_loc);
-}
-
-vec3 pathtrace(vec3 start_pos, vec3 world_normal)
-{
-    vec3 radiance = vec3(0.0f);
-    vec3 weight = vec3(1.0f);
-    Ray ray = Ray(start_pos, -world_normal);
-
-    const uint MAX_BOUNCES = 1;
-    for(uint bounce = 0; bounce < MAX_BOUNCES; ++bounce)
-    {
-        vec3 outgoing = -ray.dir;
-
-        vec3 incoming = sample_matte(vec3(0.8f), world_normal, outgoing, random_vec2());
-        Ray ray = Ray(start_pos, incoming);
-        ray_scene_intersection(ray);
-
-        if(!hit_info.hit)
-        {
-            radiance += hit_info.color * weight;
-            break;
-        }
-
-        // TODO: Modify ray ori and dir according to hit
-    }
-
-    return radiance;
 }
