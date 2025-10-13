@@ -33,6 +33,7 @@ import "base:runtime"
 import "core:math/linalg"
 import "core:math"
 import "core:mem"
+import "core:time"
 import "core:c"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -197,6 +198,8 @@ main :: proc()
     }
     bake := lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 200, 1)
 
+    //time.sleep(time.Second)
+
     // Create lightmap desc set
     desc_set_ai := vk.DescriptorSetAllocateInfo {
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -227,8 +230,12 @@ main :: proc()
     }
     vk.UpdateDescriptorSets(vk_ctx.device, 1, raw_data(writes), 0, nil)
 
+    //time.sleep(3 * time.Second)
+
     for
     {
+
+
         //fmt.println("frame", frame_idx)
 
         proceed := handle_window_events(window)
@@ -241,6 +248,8 @@ main :: proc()
         vk_frame := vk_frames[frame_idx]
         vk_check(vk.WaitForFences(vk_ctx.device, 1, &vk_frame.fence, true, max(u64)))
         vk_check(vk.ResetFences(vk_ctx.device, 1, &vk_frame.fence))
+
+        fmt.println("usage past fence")
 
         lm_info := lm.acquire_next_lightmap_view_vk(bake)
 
@@ -390,6 +399,14 @@ create_instance :: proc() -> (vk.Instance, vk.DebugUtilsMessengerEXT)
 
     next: rawptr
     next = &debug_messenger_ci
+
+    validation_feature := vk.ValidationFeatureEnableEXT.SYNCHRONIZATION_VALIDATION
+    next = &vk.ValidationFeaturesEXT {
+        sType = .VALIDATION_FEATURES_EXT,
+        pNext = next,
+        enabledValidationFeatureCount = 1,
+        pEnabledValidationFeatures = &validation_feature,
+    }
 
     instance: vk.Instance
     vk_check(vk.CreateInstance(&{

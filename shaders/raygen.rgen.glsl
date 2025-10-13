@@ -16,7 +16,10 @@ layout(push_constant) uniform Push
 struct HitInfo
 {
     bool hit;
-    vec3 color;
+    vec3 world_pos;
+    vec3 world_normal;
+    vec3 albedo;
+    vec3 emission;
 };
 
 layout(location = 0) rayPayloadEXT HitInfo hit_info;
@@ -104,6 +107,12 @@ vec3 sample_hemisphere_cos(vec3 normal, vec2 ruv)
     return normalize(basis_fromz(normal) * local_direction);
 }
 
+float sample_hemisphere_cos_pdf(vec3 normal, vec3 direction)
+{
+    float cosw = dot(normal, direction);
+    return cosw <= 0.0f ? 0.0f : cosw / PI;
+}
+
 vec3 pathtrace(vec3 world_pos, vec3 world_normal);
 
 
@@ -112,6 +121,19 @@ vec3 sample_matte(vec3 color, vec3 normal, vec3 outgoing, vec2 rn)
 {
     vec3 up_normal = dot(normal, outgoing) > 0.0f ? normal : -normal;
     return sample_hemisphere_cos(up_normal, rn);
+}
+
+vec3 eval_matte(vec3 color, vec3 normal, vec3 outgoing, vec3 incoming)
+{
+    if(dot(normal, incoming) * dot(normal, outgoing) <= 0) return vec3(0.0f);
+    return color / PI * abs(dot(normal, incoming));
+}
+
+float sample_matte_pdf(vec3 color, vec3 normal, vec3 outgoing, vec3 incoming)
+{
+    if(dot(normal, incoming) * dot(normal, outgoing) <= 0.0f) return 0.0f;
+    vec3 up_normal = dot(normal, outgoing) <= 0.0f ? -normal : normal;
+    return sample_hemisphere_cos_pdf(up_normal, incoming);
 }
 
 // Stores result in payload.
@@ -134,34 +156,49 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
 {
     vec3 radiance = vec3(0.0f);
     vec3 weight = vec3(1.0f);
-    // Ray ray = Ray(start_pos, -world_normal);
-    vec3 outgoing = -world_normal;
-    vec3 incoming = sample_matte(vec3(0.8f), world_normal, outgoing, random_vec2());
-    Ray ray = Ray(start_pos, incoming);
-    ray_scene_intersection(ray);
-    return hit_info.color;
+    Ray ray = Ray(start_pos, world_normal);
+    vec3 outgoing = world_normal;
 
+    // Initialize the first hit to be
+    hit_info.hit = true;
+    hit_info.albedo = vec3(1.0f);
+    hit_info.emission = vec3(0.0f);
+    hit_info.world_normal = world_normal;
+    hit_info.world_pos = start_pos;
 
-/*    const uint MAX_BOUNCES = 1;
-    for(uint bounce = 0; bounce < MAX_BOUNCES; ++bounce)
+    vec3 hit_pos = start_pos;
+
+    const uint MAX_BOUNCES = 1;
+    for(uint bounce = 0; bounce <= MAX_BOUNCES; ++bounce)
     {
-        vec3 outgoing = -ray.dir;
-
-        vec3 incoming = sample_matte(vec3(0.8f), world_normal, outgoing, random_vec2());
-        Ray ray = Ray(start_pos, incoming);
-        ray_scene_intersection(ray);
-
+        if(bounce != 0)
+            ray_scene_intersection(ray);
         if(!hit_info.hit)
         {
-            radiance += hit_info.color * weight;
+            radiance += hit_info.emission * weight;
             break;
         }
 
-        // TODO: Modify ray ori and dir according to hit
+        if(bounce != 0)
+        {
+            hit_pos = hit_info.world_pos;
+            outgoing = -ray.dir;
+        }
+
+        // Accumulate emission
+        radiance += weight * hit_info.emission;
+
+        vec3 incoming = sample_matte(hit_info.albedo, hit_info.world_normal, outgoing, random_vec2());
+        if(incoming == vec3(0.0f)) break;
+        weight *= eval_matte(hit_info.albedo, hit_info.world_normal, outgoing, incoming) /
+                  sample_matte_pdf(hit_info.albedo, hit_info.world_normal, outgoing, incoming);
+
+        // Update ray
+        ray.ori = hit_pos;
+        ray.dir = incoming;
     }
 
-    return radiance;
-*/
+    return radiance * 0.01f;
 }
 
 void main()

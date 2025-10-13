@@ -33,6 +33,7 @@ import intr "base:intrinsics"
 import "core:slice"
 import "core:mem"
 import "core:log"
+import "core:time"
 import "core:sync"
 import "base:runtime"
 import thr "core:thread"
@@ -414,6 +415,16 @@ bake_main :: proc(using bake: ^Bake)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
+    wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        pWaitDstStageMask = &wait_stage_flags,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
+
     vk_check(vk.WaitForFences(vk_ctx.device, 1, &fence, true, max(u64)))
     vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
     vk_check(vk.ResetCommandPool(vk_ctx.device, cmd_pool, {}))
@@ -421,6 +432,8 @@ bake_main :: proc(using bake: ^Bake)
     // Pathtrace loop
     for iter in 0..<num_accums
     {
+        //time.sleep(time.Second)
+
         vk_check(vk.BeginCommandBuffer(cmd_buf, &{
             sType = .COMMAND_BUFFER_BEGIN_INFO,
             flags = { .ONE_TIME_SUBMIT },
@@ -437,7 +450,7 @@ bake_main :: proc(using bake: ^Bake)
                         levelCount = 1,
                         layerCount = 1,
                     },
-                    oldLayout = .UNDEFINED,
+                    oldLayout = .GENERAL,
                     newLayout = .GENERAL,
                     srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
                     srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
@@ -452,7 +465,7 @@ bake_main :: proc(using bake: ^Bake)
                         levelCount = 1,
                         layerCount = 1,
                     },
-                    oldLayout = .UNDEFINED,
+                    oldLayout = .GENERAL,
                     newLayout = .GENERAL,
                     srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
                     srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
@@ -510,8 +523,8 @@ bake_main :: proc(using bake: ^Bake)
                     newLayout = .GENERAL,
                     srcStageMask = { .RAY_TRACING_SHADER_KHR },
                     srcAccessMask = { .SHADER_STORAGE_WRITE },
-                    dstStageMask = { .FRAGMENT_SHADER },
-                    dstAccessMask = { .SHADER_SAMPLED_READ },
+                    dstStageMask = { .FRAGMENT_SHADER, .COPY, },
+                    dstAccessMask = { .SHADER_SAMPLED_READ, .TRANSFER_READ },
                 },
             }
             vk.CmdPipelineBarrier2(cmd_buf, &{
@@ -573,6 +586,56 @@ bake_main :: proc(using bake: ^Bake)
                 },
             }
             vk.CmdCopyImage2(cmd_buf, &copy_info)
+
+            // Backbuffer barrier
+            {
+                barrier := vk.ImageMemoryBarrier2 {
+                    sType = .IMAGE_MEMORY_BARRIER_2,
+                    image = lightmap_backbuffer.img,
+                    subresourceRange = {
+                        aspectMask = { .COLOR },
+                        levelCount = 1,
+                        layerCount = 1,
+                    },
+                    oldLayout = .GENERAL,
+                    newLayout = .GENERAL,
+                    srcStageMask = { .ALL_COMMANDS },
+                    srcAccessMask = { .MEMORY_WRITE },
+                    dstStageMask = { .ALL_COMMANDS },
+                    dstAccessMask = { .MEMORY_WRITE },
+                }
+                vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
+                    sType = .DEPENDENCY_INFO,
+                    imageMemoryBarrierCount = 1,
+                    pImageMemoryBarriers = &barrier,
+                })
+            }
+
+            // Lightmap barrier
+            {
+                lightmap_barrier := []vk.ImageMemoryBarrier2 {
+                    {
+                        sType = .IMAGE_MEMORY_BARRIER_2,
+                        image = lightmap.img,
+                        subresourceRange = {
+                            aspectMask = { .COLOR },
+                            levelCount = 1,
+                            layerCount = 1,
+                        },
+                        oldLayout = .GENERAL,
+                        newLayout = .GENERAL,
+                        srcStageMask = { .ALL_COMMANDS },
+                        srcAccessMask = { .MEMORY_READ },
+                        dstStageMask = { .ALL_COMMANDS, },
+                        dstAccessMask = { .MEMORY_WRITE },
+                    },
+                }
+                vk.CmdPipelineBarrier2(cmd_buf, &{
+                    sType = .DEPENDENCY_INFO,
+                    imageMemoryBarrierCount = u32(len(lightmap_barrier)),
+                    pImageMemoryBarriers = raw_data(lightmap_barrier),
+                })
+            }
         }
 
         vk_check(vk.EndCommandBuffer(cmd_buf))
@@ -586,6 +649,7 @@ bake_main :: proc(using bake: ^Bake)
             submission_counter += 1
             wait_value = last_usage_value
             signal_value = submission_counter
+            last_pathtrace_value = signal_value
         }
 
         fmt.println("pathtrace waiting on", wait_value, "and signaling", signal_value)
@@ -608,6 +672,8 @@ bake_main :: proc(using bake: ^Bake)
             pCommandBuffers = &cmd_buf,
             waitSemaphoreCount = 1,
             pWaitSemaphores = &sem,
+            signalSemaphoreCount = 1,
+            pSignalSemaphores = &sem,
         }
         vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, fence))
 
@@ -615,12 +681,10 @@ bake_main :: proc(using bake: ^Bake)
         vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
         vk_check(vk.ResetCommandPool(vk_ctx.device, cmd_pool, {}))
 
-        {
-            sync.mutex_lock(mutex)
-            defer sync.mutex_unlock(mutex)
+        val: u64
+        vk.GetSemaphoreCounterValue(device, sem, &val);
 
-            last_pathtrace_value = signal_value
-        }
+        fmt.println("pathtrace iter done! sem:", val)
     }
 
     // Cleanup
@@ -631,6 +695,47 @@ bake_main :: proc(using bake: ^Bake)
 
 render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers)
 {
+    // GBuffers barriers
+    {
+        gbufs_barriers := []vk.ImageMemoryBarrier2 {
+            {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = gbuffers.world_pos.img,
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .UNDEFINED,
+                newLayout = .GENERAL,
+                srcStageMask = { .ALL_COMMANDS },
+                srcAccessMask = { .MEMORY_WRITE },
+                dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                dstAccessMask = { .COLOR_ATTACHMENT_WRITE },
+            },
+            {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = gbuffers.world_normals.img,
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .UNDEFINED,
+                newLayout = .GENERAL,
+                srcStageMask = { .ALL_COMMANDS },
+                srcAccessMask = { .MEMORY_WRITE },
+                dstStageMask = { .ALL_COMMANDS },
+                dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
+            },
+        }
+        vk.CmdPipelineBarrier2(cmd_buf, &{
+            sType = .DEPENDENCY_INFO,
+            imageMemoryBarrierCount = u32(len(gbufs_barriers)),
+            pImageMemoryBarriers = raw_data(gbufs_barriers),
+        })
+    }
+
     vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
         {  // Positions
             sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
@@ -747,6 +852,47 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
 
         draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
+    }
+
+    // GBuffers barriers
+    {
+        gbufs_barriers := []vk.ImageMemoryBarrier2 {
+            {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = gbuffers.world_pos.img,
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .GENERAL,
+                newLayout = .GENERAL,
+                srcStageMask = { .ALL_COMMANDS },
+                srcAccessMask = { .MEMORY_WRITE },
+                dstStageMask = { .ALL_COMMANDS },
+                dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
+            },
+            {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = gbuffers.world_normals.img,
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .GENERAL,
+                newLayout = .GENERAL,
+                srcStageMask = { .ALL_COMMANDS },
+                srcAccessMask = { .MEMORY_WRITE },
+                dstStageMask = { .ALL_COMMANDS },
+                dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
+            },
+        }
+        vk.CmdPipelineBarrier2(cmd_buf, &{
+            sType = .DEPENDENCY_INFO,
+            imageMemoryBarrierCount = u32(len(gbufs_barriers)),
+            pImageMemoryBarriers = raw_data(gbufs_barriers),
+        })
     }
 }
 

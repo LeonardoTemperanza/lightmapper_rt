@@ -5,7 +5,10 @@
 struct HitInfo
 {
     bool hit;
-    vec3 color;
+    vec3 world_pos;
+    vec3 world_normal;
+    vec3 albedo;
+    vec3 emission;
 };
 
 layout(location = 0) rayPayloadInEXT HitInfo hit_info;
@@ -16,6 +19,6 @@ void main()
 {
     //vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
     //hit_info.color = normalize(bary);
-    hit_info.hit = true;
-    hit_info.color = vec3(0.0f);
+
+    hit_info = HitInfo(true, vec3(0.0f), vec3(0.0f), vec3(1.0f), vec3(0.0f));
 }
