@@ -167,7 +167,7 @@ main :: proc()
     vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &desc_pool))
 
     // Create linear sampler
-    linear_sampler_ci := vk.SamplerCreateInfo {
+    lightmap_sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         magFilter = .LINEAR,
         minFilter = .LINEAR,
@@ -177,8 +177,8 @@ main :: proc()
         addressModeW = .REPEAT,
     }
 
-    linear_sampler: vk.Sampler
-    vk_check(vk.CreateSampler(vk_ctx.device, &linear_sampler_ci, nil, &linear_sampler))
+    lightmap_sampler: vk.Sampler
+    vk_check(vk.CreateSampler(vk_ctx.device, &lightmap_sampler_ci, nil, &lightmap_sampler))
 
     lm_vk_ctx := lm.Vulkan_Context {
         phys_device = vk_ctx.phys_device,
@@ -223,7 +223,7 @@ main :: proc()
                 {
                     imageView = bake.lightmap_backbuffer.view,
                     imageLayout = .GENERAL,
-                    sampler = linear_sampler,
+                    sampler = lightmap_sampler,
                 }
             })
         }
@@ -496,6 +496,7 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
         vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
         vk.EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,
+
     }
 
     next: rawptr

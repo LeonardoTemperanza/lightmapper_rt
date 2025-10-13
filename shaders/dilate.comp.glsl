@@ -1,0 +1,46 @@
+
+#version 450
+
+layout(set = 0, binding = 0) uniform sampler2D src_image;
+layout(set = 0, binding = 1) writeonly uniform image2D dst_image;
+
+layout(push_constant) uniform Push
+{
+    uvec2 tex_size;
+};
+
+void main(void)
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if(coord.x >= tex_size.x || coord.y >= tex_size.y)
+        return;
+
+    vec4 src_color = texelFetch(src_image, coord, 0);
+    if(src_color.a > 0.0f)
+    {
+        imageStore(dst_image, coord, src_color);
+        return;
+    }
+
+    // Search neighbors for a valid pixel.
+    vec3 color_sum = vec3(0.0f);
+    int count = 0;
+    for(int dy = -1; dy <= 1; ++dy)
+    {
+        for(int dx = -1; dx <= 1; ++dx)
+        {
+            ivec2 neighbor_coord = clamp(coord + ivec2(dx, dy), ivec2(0), ivec2(tex_size));
+            vec4 neighbor_color = texelFetch(src_image, neighbor_coord, 0);
+            if(neighbor_color.a > 0.0f)
+            {
+                color_sum += neighbor_color.rgb;
+                ++count;
+            }
+        }
+    }
+
+    if(count > 0)
+        imageStore(dst_image, coord, vec4(color_sum / float(count), 1.0f));
+    else
+        imageStore(dst_image, coord, vec4(0.0f));
+}

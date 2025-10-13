@@ -400,6 +400,18 @@ bake_main :: proc(using bake: ^Bake)
     desc_pool: vk.DescriptorPool
     vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &desc_pool))
 
+    // Create geometries buffer
+        geoms := make([]Geometry, len(scene.meshes))
+        defer delete(geoms)
+
+        for &geom, i in geoms
+        {
+            geom.normals = get_buffer_device_address(device, scene.meshes[i].normals)
+            geom.indices = get_buffer_device_address(device, scene.meshes[i].indices_gpu)
+        }
+
+        geoms_buf := create_geometries_buffer(&vk_ctx, geoms)
+
     desc_set_ai := vk.DescriptorSetAllocateInfo {
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
         descriptorPool = desc_pool,
@@ -409,20 +421,6 @@ bake_main :: proc(using bake: ^Bake)
 
     rt_desc_set: vk.DescriptorSet
     vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &rt_desc_set))
-
-    // Create geometries buffer
-
-    geoms := make([]Geometry, len(scene.meshes))
-    defer delete(geoms)
-
-    for &geom, i in geoms
-    {
-        geom.normals = get_buffer_device_address(device, scene.meshes[i].normals)
-        geom.indices = get_buffer_device_address(device, scene.meshes[i].indices_gpu)
-    }
-
-    geoms_buf := create_geometries_buffer(&vk_ctx, geoms)
-
     update_rt_desc_set(device, rt_desc_set, scene.tlas.as.handle, lightmap, gbufs, geoms_buf)
 
     vk_check(vk.BeginCommandBuffer(cmd_buf, &{
