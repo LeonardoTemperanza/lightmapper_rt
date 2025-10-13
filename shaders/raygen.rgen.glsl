@@ -168,7 +168,7 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
 
     vec3 hit_pos = start_pos;
 
-    const uint MAX_BOUNCES = 1;
+    const uint MAX_BOUNCES = 4;
     for(uint bounce = 0; bounce <= MAX_BOUNCES; ++bounce)
     {
         if(bounce != 0)
@@ -201,6 +201,20 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
     return radiance * 0.01f;
 }
 
+vec3 rayhit_test(vec3 start_pos, vec3 world_normal)
+{
+    Ray ray = Ray(start_pos + world_normal * 0.1f, -world_normal);
+    ray_scene_intersection(ray);
+    if(hit_info.hit)
+    {
+        return hit_info.albedo;
+    }
+    else
+    {
+        return vec3(0.0f);
+    }
+}
+
 void main()
 {
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
@@ -222,6 +236,7 @@ void main()
     init_rng(pixel.y * size.x + pixel.x);
 
     vec3 color = pathtrace(world_pos, world_normal);
+    //vec3 color = rayhit_test(world_pos, world_normal);
 
     // Progressive pathtracing.
     if(push.accum_counter != 0)

@@ -310,7 +310,14 @@ acquire_next_lightmap_view_vk :: proc(using bake: ^Bake) -> View_Info
     return res
 }
 
+///////////////////////////////////
 // Internals
+
+Geometry :: struct
+{
+    normals: vk.DeviceAddress,
+    indices: vk.DeviceAddress,
+}
 
 bake_thread :: proc(t: ^thr.Thread)
 {
@@ -403,7 +410,20 @@ bake_main :: proc(using bake: ^Bake)
     rt_desc_set: vk.DescriptorSet
     vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &rt_desc_set))
 
-    update_rt_desc_set(device, rt_desc_set, scene.tlas.as.handle, lightmap, gbufs)
+    // Create geometries buffer
+
+    geoms := make([]Geometry, len(scene.meshes))
+    defer delete(geoms)
+
+    for &geom, i in geoms
+    {
+        geom.normals = get_buffer_device_address(device, scene.meshes[i].normals)
+        geom.indices = get_buffer_device_address(device, scene.meshes[i].indices_gpu)
+    }
+
+    geoms_buf := create_geometries_buffer(&vk_ctx, geoms)
+
+    update_rt_desc_set(device, rt_desc_set, scene.tlas.as.handle, lightmap, gbufs, geoms_buf)
 
     vk_check(vk.BeginCommandBuffer(cmd_buf, &{
         sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -1035,6 +1055,7 @@ Buffer :: struct
 {
     handle: vk.Buffer,
     mem: vk.DeviceMemory,
+    size: vk.DeviceSize,
 }
 
 create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
@@ -1068,7 +1089,7 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         rt_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             flags = {},
-            bindingCount = 4,
+            bindingCount = 5,
             pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
                 {
                     binding = 0,
@@ -1093,6 +1114,12 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
                     descriptorType = .STORAGE_IMAGE,
                     descriptorCount = 1,
                     stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 4,
+                    descriptorType = .STORAGE_BUFFER,
+                    descriptorCount = 1,
+                    stageFlags = { .CLOSEST_HIT_KHR },
                 }
             })
         }
@@ -1475,6 +1502,7 @@ create_image :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo, name := "") ->
 create_buffer :: proc(using ctx: ^Vulkan_Context, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
 {
     res: Buffer
+    res.size = vk.DeviceSize(el_size * count)
 
     buf_ci := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
@@ -1854,7 +1882,7 @@ get_buffer_device_address :: proc(device: vk.Device, buffer: Buffer) -> vk.Devic
     return vk.GetBufferDeviceAddress(device, &info)
 }
 
-update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas: vk.AccelerationStructureKHR, lightmap: Image, gbuffers: GBuffers)
+update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas: vk.AccelerationStructureKHR, lightmap: Image, gbuffers: GBuffers, geometries: Buffer)
 {
     as_info := vk.WriteDescriptorSetAccelerationStructureKHR {
         sType = .WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
@@ -1909,9 +1937,90 @@ update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas:
                     imageLayout = .GENERAL,
                 }
             })
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 4,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_BUFFER,
+            pBufferInfo = raw_data([]vk.DescriptorBufferInfo {
+                {
+                    buffer = geometries.handle,
+                    offset = vk.DeviceSize(0),
+                    range = vk.DeviceSize(vk.WHOLE_SIZE),
+                }
+            })
         }
     }
     vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
+}
+
+create_geometries_buffer :: proc(using ctx: ^Vulkan_Context, geoms: []Geometry) -> Buffer
+{
+    size := cast(vk.DeviceSize) (len(geoms) * size_of(geoms[0]))
+
+    staging_buf := create_buffer(ctx, size_of(geoms[0]), len(geoms), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
+    defer destroy_buffer(ctx, &staging_buf)
+
+    data: rawptr
+    vk.MapMemory(device, staging_buf.mem, 0, size, {}, &data)
+    mem.copy(data, raw_data(geoms), cast(int) size)
+    vk.UnmapMemory(device, staging_buf.mem)
+
+    res := create_buffer(ctx, size_of(geoms[0]), len(geoms), { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    copy_buffer(ctx, staging_buf, res, size)
+
+    // TEMPORARY CMD_BUF!!!
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    cmd_buf_bi := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+    barrier := vk.MemoryBarrier2 {
+        sType = .MEMORY_BARRIER_2,
+        srcStageMask = { .TRANSFER },
+        srcAccessMask = { .TRANSFER_WRITE },
+        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR, .VERTEX_INPUT },
+        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR, .VERTEX_ATTRIBUTE_READ },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        memoryBarrierCount = 1,
+        pMemoryBarriers = &barrier,
+    })
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers = &cmd_buf,
+    }
+    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(queue))
+
+    return res
 }
 
 vk_check :: proc(result: vk.Result, location := #caller_location)
