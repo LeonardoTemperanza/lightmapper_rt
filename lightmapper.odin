@@ -304,8 +304,6 @@ acquire_next_lightmap_view_vk :: proc(using bake: ^Bake) -> View_Info
         last_usage_value = res.signal_value
     }
 
-    fmt.println("usage waiting on", res.wait_value, "and signaling", res.signal_value)
-
     res.sem = sem
     return res
 }
@@ -418,10 +416,35 @@ bake_main :: proc(using bake: ^Bake)
         descriptorSetCount = 1,
         pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.rt_desc_set_layout })
     }
-
     rt_desc_set: vk.DescriptorSet
     vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &rt_desc_set))
     update_rt_desc_set(device, rt_desc_set, scene.tlas.as.handle, lightmap, gbufs, geoms_buf)
+
+    // Dummy sampler
+    dummy_sampler_ci := vk.SamplerCreateInfo {
+        sType = .SAMPLER_CREATE_INFO,
+        magFilter = .LINEAR,
+        minFilter = .LINEAR,
+        mipmapMode = .LINEAR,
+        addressModeU = .REPEAT,
+        addressModeV = .REPEAT,
+        addressModeW = .REPEAT,
+    }
+    dummy_sampler: vk.Sampler
+    vk_check(vk.CreateSampler(vk_ctx.device, &dummy_sampler_ci, nil, &dummy_sampler))
+
+    // Dilate desc set
+    dilate_desc_set_ai := vk.DescriptorSetAllocateInfo {
+        sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+        descriptorPool = desc_pool,
+        descriptorSetCount = 1,
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.dilate_desc_set_layout })
+    }
+    dilate_desc_set: [2]vk.DescriptorSet  // Front to back, back to front.
+    vk_check(vk.AllocateDescriptorSets(device, &dilate_desc_set_ai, &dilate_desc_set[0]))
+    vk_check(vk.AllocateDescriptorSets(device, &dilate_desc_set_ai, &dilate_desc_set[1]))
+    update_dilate_desc_set(device, dilate_desc_set[0], dummy_sampler, lightmap, lightmap_backbuffer)
+    update_dilate_desc_set(device, dilate_desc_set[1], dummy_sampler, lightmap_backbuffer, lightmap)
 
     vk_check(vk.BeginCommandBuffer(cmd_buf, &{
         sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -552,17 +575,31 @@ bake_main :: proc(using bake: ^Bake)
             })
         }
 
-        // Blit to command buffer
+        // Blit to backbuffer, dilating the image in the process
+        images := [2]^Image { &lightmap, &lightmap_backbuffer }
+        src_idx := 0
+        dst_idx := 1
+        for dilate_iter in 0..<17
         {
+            src_image := images[src_idx]
+            dst_image := images[dst_idx]
+            desc_set  := dilate_desc_set[src_idx]  // front to back if 0, back to front if 1.
+            defer
+            {
+                tmp := src_idx
+                src_idx = dst_idx
+                dst_idx = tmp
+            }
+
             transition_to_general_barrier := vk.ImageMemoryBarrier2 {
                 sType = .IMAGE_MEMORY_BARRIER_2,
-                image = lightmap_backbuffer.img,
+                image = dst_image.img,
                 subresourceRange = {
                     aspectMask = { .COLOR },
                     levelCount = 1,
                     layerCount = 1,
                 },
-                oldLayout = .UNDEFINED,
+                oldLayout = .GENERAL,
                 newLayout = .GENERAL,
                 srcStageMask = { .ALL_COMMANDS },
                 srcAccessMask = { .MEMORY_READ },
@@ -575,41 +612,19 @@ bake_main :: proc(using bake: ^Bake)
                 pImageMemoryBarriers = &transition_to_general_barrier,
             })
 
-            copy_info := vk.CopyImageInfo2 {
-                sType = .COPY_IMAGE_INFO_2,
-                srcImage = lightmap.img,
-                srcImageLayout = .GENERAL,
-                dstImage = lightmap_backbuffer.img,
-                dstImageLayout = .GENERAL,
-                regionCount = 1,
-                pRegions = &vk.ImageCopy2 {
-                    sType = .IMAGE_COPY_2,
-                    srcSubresource = vk.ImageSubresourceLayers {
-                        aspectMask = { .COLOR },
-                        mipLevel = 0,
-                        baseArrayLayer = 0,
-                        layerCount = 1,
-                    },
-                    dstSubresource = vk.ImageSubresourceLayers {
-                        aspectMask = { .COLOR },
-                        mipLevel = 0,
-                        baseArrayLayer = 0,
-                        layerCount = 1,
-                    },
-                    extent = {
-                        width = lightmap_size,
-                        height = lightmap_size,
-                        depth = 1,
-                    }
-                },
-            }
-            vk.CmdCopyImage2(cmd_buf, &copy_info)
+            shader_stages := vk.ShaderStageFlags { .COMPUTE }
+            vk.CmdBindShadersEXT(cmd_buf, 1, &shader_stages, &shaders.dilate_shader)
+            vk.CmdBindDescriptorSets(cmd_buf, .COMPUTE, shaders.dilate_pipeline_layout, 0, 1, &desc_set, 0, nil)
 
-            // Backbuffer barrier
+            // NOTE: Coupled to shader code.
+            GROUP_SIZE :: u32(8)
+            vk.CmdDispatch(cmd_buf, lightmap_size / GROUP_SIZE, lightmap_size / GROUP_SIZE, 1)
+
+            // Destination barrier
             {
                 barrier := vk.ImageMemoryBarrier2 {
                     sType = .IMAGE_MEMORY_BARRIER_2,
-                    image = lightmap_backbuffer.img,
+                    image = dst_image.img,
                     subresourceRange = {
                         aspectMask = { .COLOR },
                         levelCount = 1,
@@ -620,7 +635,7 @@ bake_main :: proc(using bake: ^Bake)
                     srcStageMask = { .ALL_COMMANDS },
                     srcAccessMask = { .MEMORY_WRITE },
                     dstStageMask = { .ALL_COMMANDS },
-                    dstAccessMask = { .MEMORY_WRITE },
+                    dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
                 }
                 vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
                     sType = .DEPENDENCY_INFO,
@@ -629,12 +644,12 @@ bake_main :: proc(using bake: ^Bake)
                 })
             }
 
-            // Lightmap barrier
+            // Source barrier
             {
                 lightmap_barrier := []vk.ImageMemoryBarrier2 {
                     {
                         sType = .IMAGE_MEMORY_BARRIER_2,
-                        image = lightmap.img,
+                        image = src_image.img,
                         subresourceRange = {
                             aspectMask = { .COLOR },
                             levelCount = 1,
@@ -645,7 +660,7 @@ bake_main :: proc(using bake: ^Bake)
                         srcStageMask = { .ALL_COMMANDS },
                         srcAccessMask = { .MEMORY_READ },
                         dstStageMask = { .ALL_COMMANDS, },
-                        dstAccessMask = { .MEMORY_WRITE },
+                        dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
                     },
                 }
                 vk.CmdPipelineBarrier2(cmd_buf, &{
@@ -670,7 +685,7 @@ bake_main :: proc(using bake: ^Bake)
             last_pathtrace_value = signal_value
         }
 
-        fmt.println("pathtrace waiting on", wait_value, "and signaling", signal_value)
+        // fmt.println("pathtrace waiting on", wait_value, "and signaling", signal_value)
 
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
         next: rawptr
@@ -702,7 +717,7 @@ bake_main :: proc(using bake: ^Bake)
         val: u64
         vk.GetSemaphoreCounterValue(device, sem, &val);
 
-        fmt.println("pathtrace iter done! sem:", val)
+        // fmt.println("pathtrace iter done! sem:", val)
     }
 
     // Cleanup
@@ -1042,6 +1057,11 @@ Shaders :: struct
     gbuffer_world_pos: vk.ShaderEXT,
     gbuffer_world_normals: vk.ShaderEXT,
 
+    // Lightmap dilation
+    dilate_desc_set_layout: vk.DescriptorSetLayout,
+    dilate_shader: vk.ShaderEXT,
+    dilate_pipeline_layout: vk.PipelineLayout,
+
     // RT
     rt_desc_set_layout: vk.DescriptorSetLayout,
     rt_pipeline_layout: vk.PipelineLayout,
@@ -1083,6 +1103,27 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
             })
         }
         vk_check(vk.CreateDescriptorSetLayout(device, &lm_desc_set_layout_ci, nil, &res.lm_desc_set_layout))
+
+        dilate_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = {},
+            bindingCount = 2,
+            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .COMBINED_IMAGE_SAMPLER,
+                    descriptorCount = 1,
+                    stageFlags = { .COMPUTE },
+                },
+                {
+                    binding = 1,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .COMPUTE },
+                }
+            })
+        }
+        vk_check(vk.CreateDescriptorSetLayout(device, &dilate_desc_set_layout_ci, nil, &res.dilate_desc_set_layout))
 
         rt_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1135,6 +1176,15 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         }
         vk_check(vk.CreatePipelineLayout(device, &pipeline_layout_ci, nil, &res.pipeline_layout))
 
+        dilate_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            pushConstantRangeCount = u32(len(push_constant_ranges)),
+            pPushConstantRanges = raw_data(push_constant_ranges),
+            setLayoutCount = 1,
+            pSetLayouts = &res.dilate_desc_set_layout,
+        }
+        vk_check(vk.CreatePipelineLayout(device, &dilate_pipeline_layout_ci, nil, &res.dilate_pipeline_layout))
+
         rt_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
             sType = .PIPELINE_LAYOUT_CREATE_INFO,
             flags = {},
@@ -1157,6 +1207,7 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     raygen_code                     := #load("shaders/raygen.rgen.spv")
     raymiss_code                    := #load("shaders/raymiss.rmiss.spv")
     rayhit_code                     := #load("shaders/rayhit.rchit.spv")
+    dilate_code                     := #load("shaders/dilate.comp.spv")
 
     // NOTE: #load(<string-path>, <type>) produces unaligned reads and writes (https://github.com/odin-lang/Odin/issues/5771)
     uv_space_vert_code_aligned: []byte = mem.make_aligned([]byte, len(uv_space_vert_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
@@ -1171,6 +1222,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     mem.copy(raw_data(raymiss_code_aligned), raw_data(raymiss_code), len(raymiss_code))
     rayhit_code_aligned: []byte = mem.make_aligned([]byte, len(rayhit_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
     mem.copy(raw_data(rayhit_code_aligned), raw_data(rayhit_code), len(rayhit_code))
+    dilate_code_aligned: []byte = mem.make_aligned([]byte, len(dilate_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(dilate_code_aligned), raw_data(dilate_code), len(dilate_code))
 
     // Create shader objects.
     {
@@ -1209,12 +1262,26 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
             },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(dilate_code_aligned) * size_of(dilate_code_aligned[0]),
+                pCode = raw_data(dilate_code_aligned),
+                pName = "main",
+                stage = { .COMPUTE },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 1,
+                pSetLayouts = &res.dilate_desc_set_layout,
+            },
         }
         shaders: [len(shader_cis)]vk.ShaderEXT
         vk_check(vk.CreateShadersEXT(device, len(shaders), raw_data(&shader_cis), nil, raw_data(&shaders)))
         res.uv_space = shaders[0]
         res.gbuffer_world_pos = shaders[1]
         res.gbuffer_world_normals = shaders[2]
+        res.dilate_shader = shaders[3]
     }
 
     // RT
@@ -1950,6 +2017,40 @@ update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas:
                 }
             })
         }
+    }
+    vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
+}
+
+update_dilate_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, dummy_sampler: vk.Sampler, src_image: Image, dst_image: Image)
+{
+    writes := []vk.WriteDescriptorSet {
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = .COMBINED_IMAGE_SAMPLER,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = src_image.view,
+                    imageLayout = .GENERAL,
+                    sampler = dummy_sampler,
+                }
+            })
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 1,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_IMAGE,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = dst_image.view,
+                    imageLayout = .GENERAL,
+                }
+            })
+        },
     }
     vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
 }

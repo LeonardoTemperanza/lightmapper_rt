@@ -1,17 +1,17 @@
 
 #version 450
 
+layout(local_size_x = 8) in;
+layout(local_size_y = 8) in;
+layout(local_size_z = 1) in;
+
 layout(set = 0, binding = 0) uniform sampler2D src_image;
 layout(set = 0, binding = 1) writeonly uniform image2D dst_image;
-
-layout(push_constant) uniform Push
-{
-    uvec2 tex_size;
-};
 
 void main(void)
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 tex_size = min(textureSize(src_image, 0), imageSize(dst_image));
     if(coord.x >= tex_size.x || coord.y >= tex_size.y)
         return;
 

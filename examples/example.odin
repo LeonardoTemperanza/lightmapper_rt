@@ -243,7 +243,7 @@ main :: proc()
         vk_check(vk.WaitForFences(vk_ctx.device, 1, &vk_frame.fence, true, max(u64)))
         vk_check(vk.ResetFences(vk_ctx.device, 1, &vk_frame.fence))
 
-        fmt.println("usage past fence")
+        //fmt.println("usage past fence")
 
         lm_info := lm.acquire_next_lightmap_view_vk(bake)
 

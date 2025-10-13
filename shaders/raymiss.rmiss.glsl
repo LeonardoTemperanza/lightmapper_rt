@@ -15,5 +15,5 @@ layout(location = 0) rayPayloadInEXT HitInfo hit_info;
 
 void main()
 {
-    hit_info = HitInfo(false, vec3(0.0f), vec3(0.0f), vec3(0.0f), vec3(50.0f));
+    hit_info = HitInfo(false, vec3(0.0f), vec3(0.0f), vec3(0.0f), vec3(200.0f));
 }

@@ -20,6 +20,7 @@ vec4 cubic(float v)
     return vec4(x, y, z, w) * (1.0/6.0);
 }
 
+// From: https://stackoverflow.com/questions/13501081/efficient-bicubic-filtering-code-in-glsl
 vec4 sample_texture_bicubic(sampler2D image, vec2 texCoords)
 {
     vec2 texSize = textureSize(image, 0);

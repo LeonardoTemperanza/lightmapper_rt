@@ -161,7 +161,7 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
 
     // Initialize the first hit to be
     hit_info.hit = true;
-    hit_info.albedo = vec3(1.0f);
+    hit_info.albedo = vec3(0.7f);
     hit_info.emission = vec3(0.0f);
     hit_info.world_normal = world_normal;
     hit_info.world_pos = start_pos;

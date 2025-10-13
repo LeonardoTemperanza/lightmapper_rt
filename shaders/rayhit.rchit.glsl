@@ -55,6 +55,6 @@ void main()
 
     vec3 world_pos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
     //vec3 albedo = world_normal * 0.5f + 0.5f;
-    vec3 albedo = vec3(1.0f);
+    vec3 albedo = vec3(0.7f);
     hit_info = HitInfo(true, world_pos, world_normal, albedo, vec3(0.0f));
 }
