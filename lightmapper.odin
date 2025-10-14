@@ -927,6 +927,11 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
             pImageMemoryBarriers = raw_data(gbufs_barriers),
         })
     }
+
+    // Push the world-pos sample points outwards from inside geometry
+    {
+        
+    }
 }
 
 draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout)
