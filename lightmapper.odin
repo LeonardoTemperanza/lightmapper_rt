@@ -846,9 +846,10 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         vk.CmdBeginRendering(cmd_buf, &rendering_info)
         defer vk.CmdEndRendering(cmd_buf)
 
-        shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
-        to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_pos }
-        vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+        shader_stages := []vk.ShaderStageFlags { { .VERTEX }, { .GEOMETRY }, { .FRAGMENT } }
+        to_bind := []vk.ShaderEXT { shaders.uv_space, vk.ShaderEXT(0), shaders.gbuffer_world_pos }
+        assert(len(shader_stages) == len(to_bind))
+        vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
         draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
     }
@@ -880,9 +881,45 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         vk.CmdBeginRendering(cmd_buf, &rendering_info)
         defer vk.CmdEndRendering(cmd_buf)
 
-        shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
-        to_bind := [2]vk.ShaderEXT { shaders.uv_space, shaders.gbuffer_world_normals }
-        vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+        shader_stages := []vk.ShaderStageFlags { { .VERTEX }, { .GEOMETRY }, { .FRAGMENT } }
+        to_bind := []vk.ShaderEXT { shaders.uv_space, vk.ShaderEXT(0), shaders.gbuffer_world_normals }
+        assert(len(shader_stages) == len(to_bind))
+        vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
+
+        draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
+    }
+
+    // Tri idx
+    {
+        color_attachment := vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView = gbuffers.tri_idx.view,
+            imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+            loadOp = .CLEAR,
+            storeOp = .STORE,
+            clearValue = {
+                color = { uint32 = { max(u32), max(u32), max(u32), max(u32) } }
+            }
+        }
+        rendering_info := vk.RenderingInfo {
+            sType = .RENDERING_INFO,
+            renderArea = {
+                offset = { 0, 0 },
+                extent = { gbuffers.world_pos.width, gbuffers.world_pos.height }
+            },
+            layerCount = 1,
+            colorAttachmentCount = 1,
+            pColorAttachments = &color_attachment,
+            pDepthAttachment = nil,
+        }
+
+        vk.CmdBeginRendering(cmd_buf, &rendering_info)
+        defer vk.CmdEndRendering(cmd_buf)
+
+        shader_stages := []vk.ShaderStageFlags { { .VERTEX }, { .GEOMETRY }, { .FRAGMENT } }
+        to_bind := []vk.ShaderEXT { shaders.uv_space, vk.ShaderEXT(0), shaders.gbuffer_tri_idx }
+        assert(len(shader_stages) == len(to_bind))
+        vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
         draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
     }
@@ -930,7 +967,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
 
     // Push the world-pos sample points outwards from inside geometry
     {
-        
+
     }
 }
 
@@ -1061,6 +1098,7 @@ Shaders :: struct
     uv_space: vk.ShaderEXT,
     gbuffer_world_pos: vk.ShaderEXT,
     gbuffer_world_normals: vk.ShaderEXT,
+    gbuffer_tri_idx: vk.ShaderEXT,
 
     // Lightmap dilation
     dilate_desc_set_layout: vk.DescriptorSetLayout,
@@ -1209,6 +1247,7 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     uv_space_vert_code              := #load("shaders/uv_space.vert.spv")
     gbuffer_world_pos_frag_code     := #load("shaders/gbuffer_world_pos.frag.spv")
     gbuffer_world_normals_frag_code := #load("shaders/gbuffer_world_normals.frag.spv")
+    gbuffer_tri_idx_frag_code       := #load("shaders/gbuffer_tri_idx.frag.spv")
     raygen_code                     := #load("shaders/raygen.rgen.spv")
     raymiss_code                    := #load("shaders/raymiss.rmiss.spv")
     rayhit_code                     := #load("shaders/rayhit.rchit.spv")
@@ -1221,6 +1260,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     mem.copy(raw_data(gbuffer_world_pos_frag_code_aligned), raw_data(gbuffer_world_pos_frag_code), len(gbuffer_world_pos_frag_code))
     gbuffer_world_normals_frag_code_aligned: []byte = mem.make_aligned([]byte, len(gbuffer_world_normals_frag_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
     mem.copy(raw_data(gbuffer_world_normals_frag_code_aligned), raw_data(gbuffer_world_normals_frag_code), len(gbuffer_world_normals_frag_code))
+    gbuffer_tri_idx_frag_code_aligned: []byte = mem.make_aligned([]byte, len(gbuffer_tri_idx_frag_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(gbuffer_tri_idx_frag_code_aligned), raw_data(gbuffer_tri_idx_frag_code), len(gbuffer_world_normals_frag_code))
     raygen_code_aligned: []byte = mem.make_aligned([]byte, len(raygen_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
     mem.copy(raw_data(raygen_code_aligned), raw_data(raygen_code), len(raygen_code))
     raymiss_code_aligned: []byte = mem.make_aligned([]byte, len(raymiss_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
@@ -1270,6 +1311,17 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
+                codeSize = len(gbuffer_tri_idx_frag_code_aligned) * size_of(gbuffer_tri_idx_frag_code_aligned[0]),
+                pCode = raw_data(gbuffer_tri_idx_frag_code_aligned),
+                pName = "main",
+                stage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
                 codeSize = len(dilate_code_aligned) * size_of(dilate_code_aligned[0]),
                 pCode = raw_data(dilate_code_aligned),
                 pName = "main",
@@ -1286,7 +1338,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         res.uv_space = shaders[0]
         res.gbuffer_world_pos = shaders[1]
         res.gbuffer_world_normals = shaders[2]
-        res.dilate_shader = shaders[3]
+        res.gbuffer_tri_idx = shaders[3]
+        res.dilate_shader = shaders[4]
     }
 
     // RT
@@ -1419,6 +1472,7 @@ GBuffers :: struct
 {
     world_pos: Image,
     world_normals: Image,
+    tri_idx: Image,
 }
 
 create_gbuffers :: proc(using bake: ^Bake) -> GBuffers
@@ -1463,9 +1517,30 @@ create_gbuffers :: proc(using bake: ^Bake) -> GBuffers
         initialLayout = .UNDEFINED,
     }, "gbuf_worldnormals")
 
+    tri_idx := create_image(ctx, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R32_UINT,
+        extent = {
+            width = lightmap_size,
+            height = lightmap_size,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .COLOR_ATTACHMENT, .STORAGE },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &queue_family_idx,
+        initialLayout = .UNDEFINED,
+    }, "gbuf_worldnormals")
+
     return {
         world_pos,
-        world_normals
+        world_normals,
+        tri_idx,
     }
 }
 
@@ -1893,6 +1968,13 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vulkan_Cont
         sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
         pNext = next,
         bufferDeviceAddress = true,
+    }
+    next = &vk.PhysicalDeviceFeatures2 {
+        sType = .PHYSICAL_DEVICE_FEATURES_2,
+        pNext = next,
+        features = {
+            geometryShader = true,  // For the tri_idx gbuffer.
+        }
     }
 
     device_ci := vk.DeviceCreateInfo {

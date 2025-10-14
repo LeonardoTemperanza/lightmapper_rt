@@ -198,7 +198,7 @@ main :: proc()
     }
     bake := lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 1000, 1)
 
-    //time.sleep(time.Second)
+    time.sleep(3 * time.Second)
 
     // Create lightmap desc set
     desc_set_ai := vk.DescriptorSetAllocateInfo {
@@ -496,7 +496,6 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
         vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
         vk.EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,
-
     }
 
     next: rawptr
@@ -535,6 +534,13 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
         pNext = next,
         timelineSemaphore = true,
+    }
+    next = &vk.PhysicalDeviceFeatures2 {
+        sType = .PHYSICAL_DEVICE_FEATURES_2,
+        pNext = next,
+        features = {
+            geometryShader = true,  // For the tri_idx gbuffer.
+        }
     }
 
     device_ci := vk.DeviceCreateInfo {
@@ -916,9 +922,10 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
 
     vk.CmdBeginRendering(cmd_buf, &rendering_info)
 
-    shader_stages := [2]vk.ShaderStageFlags { { .VERTEX }, { .FRAGMENT } }
-    to_bind := [2]vk.ShaderEXT { shaders.model_to_proj, shaders.lit }
-    vk.CmdBindShadersEXT(cmd_buf, 2, &shader_stages[0], &to_bind[0] )
+    shader_stages := []vk.ShaderStageFlags { { .VERTEX }, { .GEOMETRY }, { .FRAGMENT } }
+    to_bind := []vk.ShaderEXT { shaders.model_to_proj, vk.ShaderEXT(0), shaders.lit }
+    assert(len(shader_stages) == len(to_bind))
+    vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
     viewport := vk.Viewport {
         width = f32(swapchain.width),
