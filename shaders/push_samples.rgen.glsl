@@ -88,6 +88,6 @@ void main()
     }
 
     if(payload.hit_backface) {
-        imageStore(gbuf_worldpos, pixel, vec4(payload.adjusted_pos, texel_size));
+        // imageStore(gbuf_worldpos, pixel, vec4(payload.adjusted_pos, texel_size));
     }
 }

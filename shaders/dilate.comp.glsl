@@ -25,7 +25,7 @@ void main(void)
     }
 
     // Search neighbors for a valid pixel.
-    vec3 color_sum = vec3(0.0f);
+    vec4 color_sum = vec4(0.0f);
     int count = 0;
     for(int dy = -1; dy <= 1; ++dy)
     {
@@ -33,16 +33,16 @@ void main(void)
         {
             ivec2 neighbor_coord = clamp(coord + ivec2(dx, dy), ivec2(0), ivec2(tex_size));
             vec4 neighbor_color = texelFetch(src_image, neighbor_coord, 0);
-            if(neighbor_color.a > 0.0f)
+            if(neighbor_color.a > VALIDITY_THRESHOLD)
             {
-                color_sum += neighbor_color.rgb;
+                color_sum += neighbor_color;
                 ++count;
             }
         }
     }
 
     if(count > 0)
-        imageStore(dst_image, coord, vec4(color_sum / float(count), 1.0f));
+        imageStore(dst_image, coord, vec4(color_sum / float(count)));
     else
-        imageStore(dst_image, coord, vec4(0.0f));
+        imageStore(dst_image, coord, src_color);
 }

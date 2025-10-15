@@ -180,13 +180,6 @@ vec4 pathtrace(vec3 start_pos, vec3 world_normal)
 
         if(bounce > 0 && hit_info.hit_backface) ++backface_hits_count;
 
-        /*
-        if(bounce == 3 && hit_info.hit_backface)
-        {
-            return vec3(1.0f, 1.0f, 0.0f);
-        }
-        */
-
         if(bounce != 0)
         {
             hit_pos = hit_info.world_pos;
@@ -206,7 +199,8 @@ vec4 pathtrace(vec3 start_pos, vec3 world_normal)
         ray.dir = incoming;
     }
 
-    float validity = float(backface_hits_count) / float(MAX_BOUNCES - 1);
+    float validity = 1.0f - (float(backface_hits_count) / float(MAX_BOUNCES - 1));
+    //float validity = backface_hits_count > 0 ? 0.0f : 1.0f;
     return vec4(radiance, validity);
 }
 
