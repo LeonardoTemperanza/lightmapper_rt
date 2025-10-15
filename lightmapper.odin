@@ -187,6 +187,10 @@ Bake :: struct
     num_accums: u32,
     lightmap_size: u32,
     scene: Scene,
+
+    // Debugging
+    debug_mutex0: ^sync.Mutex,
+    debug_mutex1: ^sync.Mutex,
 }
 
 // Starts a baking process in a separate thread.
@@ -212,6 +216,9 @@ start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_St
     bake.scene = scene
 
     bake.mutex = new(sync.Mutex)
+    bake.debug_mutex0 = new(sync.Mutex)
+    bake.debug_mutex1 = new(sync.Mutex)
+    sync.mutex_lock(bake.debug_mutex1)
 
     next: rawptr
     next = &vk.SemaphoreTypeCreateInfo {
@@ -294,10 +301,8 @@ acquire_next_lightmap_view_vk :: proc(using bake: ^Bake) -> View_Info
 {
     res: View_Info
 
+    if sync.mutex_guard(mutex)
     {
-        sync.mutex_lock(mutex)
-        defer sync.mutex_unlock(mutex)
-
         submission_counter += 1
         res.signal_value = submission_counter
         res.wait_value = last_pathtrace_value
@@ -446,13 +451,15 @@ bake_main :: proc(using bake: ^Bake)
     update_dilate_desc_set(device, dilate_desc_set[0], dummy_sampler, lightmap, lightmap_backbuffer)
     update_dilate_desc_set(device, dilate_desc_set[1], dummy_sampler, lightmap_backbuffer, lightmap)
 
+    sync.mutex_lock(debug_mutex0)
+
     vk_check(vk.BeginCommandBuffer(cmd_buf, &{
         sType = .COMMAND_BUFFER_BEGIN_INFO,
         flags = { .ONE_TIME_SUBMIT },
     }))
 
     // GBuffers
-    render_gbuffers(bake, cmd_buf, gbufs)
+    render_gbuffers(bake, cmd_buf, gbufs, rt_desc_set)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
@@ -473,7 +480,10 @@ bake_main :: proc(using bake: ^Bake)
     // Pathtrace loop
     for iter in 0..<num_accums
     {
-        //time.sleep(time.Second)
+        if iter > 0 do sync.mutex_lock(debug_mutex0)
+        defer { sync.mutex_unlock(debug_mutex1) }
+
+        fmt.println("pathtrace iter")
 
         vk_check(vk.BeginCommandBuffer(cmd_buf, &{
             sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -675,10 +685,8 @@ bake_main :: proc(using bake: ^Bake)
 
         wait_value: u64
         signal_value: u64
+        if sync.mutex_guard(mutex)
         {
-            sync.mutex_lock(mutex)
-            defer sync.mutex_unlock(mutex)
-
             submission_counter += 1
             wait_value = last_usage_value
             signal_value = submission_counter
@@ -713,11 +721,6 @@ bake_main :: proc(using bake: ^Bake)
         vk_check(vk.WaitForFences(vk_ctx.device, 1, &fence, true, max(u64)))
         vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
         vk_check(vk.ResetCommandPool(vk_ctx.device, cmd_pool, {}))
-
-        val: u64
-        vk.GetSemaphoreCounterValue(device, sem, &val);
-
-        // fmt.println("pathtrace iter done! sem:", val)
     }
 
     // Cleanup
@@ -726,7 +729,7 @@ bake_main :: proc(using bake: ^Bake)
     }
 }
 
-render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers)
+render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers, rt_desc_set: vk.DescriptorSet)
 {
     // GBuffers barriers
     {
@@ -965,10 +968,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         })
     }
 
-    // Push the world-pos sample points outwards from inside geometry
-    {
-
-    }
+    push_samples_outside_geometry(bake, cmd_buf, gbuffers, rt_desc_set)
 }
 
 draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout)
@@ -1051,6 +1051,61 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
     }
 }
 
+push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: GBuffers, rt_desc_set: vk.DescriptorSet)
+{
+    vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.push_samples_pipeline)
+
+    tmp := rt_desc_set
+    vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
+
+    sbt_addr := u64(get_buffer_device_address(device, shaders.push_samples_sbt_buf))
+
+    raygen_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_base_align)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    raymiss_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_base_align)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    rayhit_region := vk.StridedDeviceAddressRegionKHR {
+        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_base_align)),
+        stride = vk.DeviceSize(rt_handle_alignment),
+        size = vk.DeviceSize(rt_handle_alignment),
+    }
+    callable_region := vk.StridedDeviceAddressRegionKHR {}
+
+    vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
+
+    // world_pos gbuffer barrier
+    {
+        worldpos_barrier := []vk.ImageMemoryBarrier2 {
+            {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = gbuffers.world_pos.img,
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .GENERAL,
+                newLayout = .GENERAL,
+                srcStageMask = { .ALL_COMMANDS },
+                srcAccessMask = { .MEMORY_WRITE },
+                dstStageMask = { .ALL_COMMANDS },
+                dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
+            },
+        }
+        vk.CmdPipelineBarrier2(cmd_buf, &{
+            sType = .DEPENDENCY_INFO,
+            imageMemoryBarrierCount = u32(len(worldpos_barrier)),
+            pImageMemoryBarriers = raw_data(worldpos_barrier),
+        })
+    }
+}
+
 pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, rt_desc_set: vk.DescriptorSet, accum_counter: u32)
 {
     vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline)
@@ -1104,6 +1159,10 @@ Shaders :: struct
     dilate_desc_set_layout: vk.DescriptorSetLayout,
     dilate_shader: vk.ShaderEXT,
     dilate_pipeline_layout: vk.PipelineLayout,
+
+    // Sample pushing
+    push_samples_pipeline: vk.Pipeline,
+    push_samples_sbt_buf: Buffer,
 
     // RT
     rt_desc_set_layout: vk.DescriptorSetLayout,
@@ -1248,6 +1307,9 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     gbuffer_world_pos_frag_code     := #load("shaders/gbuffer_world_pos.frag.spv")
     gbuffer_world_normals_frag_code := #load("shaders/gbuffer_world_normals.frag.spv")
     gbuffer_tri_idx_frag_code       := #load("shaders/gbuffer_tri_idx.frag.spv")
+    push_samples_raygen_code        := #load("shaders/push_samples.rgen.spv")
+    push_samples_raymiss_code       := #load("shaders/push_samples.rmiss.spv")
+    push_samples_rayhit_code        := #load("shaders/push_samples.rchit.spv")
     raygen_code                     := #load("shaders/raygen.rgen.spv")
     raymiss_code                    := #load("shaders/raymiss.rmiss.spv")
     rayhit_code                     := #load("shaders/rayhit.rchit.spv")
@@ -1262,6 +1324,12 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     mem.copy(raw_data(gbuffer_world_normals_frag_code_aligned), raw_data(gbuffer_world_normals_frag_code), len(gbuffer_world_normals_frag_code))
     gbuffer_tri_idx_frag_code_aligned: []byte = mem.make_aligned([]byte, len(gbuffer_tri_idx_frag_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
     mem.copy(raw_data(gbuffer_tri_idx_frag_code_aligned), raw_data(gbuffer_tri_idx_frag_code), len(gbuffer_world_normals_frag_code))
+    push_samples_raygen_code_aligned: []byte = mem.make_aligned([]byte, len(push_samples_raygen_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(push_samples_raygen_code_aligned), raw_data(push_samples_raygen_code), len(push_samples_raygen_code))
+    push_samples_raymiss_code_aligned: []byte = mem.make_aligned([]byte, len(push_samples_raymiss_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(push_samples_raymiss_code_aligned), raw_data(push_samples_raymiss_code), len(push_samples_raymiss_code))
+    push_samples_rayhit_code_aligned: []byte = mem.make_aligned([]byte, len(push_samples_rayhit_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
+    mem.copy(raw_data(push_samples_rayhit_code_aligned), raw_data(push_samples_rayhit_code), len(push_samples_rayhit_code))
     raygen_code_aligned: []byte = mem.make_aligned([]byte, len(raygen_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
     mem.copy(raw_data(raygen_code_aligned), raw_data(raygen_code), len(raygen_code))
     raymiss_code_aligned: []byte = mem.make_aligned([]byte, len(raymiss_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
@@ -1346,9 +1414,41 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     // NOTE: The constant is wrong, this is now fixed but not in the latest release.
     SHADER_UNUSED :: ~u32(0)
 
+    push_samples_raygen_shader: vk.ShaderModule
+    push_samples_raymiss_shader: vk.ShaderModule
+    push_samples_rayhit_shader: vk.ShaderModule
+
     raygen_shader: vk.ShaderModule
     raymiss_shader: vk.ShaderModule
     rayhit_shader: vk.ShaderModule
+
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(push_samples_raygen_code_aligned) * size_of(push_samples_raygen_code_aligned[0]),
+            pCode = auto_cast raw_data(push_samples_raygen_code_aligned),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_raygen_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(push_samples_raymiss_code_aligned) * size_of(push_samples_raymiss_code_aligned[0]),
+            pCode = auto_cast raw_data(push_samples_raymiss_code_aligned),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_raymiss_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(push_samples_rayhit_code_aligned) * size_of(push_samples_rayhit_code_aligned[0]),
+            pCode = auto_cast raw_data(push_samples_rayhit_code_aligned),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_rayhit_shader))
+    }
 
     {
         shader_module_ci := vk.ShaderModuleCreateInfo {
@@ -1377,6 +1477,70 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &rayhit_shader))
     }
+
+    push_samples_pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
+        sType = .RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+        flags = {},
+        stageCount = 3,
+        pStages = raw_data([]vk.PipelineShaderStageCreateInfo {
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .RAYGEN_KHR },
+                module = push_samples_raygen_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .MISS_KHR },
+                module = push_samples_raymiss_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .CLOSEST_HIT_KHR },
+                module = push_samples_rayhit_shader,
+                pName = "main"
+            },
+        }),
+        groupCount = 3,
+        pGroups = raw_data([]vk.RayTracingShaderGroupCreateInfoKHR {
+            {  // Raygen group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 0,
+                closestHitShader = SHADER_UNUSED,
+                anyHitShader = SHADER_UNUSED,
+                intersectionShader = SHADER_UNUSED,
+            },
+            {  // Miss group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 1,
+                closestHitShader = SHADER_UNUSED,
+                anyHitShader = SHADER_UNUSED,
+                intersectionShader = SHADER_UNUSED,
+            },
+            {  // Triangles hit group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .TRIANGLES_HIT_GROUP,
+                generalShader = SHADER_UNUSED,
+                closestHitShader = 2,
+                anyHitShader = SHADER_UNUSED,
+                intersectionShader = SHADER_UNUSED,
+            }
+        }),
+        maxPipelineRayRecursionDepth = 1,
+        pLibraryInfo = nil,
+        pLibraryInterface = nil,
+        pDynamicState = nil,
+        layout = res.rt_pipeline_layout,
+        basePipelineHandle = cast(vk.Pipeline) 0,
+        basePipelineIndex = 0,
+    }
+    vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &push_samples_pipeline_ci, nil, &res.push_samples_pipeline))
 
     rt_pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
         sType = .RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
@@ -1441,6 +1605,16 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         basePipelineIndex = 0,
     }
     vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &rt_pipeline_ci, nil, &res.rt_pipeline))
+
+    // Push samples raytracing resources
+    {
+        // Shader Binding Table
+        group_count := u32(3)
+        size := group_count * rt_handle_size
+        shader_handle_storage := make([]byte, size, allocator = context.temp_allocator)
+        vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, res.push_samples_pipeline, 0, group_count, int(size), raw_data(shader_handle_storage)))
+        res.push_samples_sbt_buf = create_sbt_buffer(ctx, shader_handle_storage, group_count)
+    }
 
     // Raytracing resources
     {
@@ -1535,7 +1709,7 @@ create_gbuffers :: proc(using bake: ^Bake) -> GBuffers
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &queue_family_idx,
         initialLayout = .UNDEFINED,
-    }, "gbuf_worldnormals")
+    }, "gbuf_tri_idx")
 
     return {
         world_pos,
@@ -1623,6 +1797,14 @@ create_image :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo, name := "") ->
         })
 
         vk_check(vk.EndCommandBuffer(cmd_buf))
+
+        submit_info := vk.SubmitInfo {
+            sType = .SUBMIT_INFO,
+            commandBufferCount = 1,
+            pCommandBuffers = &cmd_buf,
+        }
+        vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+        vk_check(vk.QueueWaitIdle(queue))
     }
 
     // Create view

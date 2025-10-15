@@ -16,6 +16,7 @@ layout(push_constant) uniform Push
 struct HitInfo
 {
     bool hit;
+    bool hit_backface;
     vec3 world_pos;
     vec3 world_normal;
     vec3 albedo;
@@ -113,10 +114,6 @@ float sample_hemisphere_cos_pdf(vec3 normal, vec3 direction)
     return cosw <= 0.0f ? 0.0f : cosw / PI;
 }
 
-vec3 pathtrace(vec3 world_pos, vec3 world_normal);
-
-
-
 vec3 sample_matte(vec3 color, vec3 normal, vec3 outgoing, vec2 rn)
 {
     vec3 up_normal = dot(normal, outgoing) > 0.0f ? normal : -normal;
@@ -152,7 +149,8 @@ void ray_scene_intersection(Ray ray)
     traceRayEXT(tlas, ray_flags, cull_mask, sbt_record_offset, sbt_record_stride, miss_index, origin, t_min, direction, t_max, payload_loc);
 }
 
-vec3 pathtrace(vec3 start_pos, vec3 world_normal)
+// Alpha stores the validity of this sample, in [0, 1].
+vec4 pathtrace(vec3 start_pos, vec3 world_normal)
 {
     vec3 radiance = vec3(0.0f);
     vec3 weight = vec3(1.0f);
@@ -169,6 +167,7 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
     vec3 hit_pos = start_pos;
 
     const uint MAX_BOUNCES = 4;
+    uint backface_hits_count = 0;
     for(uint bounce = 0; bounce <= MAX_BOUNCES; ++bounce)
     {
         if(bounce != 0)
@@ -178,6 +177,15 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
             radiance += hit_info.emission * weight;
             break;
         }
+
+        if(bounce > 0 && hit_info.hit_backface) ++backface_hits_count;
+
+        /*
+        if(bounce == 3 && hit_info.hit_backface)
+        {
+            return vec3(1.0f, 1.0f, 0.0f);
+        }
+        */
 
         if(bounce != 0)
         {
@@ -198,7 +206,8 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
         ray.dir = incoming;
     }
 
-    return radiance * 0.01f;
+    float validity = float(backface_hits_count) / float(MAX_BOUNCES - 1);
+    return vec4(radiance, validity);
 }
 
 void main()
@@ -212,7 +221,7 @@ void main()
     float validity = gbuf_worldnormals_sample.a;
     if(validity == 0.0f)
     {
-        imageStore(lightmap, pixel, vec4(vec3(0.0f), 1.0f));
+        imageStore(lightmap, pixel, vec4(vec3(0.0f), 0.0f));
         return;
     }
 
@@ -221,16 +230,16 @@ void main()
 
     init_rng(pixel.y * size.x + pixel.x);
 
-    vec3 color = pathtrace(world_pos, world_normal);
+    vec4 color = pathtrace(world_pos, world_normal);
 
     // Progressive pathtracing.
     if(push.accum_counter != 0)
     {
         float weight = 1.0f / float(push.accum_counter);
-        vec3 prev_color = imageLoad(lightmap, pixel).rgb;
+        vec4 prev_color = imageLoad(lightmap, pixel);
         color = prev_color * (1.0f - weight) + color * weight;
-        color = max(color, vec3(0.0f));
+        color = max(color, vec4(0.0f));
     }
 
-    imageStore(lightmap, pixel, vec4(color, 1.0f));
+    imageStore(lightmap, pixel, color);
 }

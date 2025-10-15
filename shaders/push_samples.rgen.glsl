@@ -6,14 +6,19 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, rgba16f) uniform image2D lightmap;
 layout(set = 0, binding = 2, rgba32f) uniform image2D gbuf_worldpos;
 layout(set = 0, binding = 3, rgba8) uniform image2D gbuf_worldnormals;
+//layout(set = 0, binding = 4, r32ui) uniform uimage2D gbuf_tri_idx;
 
-struct HitInfo
+struct Payload
 {
+    // Input
+    vec3 geom_normal;
+
+    // Output
     bool hit_backface;
     vec3 adjusted_pos;
 };
 
-layout(location = 0) rayPayloadEXT HitInfo hit_info;
+layout(location = 0) rayPayloadEXT Payload payload;
 
 #define PI      3.1415926
 #define DEG2RAD PI / 180.0f;
@@ -57,9 +62,11 @@ void main()
     vec3 world_pos = gbuf_worldpos_sample.xyz;
     float texel_size = gbuf_worldpos_sample.w;
 
+    //uint tri_idx = imageLoad(gbuf_tri_idx, pixel).x;
+
     vec3 right = normalize(cross(world_normal, vec3(0.0f, 1.0f, 0.0f)));
     vec3 up = normalize(cross(right, world_normal));
-    float ray_length = texel_size * 1.25f;
+    float ray_length = texel_size * 0.5f * 1.25f;
 
     const uint NUM_RAYS = 8;
     vec3 dirs[NUM_RAYS] = {
@@ -73,14 +80,14 @@ void main()
         (-up + right),
     };
 
-    hit_info.hit_backface = false;
+    payload.hit_backface = false;
     for(int i = 0; i < NUM_RAYS; ++i)
     {
-        ray_scene_intersection(Ray(world_pos, dirs[i]), ray_length);
-        if(hit_info.hit_backface) break;
+        ray_scene_intersection(Ray(world_pos + world_normal * 0.001f, dirs[i]), ray_length);
+        if(payload.hit_backface) break;
     }
 
-    if(hit_info.hit_backface) {
-        imageStore(gbuf_worldpos, pixel, vec4(hit_info.adjusted_pos, texel_size));
+    if(payload.hit_backface) {
+        imageStore(gbuf_worldpos, pixel, vec4(payload.adjusted_pos, texel_size));
     }
 }

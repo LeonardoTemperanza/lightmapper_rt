@@ -5,6 +5,7 @@
 struct HitInfo
 {
     bool hit;
+    bool hit_backface;
     vec3 world_pos;
     vec3 world_normal;
     vec3 albedo;
@@ -15,5 +16,5 @@ layout(location = 0) rayPayloadInEXT HitInfo hit_info;
 
 void main()
 {
-    hit_info = HitInfo(false, vec3(0.0f), vec3(0.0f), vec3(0.0f), vec3(200.0f));
+    hit_info = HitInfo(false, false, vec3(0.0f), vec3(0.0f), vec3(0.0f), vec3(10.0f));
 }

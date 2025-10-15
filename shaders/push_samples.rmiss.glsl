@@ -2,15 +2,19 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
 
-struct HitInfo
+struct Payload
 {
+    // Input
+    vec3 geom_normal;
+
+    // Output
     bool hit_backface;
     vec3 adjusted_pos;
 };
 
-layout(location = 0) rayPayloadInEXT HitInfo hit_info;
+layout(location = 0) rayPayloadInEXT Payload payload;
 
 void main()
 {
-    hit_info.hit_backface = false;
+    payload.hit_backface = false;
 }

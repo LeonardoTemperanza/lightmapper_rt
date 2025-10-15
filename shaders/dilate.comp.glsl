@@ -8,6 +8,8 @@ layout(local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform sampler2D src_image;
 layout(set = 0, binding = 1) writeonly uniform image2D dst_image;
 
+const float VALIDITY_THRESHOLD = 0.8f;
+
 void main(void)
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -16,7 +18,7 @@ void main(void)
         return;
 
     vec4 src_color = texelFetch(src_image, coord, 0);
-    if(src_color.a > 0.0f)
+    if(src_color.a > VALIDITY_THRESHOLD)
     {
         imageStore(dst_image, coord, src_color);
         return;

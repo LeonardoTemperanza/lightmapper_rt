@@ -34,6 +34,7 @@ import "core:math/linalg"
 import "core:math"
 import "core:mem"
 import "core:time"
+import "core:sync"
 import "core:c"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -169,7 +170,8 @@ main :: proc()
     // Create linear sampler
     lightmap_sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
-        magFilter = .LINEAR,
+        //magFilter = .LINEAR,
+        magFilter = .NEAREST,
         minFilter = .LINEAR,
         mipmapMode = .LINEAR,
         addressModeU = .REPEAT,
@@ -183,7 +185,8 @@ main :: proc()
     lm_vk_ctx := lm.Vulkan_Context {
         phys_device = vk_ctx.phys_device,
         device = vk_ctx.device,
-        queue = vk_ctx.lm_queue,
+        //queue = vk_ctx.lm_queue,
+        queue = vk_ctx.queue,
         queue_family_idx = vk_ctx.queue_family_idx,
         rt_handle_alignment = vk_ctx.rt_handle_alignment,
         rt_handle_size = vk_ctx.rt_handle_size,
@@ -198,7 +201,7 @@ main :: proc()
     }
     bake := lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 1000, 1)
 
-    time.sleep(3 * time.Second)
+    // time.sleep(30 * time.Second)
 
     // Create lightmap desc set
     desc_set_ai := vk.DescriptorSetAllocateInfo {
@@ -232,6 +235,11 @@ main :: proc()
 
     for
     {
+        sync.mutex_lock(bake.debug_mutex1)
+        defer { sync.mutex_unlock(bake.debug_mutex0) }
+
+        fmt.println("frame")
+
         proceed := handle_window_events(window)
         if !proceed do break
 
@@ -496,6 +504,7 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
         vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
         vk.EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,
+        vk.KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME
     }
 
     next: rawptr
@@ -541,6 +550,11 @@ create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
         features = {
             geometryShader = true,  // For the tri_idx gbuffer.
         }
+    }
+    next = &vk.PhysicalDeviceRayTracingPositionFetchFeaturesKHR {
+        sType = .PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR,
+        pNext = next,
+        rayTracingPositionFetch = true,
     }
 
     device_ci := vk.DeviceCreateInfo {
@@ -2056,7 +2070,7 @@ create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []lm.Instance, meshes: []lm.M
             instanceCustomIndex = u32(instance.mesh_idx),
             mask = 0xFF,
             instanceShaderBindingTableRecordOffset = 0,
-            flags = .TRIANGLE_FACING_CULL_DISABLE,
+            flags = .TRIANGLE_FACING_CULL_DISABLE | .TRIANGLE_FLIP_FACING,
             accelerationStructureReference = u64(meshes[instance.mesh_idx].blas.addr)
         }
     }
@@ -2203,54 +2217,6 @@ get_buffer_device_address :: proc(using ctx: ^Vk_Ctx, buffer: Buffer) -> vk.Devi
         buffer = buffer.buf
     }
     return vk.GetBufferDeviceAddress(device, &info)
-}
-
-create_gbuffers :: proc(using ctx: ^Vk_Ctx) -> GBuffers
-{
-    world_pos := create_image(ctx, {
-        sType = .IMAGE_CREATE_INFO,
-        flags = {},
-        imageType = .D2,
-        format = .R32G32B32A32_SFLOAT,
-        extent = {
-            width = LIGHTMAP_SIZE,
-            height = LIGHTMAP_SIZE,
-            depth = 1,
-        },
-        mipLevels = 1,
-        arrayLayers = 1,
-        samples = { ._1 },
-        usage = { .COLOR_ATTACHMENT, .STORAGE },
-        sharingMode = .EXCLUSIVE,
-        queueFamilyIndexCount = 1,
-        pQueueFamilyIndices = &queue_family_idx,
-        initialLayout = .UNDEFINED,
-    }, "gbuf_worldpos")
-
-    world_normals := create_image(ctx, {
-        sType = .IMAGE_CREATE_INFO,
-        flags = {},
-        imageType = .D2,
-        format = .R8G8B8A8_UNORM,
-        extent = {
-            width = LIGHTMAP_SIZE,
-            height = LIGHTMAP_SIZE,
-            depth = 1,
-        },
-        mipLevels = 1,
-        arrayLayers = 1,
-        samples = { ._1 },
-        usage = { .COLOR_ATTACHMENT, .STORAGE },
-        sharingMode = .EXCLUSIVE,
-        queueFamilyIndexCount = 1,
-        pQueueFamilyIndices = &queue_family_idx,
-        initialLayout = .UNDEFINED,
-    }, "gbuf_worldnormals")
-
-    return {
-        world_pos,
-        world_normals
-    }
 }
 
 v3_to_v4 :: proc(v: [3]f32, w: Maybe(f32) = nil) -> (res: [4]f32)

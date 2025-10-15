@@ -27,6 +27,7 @@ layout(set = 0, binding = 4) readonly buffer Geometries
 struct HitInfo
 {
     bool hit;
+    bool hit_backface;
     vec3 world_pos;
     vec3 world_normal;
     vec3 albedo;
@@ -54,5 +55,6 @@ void main()
     vec3 world_pos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
     //vec3 albedo = world_normal * 0.5f + 0.5f;
     vec3 albedo = vec3(0.7f);
-    hit_info = HitInfo(true, world_pos, world_normal, albedo, vec3(0.0f));
+    bool hit_backface = gl_HitKindEXT == gl_HitKindBackFacingTriangleEXT;
+    hit_info = HitInfo(true, hit_backface, world_pos, world_normal, albedo, vec3(0.0f));
 }
