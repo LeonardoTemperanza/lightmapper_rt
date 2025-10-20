@@ -1,0 +1,3 @@
+[submodule "oidn_odin_bindings"]
+	path = oidn_odin_bindings
+	url = https://github.com/LeonardoTemperanza/oidn_odin_bindings.git
