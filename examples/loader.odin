@@ -99,6 +99,7 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> lm.Scene
 
         if lightmap_uv_idx == -1 {
             mesh.lm_uvs_present = false
+            fmt.println("no lm uvs")
         } else {
             mesh.lm_uvs_present = true
             mesh.lm_uvs = transmute(lm.Buffer) create_vertex_buffer(ctx, lm_uvs_buf)

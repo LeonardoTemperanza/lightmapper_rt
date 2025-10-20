@@ -92,7 +92,7 @@ init_test :: proc(vk_ctx: Vulkan_Context) -> Context
     res.vk_ctx = vk_ctx
 
     res.shaders = create_shaders(&res.vk_ctx)
-    create_oidn_context(vk_ctx.phys_device)
+    res.oidn_device = create_oidn_context(vk_ctx.phys_device)
 
     return res
 }
@@ -182,7 +182,10 @@ Bake :: struct
     mutex: ^sync.Mutex,
     sem: vk.Semaphore,
     lightmap_backbuffer: Image,
+
+    // OIDN Resources
     oidn_buf: oidn.Buffer,
+    vk_external_buf: External_Buf,
 
     // Synchronization counters
     submission_counter: u64,
@@ -253,7 +256,7 @@ start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_St
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
-        usage = { .STORAGE, .SAMPLED, .TRANSFER_DST },
+        usage = { .STORAGE, .SAMPLED, .TRANSFER_DST, .TRANSFER_SRC },
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &vk_ctx.queue_family_idx,
@@ -479,6 +482,9 @@ bake_main :: proc(using bake: ^Bake)
     vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
     vk_check(vk.QueueWaitIdle(vk_ctx.queue))
 
+    vk_external_buf = create_vk_external_buffer_for_oidn(&vk_ctx, lightmap_size * lightmap_size * 2 * 4)  // TODO: Replace 4 with channels size?
+    oidn_buf = oidn_shared_buffer_from_vk_buffer(oidn_device, vk_external_buf)
+
     vk_check(vk.WaitForFences(vk_ctx.device, 1, &fence, true, max(u64)))
     vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
     vk_check(vk.ResetCommandPool(vk_ctx.device, cmd_pool, {}))
@@ -489,7 +495,7 @@ bake_main :: proc(using bake: ^Bake)
         if iter > 0 do sync.mutex_lock(debug_mutex0)
         defer { sync.mutex_unlock(debug_mutex1) }
 
-        fmt.println("pathtrace iter")
+        // fmt.println("pathtrace iter")
 
         vk_check(vk.BeginCommandBuffer(cmd_buf, &{
             sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -595,7 +601,7 @@ bake_main :: proc(using bake: ^Bake)
         images := [2]^Image { &lightmap, &lightmap_backbuffer }
         src_idx := 0
         dst_idx := 1
-        for dilate_iter in 0..<17
+        for dilate_iter in 0..<1
         {
             src_image := images[src_idx]
             dst_image := images[dst_idx]
@@ -731,7 +737,102 @@ bake_main :: proc(using bake: ^Bake)
 
     // Denoise
     {
+        sync.mutex_lock(debug_mutex0)
+        defer sync.mutex_unlock(debug_mutex1)
 
+/*
+        mapped := test_copy_image_to_cpu(&vk_ctx, cmd_buf, lightmap_backbuffer, lightmap_size)
+        oidn.WriteBuffer(oidn_buf, 0, auto_cast (lightmap_size * lightmap_size * 4 * 2), mapped)
+
+        oidn_run_lightmap_filter(oidn_device, oidn_buf, lightmap_size, lightmap_size)
+
+        result_data := oidn.GetBufferData(oidn_buf)
+*/
+
+        vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            flags = { .ONE_TIME_SUBMIT },
+        }))
+
+        vk.CmdCopyImageToBuffer2(cmd_buf, &vk.CopyImageToBufferInfo2 {
+            sType = .COPY_IMAGE_TO_BUFFER_INFO_2,
+            pNext = nil,
+            srcImage = lightmap_backbuffer.img,
+            srcImageLayout = .GENERAL,
+            dstBuffer = vk_external_buf.buf.handle,
+            regionCount = 1,
+            pRegions = &vk.BufferImageCopy2 {
+                sType = .BUFFER_IMAGE_COPY_2,
+                bufferRowLength = 0,
+                bufferImageHeight = 0,
+                imageSubresource = vk.ImageSubresourceLayers {
+                    aspectMask = { .COLOR },
+                    layerCount = 1,
+                },
+                imageExtent = vk.Extent3D {
+                    width = lightmap_size,
+                    height = lightmap_size,
+                    depth = 1,
+                },
+            },
+        })
+
+        vk_check(vk.EndCommandBuffer(cmd_buf))
+
+        wait_stage_flags := vk.PipelineStageFlags { .ALL_COMMANDS }
+        submit_info := vk.SubmitInfo {
+            sType = .SUBMIT_INFO,
+            pWaitDstStageMask = &wait_stage_flags,
+            commandBufferCount = 1,
+            pCommandBuffers = &cmd_buf,
+        }
+        vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
+        vk_check(vk.QueueWaitIdle(vk_ctx.queue))
+
+        oidn_run_lightmap_filter(oidn_device, oidn_buf, lightmap_size, lightmap_size)
+        oidn.SyncDevice(oidn_device)
+
+        vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            flags = { .ONE_TIME_SUBMIT },
+        }))
+
+        vk.CmdCopyBufferToImage2(cmd_buf, &vk.CopyBufferToImageInfo2 {
+            sType = .COPY_BUFFER_TO_IMAGE_INFO_2,
+            pNext = nil,
+            srcBuffer = vk_external_buf.buf.handle,
+            dstImage = lightmap_backbuffer.img,
+            dstImageLayout = .GENERAL,
+            regionCount = 1,
+            pRegions = &vk.BufferImageCopy2 {
+                sType = .BUFFER_IMAGE_COPY_2,
+                bufferRowLength = 0,
+                bufferImageHeight = 0,
+                imageSubresource = vk.ImageSubresourceLayers {
+                    aspectMask = { .COLOR },
+                    layerCount = 1,
+                },
+                imageExtent = vk.Extent3D {
+                    width = lightmap_size,
+                    height = lightmap_size,
+                    depth = 1,
+                },
+            },
+        })
+
+        vk_check(vk.EndCommandBuffer(cmd_buf))
+
+        wait_stage_flags = vk.PipelineStageFlags { .ALL_COMMANDS }
+        submit_info = vk.SubmitInfo {
+            sType = .SUBMIT_INFO,
+            pWaitDstStageMask = &wait_stage_flags,
+            commandBufferCount = 1,
+            pCommandBuffers = &cmd_buf,
+        }
+        vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
+        vk_check(vk.QueueWaitIdle(vk_ctx.queue))
+
+        //mapped := test_copy_image_to_cpu(&vk_ctx, cmd_buf, lightmap_backbuffer, lightmap_size)
     }
 
     // Cleanup
@@ -990,9 +1091,6 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
 
 draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout)
 {
-    vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
-    vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
-    vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
     sample_mask := vk.SampleMask(1)
     vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
     vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
@@ -1014,57 +1112,68 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
     color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
     vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
 
-    for instance, i in scene.instances
+    // Perform 2 passes, the first with conservative rasterization and
+    // the second one without, which cleans up edges on contiguous triangles.
+    for i in 0..<2
     {
-        mesh := scene.meshes[instance.mesh_idx]
+        use_conservative_rasterization := i == 0
 
-        if !mesh.lm_uvs_present { continue }
+        vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
+        vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE if use_conservative_rasterization else nil)
+        vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
 
-        viewport := vk.Viewport {
-            x = f32(lightmap_size) * instance.lm_offset.x,
-            y = f32(lightmap_size) * instance.lm_offset.y,
-            width = f32(lightmap_size) * instance.lm_scale,
-            height = f32(lightmap_size) * instance.lm_scale,
-            minDepth = 0.0,
-            maxDepth = 1.0,
-        }
-        vk.CmdSetViewportWithCount(cmd_buf, 1, &viewport)
-        scissor := vk.Rect2D {
-            offset = {
-                x = i32(f32(lightmap_size) * instance.lm_offset.x),
-                y = i32(f32(lightmap_size) * instance.lm_offset.y),
-            },
-            extent = {
-                width = u32(f32(lightmap_size) * instance.lm_scale),
-                height = u32(f32(lightmap_size) * instance.lm_scale),
+        for instance, i in scene.instances
+        {
+            mesh := scene.meshes[instance.mesh_idx]
+
+            if !mesh.lm_uvs_present { continue }
+
+            viewport := vk.Viewport {
+                x = f32(lightmap_size) * instance.lm_offset.x,
+                y = f32(lightmap_size) * instance.lm_offset.y,
+                width = f32(lightmap_size) * instance.lm_scale,
+                height = f32(lightmap_size) * instance.lm_scale,
+                minDepth = 0.0,
+                maxDepth = 1.0,
             }
-        }
-        vk.CmdSetScissorWithCount(cmd_buf, 1, &scissor)
-        vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
+            vk.CmdSetViewportWithCount(cmd_buf, 1, &viewport)
+            scissor := vk.Rect2D {
+                offset = {
+                    x = i32(f32(lightmap_size) * instance.lm_offset.x),
+                    y = i32(f32(lightmap_size) * instance.lm_offset.y),
+                },
+                extent = {
+                    width = u32(f32(lightmap_size) * instance.lm_scale),
+                    height = u32(f32(lightmap_size) * instance.lm_scale),
+                }
+            }
+            vk.CmdSetScissorWithCount(cmd_buf, 1, &scissor)
+            vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
 
-        offset := vk.DeviceSize(0)
-        vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
-        vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
-        if mesh.lm_uvs_present {
-            vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
-        }
-        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.handle, 0, .UINT32)
+            offset := vk.DeviceSize(0)
+            vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
+            vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
+            if mesh.lm_uvs_present {
+                vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
+            }
+            vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.handle, 0, .UINT32)
 
-        Push :: struct {
-            model_to_world: matrix[4, 4]f32,
-            normal_mat: matrix[4, 4]f32,
-            lm_uv_offset: [2]f32,
-            lm_uv_scale: f32
-        }
-        push := Push {
-            model_to_world = instance.transform,
-            normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
-            lm_uv_offset = instance.lm_offset,
-            lm_uv_scale = instance.lm_scale,
-        }
-        vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
+            Push :: struct {
+                model_to_world: matrix[4, 4]f32,
+                normal_mat: matrix[4, 4]f32,
+                lm_uv_offset: [2]f32,
+                lm_uv_scale: f32
+            }
+            push := Push {
+                model_to_world = instance.transform,
+                normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
+                lm_uv_offset = instance.lm_offset,
+                lm_uv_scale = instance.lm_scale,
+            }
+            vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
 
-        vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
+            vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
+        }
     }
 }
 
@@ -1843,14 +1952,14 @@ create_image :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo, name := "") ->
     return res
 }
 
-create_buffer :: proc(using ctx: ^Vulkan_Context, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
+create_buffer :: proc(using ctx: ^Vulkan_Context, byte_size: u32, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
 {
     res: Buffer
-    res.size = vk.DeviceSize(el_size * count)
+    res.size = vk.DeviceSize(byte_size)
 
     buf_ci := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
-        size = cast(vk.DeviceSize) (el_size * count),
+        size = cast(vk.DeviceSize) (byte_size),
         usage = usage,
         sharingMode = .EXCLUSIVE,
     }
@@ -1941,7 +2050,7 @@ create_sbt_buffer :: proc(using ctx: ^Vulkan_Context, shader_handle_storage: []b
     assert(auto_cast len(shader_handle_storage) == rt_handle_size * num_groups)
 
     size := num_groups * rt_base_align
-    staging_buf := create_buffer(ctx, 1, int(size), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
+    staging_buf := create_buffer(ctx, size, { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
     defer destroy_buffer(ctx, &staging_buf)
 
     data: rawptr
@@ -1954,7 +2063,7 @@ create_sbt_buffer :: proc(using ctx: ^Vulkan_Context, shader_handle_storage: []b
     }
     vk.UnmapMemory(device, staging_buf.mem)
 
-    res := create_buffer(ctx, 1, int(size), { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    res := create_buffer(ctx, size, { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     copy_buffer(ctx, staging_buf, res, vk.DeviceSize(size))
 
     // TEMPORARY CMD_BUF!!!
@@ -2346,7 +2455,7 @@ create_geometries_buffer :: proc(using ctx: ^Vulkan_Context, geoms: []Geometry) 
 {
     size := cast(vk.DeviceSize) (len(geoms) * size_of(geoms[0]))
 
-    staging_buf := create_buffer(ctx, size_of(geoms[0]), len(geoms), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
+    staging_buf := create_buffer(ctx, auto_cast (size_of(geoms[0]) * len(geoms)), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
     defer destroy_buffer(ctx, &staging_buf)
 
     data: rawptr
@@ -2354,7 +2463,7 @@ create_geometries_buffer :: proc(using ctx: ^Vulkan_Context, geoms: []Geometry) 
     mem.copy(data, raw_data(geoms), cast(int) size)
     vk.UnmapMemory(device, staging_buf.mem)
 
-    res := create_buffer(ctx, size_of(geoms[0]), len(geoms), { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    res := create_buffer(ctx, auto_cast (size_of(geoms[0]) * len(geoms)), { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     copy_buffer(ctx, staging_buf, res, size)
 
     // TEMPORARY CMD_BUF!!!
@@ -2448,7 +2557,7 @@ vk_debug_callback :: proc "system" (severity: vk.DebugUtilsMessageSeverityFlagsE
 
 // OIDN
 
-create_oidn_context :: proc(phys_device: vk.PhysicalDevice)
+create_oidn_context :: proc(phys_device: vk.PhysicalDevice) -> oidn.Device
 {
     id_props := vk.PhysicalDeviceIDProperties {
         sType = .PHYSICAL_DEVICE_ID_PROPERTIES
@@ -2461,7 +2570,23 @@ create_oidn_context :: proc(phys_device: vk.PhysicalDevice)
 
     vk.GetPhysicalDeviceProperties2(phys_device, &props)
 
-    device := oidn.NewDeviceByUUID(&id_props.deviceUUID)
+    fmt.println(id_props)
+
+    /*
+    device: oidn.Device
+    if id_props.deviceLUIDValid
+    {
+        device = oidn.NewDeviceByLUID(&id_props.deviceLUID[0])
+    }
+    else
+    {
+        device = oidn.NewDeviceByUUID(&id_props.deviceUUID[0])
+    }
+    */
+
+    device := oidn.NewDevice(.HIP)
+
+    oidn.SetDeviceErrorFunction(device, oidn_error_callback, nil)
     oidn.CommitDevice(device)
 
     msg: cstring
@@ -2470,34 +2595,49 @@ create_oidn_context :: proc(phys_device: vk.PhysicalDevice)
         log.error(msg)
         panic("")
     }
+
+    return device
 }
 
-oidn_shared_buffer_from_vk_buffer :: proc(buf: vk.Buffer) -> oidn.Buffer
+oidn_error_callback :: proc "c"(userPtr: rawptr, code: oidn.Error, message: cstring)
 {
-    //vk.ExportMemoryAllocateInfo
+    context = runtime.default_context()
+    log.error(message)
+}
 
+oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf) -> oidn.Buffer
+{
     when ODIN_OS == .Windows
     {
-        //oidn.NewSharedBufferFromWin32Handle()
+        return oidn.NewSharedBufferFromWin32Handle(device, { .OPAQUE_WIN32 }, buf.win_handle, nil, c.size_t(buf.buf.size))
     }
     else when ODIN_OS == .Linux
     {
-        //oidn.NewSharedBufferFromFD()
+        return oidn.NewSharedBufferFromFD(device, { .OPAQUE_WIN32 }, buf.linux_handle, buf.buf.size)
     }
     else do #panic("Unsupported OS.")
-
-    return {}
 }
 
-oidn_run_lightmap_filter :: proc(device: oidn.Device, image: oidn.Buffer, width: uint, height: uint)
+oidn_run_lightmap_filter :: proc(device: oidn.Device, image: oidn.Buffer, width: u32, height: u32)
 {
     filter := oidn.NewFilter(device, "RTLightmap")
-    oidn.SetFilterImage(filter, "color", image, .FLOAT3, width, height)
-    oidn.SetFilterImage(filter, "output", image, .FLOAT3, width, height)
-    oidn.SetFilterBool(filter, "hdr", true)
+    oidn.SetFilterImage(filter, "color", image, .HALF3, auto_cast width, auto_cast height, pixelByteStride = 2 * 4)
+    oidn.SetFilterImage(filter, "output", image, .HALF3, auto_cast width, auto_cast height, pixelByteStride = 2 * 4)
     oidn.CommitFilter(filter)
 
     msg: cstring
+    if oidn.GetDeviceError(device, &msg) != .NONE
+    {
+        log.error(msg)
+        panic("")
+    }
+
+    oidn.ExecuteFilter(filter)
+    oidn.SyncDevice(device)
+
+    oidn.ReleaseFilter(filter)
+
+    msg = {}
     if oidn.GetDeviceError(device, &msg) != .NONE
     {
         log.error(msg)
@@ -2538,7 +2678,7 @@ create_vk_external_buffer_for_oidn :: proc(using vk_ctx: ^Vulkan_Context, size: 
         sType = .BUFFER_CREATE_INFO,
         pNext = next,
         size = vk.DeviceSize(size),
-        usage = { .TRANSFER_DST, .TRANSFER_SRC },
+        usage = { .TRANSFER_DST, .TRANSFER_SRC, .STORAGE_BUFFER },
         sharingMode = .EXCLUSIVE,
     }
     vk.CreateBuffer(device, &buf_ci, nil, &res.buf.handle)
@@ -2546,6 +2686,7 @@ create_vk_external_buffer_for_oidn :: proc(using vk_ctx: ^Vulkan_Context, size: 
     mem_reqs: vk.MemoryRequirements
     vk.GetBufferMemoryRequirements(device, res.buf.handle, &mem_reqs)
 
+    next = nil
     when ODIN_OS == .Windows
     {
         next = &vk.ExportMemoryAllocateInfo {
@@ -2566,7 +2707,7 @@ create_vk_external_buffer_for_oidn :: proc(using vk_ctx: ^Vulkan_Context, size: 
 
     allocInfo := vk.MemoryAllocateInfo {
         sType = .MEMORY_ALLOCATE_INFO,
-        pNext = &next,
+        pNext = next,
         allocationSize = mem_reqs.size,
         memoryTypeIndex = find_mem_type(vk_ctx, mem_reqs.memoryTypeBits, { .DEVICE_LOCAL }),
     }
@@ -2588,11 +2729,146 @@ create_vk_external_buffer_for_oidn :: proc(using vk_ctx: ^Vulkan_Context, size: 
         get_fd_info := vk.MemoryGetFdInfoKHR {
             sType = .GET_FD_INFO_KHR,
             memory = res.buf.mem,
-            handleType = .OPAQUE_FD,
+            handleType = { .OPAQUE_FD },
         }
         vk_check(vk.GetMemoryFdKHR(device, &get_fd_info, &res.linux_handle))
     }
     else do #panic("Unsupported OS.")
 
     return res
+}
+
+test_copy_image_to_cpu :: proc(using vk_ctx: ^Vulkan_Context, image: Image, lightmap_size: u32) -> rawptr
+{
+    total_size := lightmap_size * lightmap_size * 2 * 4
+
+    staging_buf := create_staging_buffer(vk_ctx, total_size)
+
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }))
+
+    vk.CmdCopyImageToBuffer2(cmd_buf, &vk.CopyImageToBufferInfo2 {
+        sType = .COPY_IMAGE_TO_BUFFER_INFO_2,
+        pNext = nil,
+        srcImage = image.img,
+        srcImageLayout = .GENERAL,
+        dstBuffer = staging_buf.handle,
+        regionCount = 1,
+        pRegions = &vk.BufferImageCopy2 {
+            sType = .BUFFER_IMAGE_COPY_2,
+            bufferRowLength = 0,
+            bufferImageHeight = 0,
+            imageSubresource = vk.ImageSubresourceLayers {
+                aspectMask = { .COLOR },
+                layerCount = 1,
+            },
+            imageExtent = vk.Extent3D {
+                width = lightmap_size,
+                height = lightmap_size,
+                depth = 1,
+            },
+        },
+    })
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    tmp := cmd_buf
+    wait_stage_flags := vk.PipelineStageFlags { .ALL_COMMANDS }
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        pWaitDstStageMask = &wait_stage_flags,
+        commandBufferCount = 1,
+        pCommandBuffers = &tmp,
+    }
+    vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
+
+    mapped: rawptr
+    vk.MapMemory(device, staging_buf.mem, 0, auto_cast total_size, {}, &mapped)
+    return mapped
+}
+
+test_copy_buffer_to_cpu :: proc(using vk_ctx: ^Vulkan_Context, buf: Buffer) -> rawptr
+{
+    total_size := buf.size
+
+    staging_buf := create_staging_buffer(vk_ctx, auto_cast total_size)
+
+    cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }))
+
+    vk.CmdCopyBuffer2(cmd_buf, &vk.CopyBufferInfo2 {
+        sType = .COPY_BUFFER_INFO_2,
+        srcBuffer = buf.handle,
+        dstBuffer = staging_buf.handle,
+        regionCount = 1,
+        pRegions = &vk.BufferCopy2 {
+            sType = .BUFFER_COPY_2,
+            size = total_size,
+        },
+    })
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    tmp := cmd_buf
+    wait_stage_flags := vk.PipelineStageFlags { .ALL_COMMANDS }
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        pWaitDstStageMask = &wait_stage_flags,
+        commandBufferCount = 1,
+        pCommandBuffers = &tmp,
+    }
+    vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
+
+    mapped: rawptr
+    vk.MapMemory(device, staging_buf.mem, 0, auto_cast total_size, {}, &mapped)
+    return mapped
+}
+
+create_staging_buffer :: proc(using vk_ctx: ^Vulkan_Context, size: u32) -> Buffer
+{
+    return create_buffer(vk_ctx, size, { .TRANSFER_SRC, .TRANSFER_DST }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
 }

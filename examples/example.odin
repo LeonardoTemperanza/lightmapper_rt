@@ -237,7 +237,7 @@ main :: proc()
         sync.mutex_lock(bake.debug_mutex1)
         defer { sync.mutex_unlock(bake.debug_mutex0) }
 
-        fmt.println("frame")
+        // fmt.println("frame")
 
         proceed := handle_window_events(window)
         if !proceed do break
@@ -249,8 +249,6 @@ main :: proc()
         vk_frame := vk_frames[frame_idx]
         vk_check(vk.WaitForFences(vk_ctx.device, 1, &vk_frame.fence, true, max(u64)))
         vk_check(vk.ResetFences(vk_ctx.device, 1, &vk_frame.fence))
-
-        //fmt.println("usage past fence")
 
         lm_info := lm.acquire_next_lightmap_view_vk(bake)
 
@@ -1043,7 +1041,7 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
     // instance := scene.instances[30]; loop: {
         mesh := scene.meshes[instance.mesh_idx]
 
-        if !mesh.lm_uvs_present { break loop }
+        if !mesh.lm_uvs_present { continue loop }
 
         offset := vk.DeviceSize(0)
         vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
@@ -1847,7 +1845,7 @@ handle_window_events :: proc(window: ^sdl.Window) -> (proceed: bool)
 
 first_person_camera_view :: proc() -> matrix[4, 4]f32
 {
-    @(static) cam_pos: [3]f32 = { 0, 2.5, -10 }
+    @(static) cam_pos: [3]f32 = { 0, 2.5, 0.0 }
 
     @(static) angle: [2]f32
 
@@ -2074,8 +2072,6 @@ create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []lm.Instance, meshes: []lm.M
             flags = auto_cast(vk.GeometryInstanceFlagsKHR { .TRIANGLE_FACING_CULL_DISABLE }),
             accelerationStructureReference = u64(meshes[instance.mesh_idx].blas.addr)
         }
-
-        fmt.println(u32(vk_instance.flags))
     }
 
     instances_buf := create_instances_buffer(ctx, vk_instances)
