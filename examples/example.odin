@@ -100,11 +100,11 @@ main :: proc()
     ts_freq := sdl.GetPerformanceFrequency()
 
     window_flags :: sdl.WindowFlags {
-        .RESIZABLE,
         .HIGH_PIXEL_DENSITY,
         .VULKAN,
+        .FULLSCREEN,
     }
-    window := sdl.CreateWindow("Lightmapper RT Example", 1800, 1800, window_flags)
+    window := sdl.CreateWindow("Lightmapper RT Example", 2100, 2100, window_flags)
     ensure(window != nil)
 
     vk.load_proc_addresses_global(cast(rawptr) sdl.Vulkan_GetVkGetInstanceProcAddr())
@@ -287,7 +287,7 @@ main :: proc()
             pImageMemoryBarriers = &transition_to_color_attachment_barrier,
         })
 
-        render_scene(&vk_ctx, cmd_buf, depth_image_view, swapchain.image_views[image_idx], lm_desc_set, shaders, swapchain, scene)
+        render_scene(&vk_ctx, cmd_buf, depth_image_view, swapchain.image_views[image_idx], lm_desc_set, shaders, swapchain, scene, auto_cast width, auto_cast height)
 
         transition_to_present_src_barrier := vk.ImageMemoryBarrier2 {
             sType = .IMAGE_MEMORY_BARRIER_2,
@@ -805,40 +805,14 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
 
     // NOTE: Not using context.temp_allocator because it doesn't guarantee 4 byte alignment,
     // and vulkan requires the alignment of the spirv to be 4 byte.
-    test_vert := load_file("shaders/shader.vert.spv", context.allocator)
-    defer delete(test_vert)
-    test_frag := load_file("shaders/shader.frag.spv", context.allocator)
-    defer delete(test_frag)
-    model_to_proj_vert := load_file("shaders/model_to_proj.vert.spv", context.allocator)
+    model_to_proj_vert := load_file("examples/shaders/model_to_proj.vert.spv", context.allocator)
     defer delete(model_to_proj_vert)
-    lit_frag := load_file("shaders/lit.frag.spv", context.allocator)
+    lit_frag := load_file("examples/shaders/lit.frag.spv", context.allocator)
+    defer delete(lit_frag)
 
     // Create shader objects.
     {
         shader_cis := [?]vk.ShaderCreateInfoEXT {
-            {
-                sType = .SHADER_CREATE_INFO_EXT,
-                codeType = .SPIRV,
-                codeSize = len(test_vert),
-                pCode = raw_data(test_vert),
-                pName = "main",
-                stage = { .VERTEX },
-                nextStage = { .FRAGMENT },
-                flags = { },
-                pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges)
-            },
-            {
-                sType = .SHADER_CREATE_INFO_EXT,
-                codeType = .SPIRV,
-                codeSize = len(test_frag),
-                pCode = raw_data(test_frag),
-                pName = "main",
-                stage = { .FRAGMENT },
-                flags = { },
-                pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges),
-            },
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
@@ -869,10 +843,8 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
         }
         shaders: [len(shader_cis)]vk.ShaderEXT
         vk_check(vk.CreateShadersEXT(device, len(shaders), raw_data(&shader_cis), nil, raw_data(&shaders)))
-        res.test_vert = shaders[0]
-        res.test_frag = shaders[1]
-        res.model_to_proj = shaders[2]
-        res.lit = shaders[3]
+        res.model_to_proj = shaders[0]
+        res.lit = shaders[1]
     }
 
     return res
@@ -898,7 +870,7 @@ Shaders :: struct
     lm_desc_set_layout: vk.DescriptorSetLayout,
 }
 
-render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: lm.Scene)
+render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: lm.Scene, width: u32, height: u32)
 {
     depth_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO,
@@ -1032,7 +1004,7 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
     tmp := lightmap_desc_set
     vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.pipeline_layout, 0, 1, &tmp, 0, nil)
 
-    render_viewport_aspect_ratio := f32(1.0)
+    render_viewport_aspect_ratio := f32(width) / f32(height)
 
     world_to_view := compute_world_to_view()
     view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false)
@@ -1848,6 +1820,24 @@ first_person_camera_view :: proc() -> matrix[4, 4]f32
     @(static) cam_pos: [3]f32 = { 0, 2.5, 0.0 }
 
     @(static) angle: [2]f32
+
+    min_t := f32(25.0)
+    max_t := f32(35.0)
+    @(static) t := f32(0.0)
+    t = min(t + DELTA_TIME, max_t)
+
+    first_pos := [3]f32 { 2.2657561, 1.3119615, -1.8265065 }
+    second_pos := [3]f32 { -0.96947265, 1.1673785, -0.88610756 }
+    first_angle := [2]f32 { 6.1121435, -0.1221731 }
+    second_angle := [2]f32 { 5.4768438, -0.041887973 }
+
+    ease_in_out_cubic :: proc(t: f32) -> f32
+    {
+        return 4.0 * t * t * t if t < 0.5 else 1.0 - math.pow(-2.0 * t + 2.0, 3.0) / 2.0;
+    }
+
+    //cam_pos = math.lerp(first_pos, second_pos, ease_in_out_cubic(max(0.0, t - min_t) / (max_t - min_t)))
+    //angle = math.lerp(first_angle, second_angle, ease_in_out_cubic(max(0.0, t - min_t) / (max_t - min_t)))
 
     cam_rot: quaternion128 = 1
 

@@ -41,8 +41,8 @@ void main(void)
         }
     }
 
-    if(count > 0)
-        imageStore(dst_image, coord, vec4(color_sum / float(count)));
-    else
+    //if(count > 0)
+    //    imageStore(dst_image, coord, vec4(color_sum / float(count)));
+    //else
         imageStore(dst_image, coord, src_color);
 }

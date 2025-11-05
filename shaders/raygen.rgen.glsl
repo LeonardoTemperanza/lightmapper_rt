@@ -199,8 +199,9 @@ vec4 pathtrace(vec3 start_pos, vec3 world_normal)
         ray.dir = incoming;
     }
 
-    float validity = 1.0f - (float(backface_hits_count) / float(MAX_BOUNCES - 1));
+    //float validity = 1.0f - (float(backface_hits_count) / float(MAX_BOUNCES - 1));
     //float validity = backface_hits_count > 0 ? 0.0f : 1.0f;
+    float validity = 1.0f;
     return vec4(radiance, validity);
 }
 

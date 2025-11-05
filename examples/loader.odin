@@ -14,7 +14,7 @@ import lm "../"
 
 import "ufbx"
 
-LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 100
+LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 50
 LIGHTMAP_MIN_INSTANCE_TEXELS :: 64
 LIGHTMAP_MAX_INSTANCE_TEXELS :: 1024
 
@@ -113,16 +113,32 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> lm.Scene
     }
 
     // Loop through instances.
-    for i in 0..<scene.nodes.count
+    tmp_count := u32(0)
+    instance_loop: for i in 0..<scene.nodes.count
     {
         node := scene.nodes.data[i]
-        if node.is_root || node.mesh == nil { continue }
+        if node.is_root || node.mesh == nil do continue
+
+        ignore_list := []u32 {
+            52, 53, 54,  55, 56, 57, 58, 59, 174
+        }
+
+        // @tmp
+        for ignore in ignore_list
+        {
+            if tmp_count == ignore
+            {
+                tmp_count += 1
+                continue instance_loop
+            }
+        }
 
         instance := lm.Instance {
             transform = get_node_world_transform(node),
             mesh_idx = node.mesh.element.typed_id,
         }
         append(&res.instances, instance)
+        tmp_count += 1
     }
 
     // Pack lightmap uvs.
