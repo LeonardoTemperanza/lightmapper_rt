@@ -2572,19 +2572,13 @@ create_oidn_context :: proc(phys_device: vk.PhysicalDevice) -> oidn.Device
 
     fmt.println(id_props)
 
-    /*
     device: oidn.Device
-    if id_props.deviceLUIDValid
-    {
+    if device == nil && id_props.deviceLUIDValid {
         device = oidn.NewDeviceByLUID(&id_props.deviceLUID[0])
     }
-    else
-    {
+    if device == nil {
         device = oidn.NewDeviceByUUID(&id_props.deviceUUID[0])
     }
-    */
-
-    device := oidn.NewDevice(.HIP)
 
     oidn.SetDeviceErrorFunction(device, oidn_error_callback, nil)
     oidn.CommitDevice(device)
