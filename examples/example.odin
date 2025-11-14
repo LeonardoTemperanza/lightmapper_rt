@@ -61,12 +61,6 @@ Swapchain :: struct
     present_semaphores: []vk.Semaphore,
 }
 
-GBuffers :: struct
-{
-    world_pos: Image,
-    world_normals: Image,
-}
-
 LIGHTMAP_SIZE :: 4096
 
 main :: proc()
