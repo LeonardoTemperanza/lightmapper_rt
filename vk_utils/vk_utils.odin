@@ -55,23 +55,10 @@ create_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, byte_si
 
 create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf: vk.CommandBuffer, shader_handle_storage: []byte, num_groups: u32) -> Buffer
 {
-    rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
-        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
-    }
-    properties := vk.PhysicalDeviceProperties2 {
-        sType = .PHYSICAL_DEVICE_PROPERTIES_2,
-        pNext = &rt_properties
-    }
+    rt_info := get_rt_info(phys_device)
+    assert(auto_cast len(shader_handle_storage) == rt_info.handle_size * num_groups)
 
-    vk.GetPhysicalDeviceProperties2(phys_device, &properties)
-
-    rt_handle_alignment := rt_properties.shaderGroupHandleAlignment
-    rt_base_align       := rt_properties.shaderGroupBaseAlignment
-    rt_handle_size      := rt_properties.shaderGroupHandleSize
-
-    assert(auto_cast len(shader_handle_storage) == rt_handle_size * num_groups)
-
-    size := num_groups * rt_base_align
+    size := num_groups * rt_info.base_align
     staging_buf := create_buffer(device, phys_device, size, { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
     defer destroy_buffer(device, &staging_buf)
 
@@ -79,9 +66,9 @@ create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd
     vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
     for group_idx in 0..<num_groups
     {
-        mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_base_align)),
-                 &shader_handle_storage[group_idx * rt_handle_size],
-                 int(rt_handle_size))
+        mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_info.base_align)),
+                 &shader_handle_storage[group_idx * rt_info.handle_size],
+                 int(rt_info.handle_size))
     }
     vk.UnmapMemory(device, staging_buf.mem)
 
@@ -271,4 +258,30 @@ find_mem_type :: proc(phys_device: vk.PhysicalDevice, type_filter: u32, properti
     }
 
     panic("Vulkan Error: Could not find suitable memory type!")
+}
+
+RT_Info :: struct
+{
+    handle_alignment: u32,
+    base_align: u32,
+    handle_size: u32,
+}
+
+get_rt_info :: proc(phys_device: vk.PhysicalDevice) -> RT_Info
+{
+    res: RT_Info
+
+    rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
+        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
+    }
+    properties := vk.PhysicalDeviceProperties2 {
+        sType = .PHYSICAL_DEVICE_PROPERTIES_2,
+        pNext = &rt_properties
+    }
+    vk.GetPhysicalDeviceProperties2(phys_device, &properties)
+
+    res.handle_alignment = rt_properties.shaderGroupHandleAlignment
+    res.base_align       = rt_properties.shaderGroupBaseAlignment
+    res.handle_size      = rt_properties.shaderGroupHandleSize
+    return res
 }

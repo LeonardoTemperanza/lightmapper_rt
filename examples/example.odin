@@ -154,9 +154,6 @@ main :: proc()
         //queue = vk_ctx.lm_queue,
         queue = vk_ctx.queue,
         queue_family_idx = vk_ctx.queue_family_idx,
-        rt_handle_alignment = vk_ctx.rt_handle_alignment,
-        rt_handle_size = vk_ctx.rt_handle_size,
-        rt_base_align = vk_ctx.rt_base_align,
     }
     lm_ctx := lm.init_test(lm_vk_ctx)
 

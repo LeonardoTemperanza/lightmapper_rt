@@ -49,6 +49,9 @@ Context :: struct
     shaders: Shaders,
 }
 
+//Buffer :: vku.Buffer
+//Image :: vku.Image
+
 // Initialization
 
 // Initializes this library with its own Vulkan context.
@@ -60,6 +63,14 @@ init_from_scratch :: proc() -> Context
 
 // Initializes this library with an already existing Vulkan context.
 // NOTE: This library is completely asynchronous, so use a separate queue here!
+// NOTE: This library necessitates the following extensions:
+// - VK_EXT_SHADER_OBJECT
+// - VK_KHR_ACCELERATION_STRUCTURE
+// - VK_KHR_RAY_TRACING_PIPELINE
+// - VK_KHR_DEFERRED_HOST_OPERATIONS
+// - VK_EXT_CONSERVATIVE_RASTERIZATION
+// - VK_KHR_RAY_TRACING_POSITION_FETCH
+// - VK_KHR_EXTERNAL_MEMORY_WIN32 / VK_KHR_EXTERNAL_MEMORY_FD
 init_from_vulkan_context :: proc(phys_device: vk.PhysicalDevice, device: vk.Device, queue: vk.Queue, queue_family_idx: u32) -> Context
 {
     res: Context
@@ -69,6 +80,7 @@ init_from_vulkan_context :: proc(phys_device: vk.PhysicalDevice, device: vk.Devi
     res.vk_ctx.queue_family_idx = queue_family_idx
 
     res.shaders = create_shaders(&res.vk_ctx)
+    res.oidn_device = create_oidn_context(res.vk_ctx.phys_device)
 
     return res
 }
@@ -309,9 +321,6 @@ Vulkan_Context :: struct
     queue: vk.Queue,
     lm_queue: vk.Queue,
     queue_family_idx: u32,
-    rt_handle_alignment: u32,
-    rt_handle_size: u32,
-    rt_base_align: u32,
 }
 
 // Utility function, could be used to initialize Vulkan
@@ -511,24 +520,6 @@ init_vk_context :: proc(window: ^sdl.Window) -> Vulkan_Context
 
     vk.GetDeviceQueue(res.device, queue_family_idx, 0, &res.queue)
     vk.GetDeviceQueue(res.device, queue_family_idx, 1, &res.lm_queue)
-
-    // Useful constants
-    {
-        rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
-            sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
-        }
-        properties := vk.PhysicalDeviceProperties2 {
-            sType = .PHYSICAL_DEVICE_PROPERTIES_2,
-            pNext = &rt_properties
-        }
-
-        vk.GetPhysicalDeviceProperties2(chosen_phys_device, &properties)
-
-        res.rt_handle_alignment = rt_properties.shaderGroupHandleAlignment
-        res.rt_base_align       = rt_properties.shaderGroupBaseAlignment
-        res.rt_handle_size      = rt_properties.shaderGroupHandleSize
-    }
-
     return res
 }
 
@@ -542,6 +533,8 @@ destroy_vk_context :: proc(using vk_ctx: ^Vulkan_Context)
 
 ///////////////////////////////////
 // Internals
+
+Tmp_Cmd_Buf :: vku.Tmp_Cmd_Buf
 
 Geometry :: struct
 {
@@ -1155,6 +1148,18 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
 
 push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: ^GBuffers, rt_desc_set: vk.DescriptorSet)
 {
+    rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
+        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
+    }
+    properties := vk.PhysicalDeviceProperties2 {
+        sType = .PHYSICAL_DEVICE_PROPERTIES_2,
+        pNext = &rt_properties
+    }
+    vk.GetPhysicalDeviceProperties2(vk_ctx.phys_device, &properties)
+    rt_handle_alignment := rt_properties.shaderGroupHandleAlignment
+    rt_base_align       := rt_properties.shaderGroupBaseAlignment
+    rt_handle_size      := rt_properties.shaderGroupHandleSize
+
     vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.push_samples_pipeline)
 
     tmp := rt_desc_set
@@ -1186,6 +1191,8 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
 
 pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, rt_desc_set: vk.DescriptorSet, accum_counter: u32)
 {
+    rt_info := vku.get_rt_info(vk_ctx.phys_device)
+
     vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline)
 
     tmp := rt_desc_set
@@ -1194,19 +1201,19 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, rt_desc_set
     sbt_addr := u64(get_buffer_device_address(device, shaders.sbt_buf))
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_base_align)),
-        stride = vk.DeviceSize(rt_handle_alignment),
-        size = vk.DeviceSize(rt_handle_alignment),
+        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),
+        stride = vk.DeviceSize(rt_info.handle_alignment),
+        size = vk.DeviceSize(rt_info.handle_alignment),
     }
     raymiss_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_base_align)),
-        stride = vk.DeviceSize(rt_handle_alignment),
-        size = vk.DeviceSize(rt_handle_alignment),
+        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_info.base_align)),
+        stride = vk.DeviceSize(rt_info.handle_alignment),
+        size = vk.DeviceSize(rt_info.handle_alignment),
     }
     rayhit_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_base_align)),
-        stride = vk.DeviceSize(rt_handle_alignment),
-        size = vk.DeviceSize(rt_handle_alignment),
+        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_info.base_align)),
+        stride = vk.DeviceSize(rt_info.handle_alignment),
+        size = vk.DeviceSize(rt_info.handle_alignment),
     }
     callable_region := vk.StridedDeviceAddressRegionKHR {}
 
@@ -1673,11 +1680,13 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     }
     vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &rt_pipeline_ci, nil, &res.rt_pipeline))
 
+    rt_info := vku.get_rt_info(phys_device)
+
     // Push samples raytracing resources
     {
         // Shader Binding Table
         group_count := u32(3)
-        size := group_count * rt_handle_size
+        size := group_count * rt_info.handle_size
         shader_handle_storage := make([]byte, size, allocator = context.temp_allocator)
         vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, res.push_samples_pipeline, 0, group_count, int(size), raw_data(shader_handle_storage)))
         res.push_samples_sbt_buf = create_sbt_buffer(ctx, shader_handle_storage, group_count)
@@ -1687,7 +1696,7 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     {
         // Shader Binding Table
         group_count := u32(3)
-        size := group_count * rt_handle_size
+        size := group_count * rt_info.handle_size
         shader_handle_storage := make([]byte, size, allocator = context.temp_allocator)
         vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, res.rt_pipeline, 0, group_count, int(size), raw_data(shader_handle_storage)))
         res.sbt_buf = create_sbt_buffer(ctx, shader_handle_storage, group_count)
@@ -1991,9 +2000,10 @@ destroy_buffer :: proc(using ctx: ^Vulkan_Context, buf: ^Buffer)
 
 create_sbt_buffer :: proc(using ctx: ^Vulkan_Context, shader_handle_storage: []byte, num_groups: u32) -> Buffer
 {
-    assert(auto_cast len(shader_handle_storage) == rt_handle_size * num_groups)
+    rt_info := vku.get_rt_info(phys_device)
+    assert(auto_cast len(shader_handle_storage) == rt_info.handle_size * num_groups)
 
-    size := num_groups * rt_base_align
+    size := num_groups * rt_info.base_align
     staging_buf := create_buffer(ctx, size, { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
     defer destroy_buffer(ctx, &staging_buf)
 
@@ -2001,9 +2011,9 @@ create_sbt_buffer :: proc(using ctx: ^Vulkan_Context, shader_handle_storage: []b
     vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
     for group_idx in 0..<num_groups
     {
-        mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_base_align)),
-                 &shader_handle_storage[group_idx * rt_handle_size],
-                 int(rt_handle_size))
+        mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_info.base_align)),
+                 &shader_handle_storage[group_idx * rt_info.handle_size],
+                 int(rt_info.handle_size))
     }
     vk.UnmapMemory(device, staging_buf.mem)
 
