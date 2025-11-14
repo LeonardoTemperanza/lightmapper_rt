@@ -27,38 +27,22 @@ package main
 
 import "core:fmt"
 import "core:log"
-import "core:slice"
-import "core:os"
 import "base:runtime"
 import "core:math/linalg"
 import "core:math"
 import "core:mem"
-import "core:time"
 import "core:sync"
 import "core:c"
+import os "core:os"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 import lm "../"
-
-import "ufbx"
 
 NUM_FRAMES_IN_FLIGHT :: 1
 NUM_SWAPCHAIN_IMAGES :: 2
 
 vk_logger: log.Logger
 glfw_logger: log.Logger
-
-Vk_Ctx :: struct
-{
-    phys_device: vk.PhysicalDevice,
-    device: vk.Device,
-    queue: vk.Queue,
-    lm_queue: vk.Queue,
-    queue_family_idx: u32,
-    rt_handle_alignment: u32,
-    rt_handle_size: u32,
-    rt_base_align: u32,
-}
 
 Vulkan_Per_Frame :: struct
 {
@@ -109,28 +93,17 @@ main :: proc()
 
     vk.load_proc_addresses_global(cast(rawptr) sdl.Vulkan_GetVkGetInstanceProcAddr())
 
-    instance, debug_messenger := create_instance()
-    defer
-    {
-        vk.DestroyDebugUtilsMessengerEXT(instance, debug_messenger, nil)
-        vk.DestroyInstance(instance, nil)
-    }
-
-    surface: vk.SurfaceKHR
-    ok_s := sdl.Vulkan_CreateSurface(window, instance, nil, &surface)
-    if !ok_s do fatal_error("Could not create vulkan surface.")
-    defer sdl.Vulkan_DestroySurface(instance, surface, nil)
-
-    vk_ctx := create_ctx(instance, surface)
-    defer destroy_ctx(&vk_ctx)
+    vk_ctx := lm.init_vk_context(window)
+    defer lm.destroy_vk_context(&vk_ctx)
 
     width, height: c.int
     sdl.GetWindowSizeInPixels(window, &width, &height)
 
-    swapchain := create_swapchain(&vk_ctx, surface, u32(width), u32(height))
+    swapchain := create_swapchain(&vk_ctx, u32(width), u32(height))
     defer destroy_swapchain(&vk_ctx, swapchain)
 
     depth_image, depth_image_view := create_depth_texture(&vk_ctx, u32(width), u32(height))
+    defer vk.DestroyImage(vk_ctx.device, depth_image, nil)
 
     shaders := create_shaders(&vk_ctx)
     defer destroy_shaders(&vk_ctx, shaders)
@@ -365,71 +338,6 @@ main :: proc()
     }
 }
 
-create_instance :: proc() -> (vk.Instance, vk.DebugUtilsMessengerEXT)
-{
-    when ODIN_DEBUG
-    {
-        layers := []cstring {
-            "VK_LAYER_KHRONOS_validation",
-        }
-    }
-    else
-    {
-        layers := []cstring {}
-    }
-
-    count: u32
-    instance_extensions := sdl.Vulkan_GetInstanceExtensions(&count)
-    extensions := slice.concatenate([][]cstring {
-        instance_extensions[:count],
-
-        {
-            vk.EXT_DEBUG_UTILS_EXTENSION_NAME,
-            vk.KHR_WIN32_SURFACE_EXTENSION_NAME,
-        }
-    }, context.temp_allocator)
-
-    debug_messenger_ci := vk.DebugUtilsMessengerCreateInfoEXT {
-        sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-        messageSeverity = { .WARNING, .ERROR },
-        messageType = { .VALIDATION, .PERFORMANCE },
-        pfnUserCallback = vk_debug_callback
-    }
-
-    next: rawptr
-    next = &debug_messenger_ci
-
-    validation_feature := vk.ValidationFeatureEnableEXT.SYNCHRONIZATION_VALIDATION
-    next = &vk.ValidationFeaturesEXT {
-        sType = .VALIDATION_FEATURES_EXT,
-        pNext = next,
-        enabledValidationFeatureCount = 1,
-        pEnabledValidationFeatures = &validation_feature,
-    }
-
-    instance: vk.Instance
-    vk_check(vk.CreateInstance(&{
-        sType = .INSTANCE_CREATE_INFO,
-        pApplicationInfo = &{
-            sType = .APPLICATION_INFO,
-            apiVersion = vk.API_VERSION_1_3,
-        },
-        enabledLayerCount = u32(len(layers)),
-        ppEnabledLayerNames = raw_data(layers),
-        enabledExtensionCount = u32(len(extensions)),
-        ppEnabledExtensionNames = raw_data(extensions),
-        pNext = next,
-    }, nil, &instance))
-
-    vk.load_proc_addresses_instance(instance)
-    assert(vk.DestroyInstance != nil, "Failed to load Vulkan instance API")
-
-    debug_messenger: vk.DebugUtilsMessengerEXT
-    vk_check(vk.CreateDebugUtilsMessengerEXT(instance, &debug_messenger_ci, nil, &debug_messenger))
-
-    return instance, debug_messenger
-}
-
 vk_debug_callback :: proc "system" (severity: vk.DebugUtilsMessageSeverityFlagsEXT,
                                     types: vk.DebugUtilsMessageTypeFlagsEXT,
                                     callback_data: ^vk.DebugUtilsMessengerCallbackDataEXT,
@@ -448,170 +356,7 @@ vk_debug_callback :: proc "system" (severity: vk.DebugUtilsMessageSeverityFlagsE
     return false
 }
 
-create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vk_Ctx
-{
-    phys_device_count: u32
-    vk_check(vk.EnumeratePhysicalDevices(instance, &phys_device_count, nil))
-    if phys_device_count == 0 do fatal_error("Did not find any GPUs!")
-    phys_devices := make([]vk.PhysicalDevice, phys_device_count, context.temp_allocator)
-    vk_check(vk.EnumeratePhysicalDevices(instance, &phys_device_count, raw_data(phys_devices)))
-
-    chosen_phys_device: vk.PhysicalDevice
-    queue_family_idx: u32
-    found := false
-    device_loop: for candidate in phys_devices
-    {
-        queue_family_count: u32
-        vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, nil)
-        queue_families := make([]vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
-        vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, raw_data(queue_families))
-
-        for family, i in queue_families
-        {
-            supports_graphics := .GRAPHICS in family.queueFlags
-            supports_present: b32
-            vk_check(vk.GetPhysicalDeviceSurfaceSupportKHR(candidate, u32(i), surface, &supports_present))
-
-            if supports_graphics && supports_present
-            {
-                chosen_phys_device = candidate
-                queue_family_idx = u32(i)
-                found = true
-                break device_loop
-            }
-        }
-    }
-
-    if !found do fatal_error("Could not find suitable GPU.")
-
-    queue_priority := f32(1)
-    queue_create_infos := []vk.DeviceQueueCreateInfo {
-        {
-            sType = .DEVICE_QUEUE_CREATE_INFO,
-            queueFamilyIndex = queue_family_idx,
-            queueCount = 2,
-            pQueuePriorities = &queue_priority,
-        },
-    }
-
-    device_extensions := []cstring {
-        vk.KHR_SWAPCHAIN_EXTENSION_NAME,
-        vk.EXT_SHADER_OBJECT_EXTENSION_NAME,
-        vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-        vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-        vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-        vk.EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,
-        vk.KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME,
-        vk.KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
-    }
-
-    next: rawptr
-    next = &vk.PhysicalDeviceVulkan13Features {
-        sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        pNext = next,
-        dynamicRendering = true,
-        synchronization2 = true,
-    }
-    next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
-        pNext = next,
-        shaderObject = true,
-    }
-    next = &vk.PhysicalDeviceDepthClipEnableFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT,
-        pNext = next,
-        depthClipEnable = true,
-    }
-    next = &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
-        sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
-        pNext = next,
-        accelerationStructure = true,
-    }
-    next = &vk.PhysicalDeviceRayTracingPipelineFeaturesKHR {
-        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
-        pNext = next,
-        rayTracingPipeline = true,
-    }
-    next = &vk.PhysicalDeviceBufferDeviceAddressFeatures {
-        sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
-        pNext = next,
-        bufferDeviceAddress = true,
-    }
-    next = &vk.PhysicalDeviceTimelineSemaphoreFeatures {
-        sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
-        pNext = next,
-        timelineSemaphore = true,
-    }
-    next = &vk.PhysicalDeviceFeatures2 {
-        sType = .PHYSICAL_DEVICE_FEATURES_2,
-        pNext = next,
-        features = {
-            geometryShader = true,  // For the tri_idx gbuffer.
-        }
-    }
-    next = &vk.PhysicalDeviceRayTracingPositionFetchFeaturesKHR {
-        sType = .PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR,
-        pNext = next,
-        rayTracingPositionFetch = true,
-    }
-
-    device_ci := vk.DeviceCreateInfo {
-        sType = .DEVICE_CREATE_INFO,
-        pNext = next,
-        queueCreateInfoCount = u32(len(queue_create_infos)),
-        pQueueCreateInfos = raw_data(queue_create_infos),
-        enabledExtensionCount = u32(len(device_extensions)),
-        ppEnabledExtensionNames = raw_data(device_extensions),
-    }
-    device: vk.Device
-    vk_check(vk.CreateDevice(chosen_phys_device, &device_ci, nil, &device))
-
-    vk.load_proc_addresses_device(device)
-    if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
-
-    queue: vk.Queue
-    vk.GetDeviceQueue(device, queue_family_idx, 0, &queue)
-    lm_queue: vk.Queue
-    vk.GetDeviceQueue(device, queue_family_idx, 1, &lm_queue)
-
-    // Useful constants
-    rt_handle_alignment: u32
-    rt_base_align: u32
-    rt_handle_size: u32
-    {
-        rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
-            sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
-        }
-        properties := vk.PhysicalDeviceProperties2 {
-            sType = .PHYSICAL_DEVICE_PROPERTIES_2,
-            pNext = &rt_properties
-        }
-
-        vk.GetPhysicalDeviceProperties2(chosen_phys_device, &properties)
-
-        rt_handle_alignment = rt_properties.shaderGroupHandleAlignment
-        rt_base_align       = rt_properties.shaderGroupBaseAlignment
-        rt_handle_size      = rt_properties.shaderGroupHandleSize
-    }
-
-    return {
-        phys_device = chosen_phys_device,
-        device = device,
-        queue = queue,
-        lm_queue = lm_queue,
-        queue_family_idx = queue_family_idx,
-        rt_handle_alignment = rt_handle_alignment,
-        rt_base_align = rt_base_align,
-        rt_handle_size = rt_handle_size,
-    }
-}
-
-destroy_ctx :: proc(using ctx: ^Vk_Ctx)
-{
-    vk.DestroyDevice(device, nil)
-}
-
-create_swapchain :: proc(using ctx: ^Vk_Ctx, surface: vk.SurfaceKHR, width: u32, height: u32) -> Swapchain
+create_swapchain :: proc(using ctx: ^lm.Vulkan_Context, width: u32, height: u32) -> Swapchain
 {
     res: Swapchain
 
@@ -699,7 +444,7 @@ create_swapchain :: proc(using ctx: ^Vk_Ctx, surface: vk.SurfaceKHR, width: u32,
     return res
 }
 
-destroy_swapchain :: proc(using ctx: ^Vk_Ctx, swapchain: Swapchain)
+destroy_swapchain :: proc(using ctx: ^lm.Vulkan_Context, swapchain: Swapchain)
 {
     delete(swapchain.images)
     for semaphore in swapchain.present_semaphores {
@@ -719,7 +464,7 @@ Frame_Data :: struct
     view_to_proj: matrix[4, 4]f32
 }
 
-create_vk_frames :: proc(using ctx: ^Vk_Ctx) -> [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame
+create_vk_frames :: proc(using ctx: ^lm.Vulkan_Context) -> [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame
 {
     res: [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame
     for &frame in res
@@ -752,7 +497,7 @@ create_vk_frames :: proc(using ctx: ^Vk_Ctx) -> [NUM_FRAMES_IN_FLIGHT]Vulkan_Per
     return res
 }
 
-destroy_vk_frames :: proc(using ctx: ^Vk_Ctx, frames: [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame)
+destroy_vk_frames :: proc(using ctx: ^lm.Vulkan_Context, frames: [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame)
 {
     for frame in frames
     {
@@ -762,7 +507,7 @@ destroy_vk_frames :: proc(using ctx: ^Vk_Ctx, frames: [NUM_FRAMES_IN_FLIGHT]Vulk
     }
 }
 
-create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
+create_shaders :: proc(using ctx: ^lm.Vulkan_Context) -> Shaders
 {
     res: Shaders
 
@@ -850,7 +595,7 @@ create_shaders :: proc(using ctx: ^Vk_Ctx) -> Shaders
     return res
 }
 
-destroy_shaders :: proc(using ctx: ^Vk_Ctx, shaders: Shaders)
+destroy_shaders :: proc(using ctx: ^lm.Vulkan_Context, shaders: Shaders)
 {
     vk.DestroyPipelineLayout(device, shaders.pipeline_layout, nil)
     vk.DestroyShaderEXT(device, shaders.test_vert, nil)
@@ -870,7 +615,7 @@ Shaders :: struct
     lm_desc_set_layout: vk.DescriptorSetLayout,
 }
 
-render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: lm.Scene, width: u32, height: u32)
+render_scene :: proc(using ctx: ^lm.Vulkan_Context, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: lm.Scene, width: u32, height: u32)
 {
     depth_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO,
@@ -1009,8 +754,8 @@ render_scene :: proc(using ctx: ^Vk_Ctx, cmd_buf: vk.CommandBuffer, depth_view: 
     world_to_view := compute_world_to_view()
     view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false)
 
-    loop: for instance, i in scene.instances {
-    // instance := scene.instances[30]; loop: {
+    loop: for instance in scene.instances
+    {
         mesh := scene.meshes[instance.mesh_idx]
 
         if !mesh.lm_uvs_present { continue loop }
@@ -1079,7 +824,7 @@ load_file :: proc(filename: string, allocator: runtime.Allocator) -> []byte
 // This part can be ignored.
 
 /*
-destroy_mesh :: proc(using ctx: ^Vk_Ctx, mesh: ^Mesh)
+destroy_mesh :: proc(using ctx: ^lm.Vulkan_Context, mesh: ^Mesh)
 {
     destroy_buffer(ctx, &mesh.pos)
     destroy_buffer(ctx, &mesh.normals)
@@ -1091,7 +836,7 @@ destroy_mesh :: proc(using ctx: ^Vk_Ctx, mesh: ^Mesh)
     mesh^ = {}
 }
 
-destroy_scene :: proc(using ctx: ^Vk_Ctx, scene: ^Scene)
+destroy_scene :: proc(using ctx: ^lm.Vulkan_Context, scene: ^Scene)
 {
     delete(scene.instances)
     for &mesh in scene.meshes {
@@ -1109,80 +854,7 @@ xform_to_mat :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4
            #force_inline linalg.matrix4_scale(scale))
 }
 
-create_sbt_buffer :: proc(using ctx: ^Vk_Ctx, shader_handle_storage: []byte, num_groups: u32) -> Buffer
-{
-    assert(auto_cast len(shader_handle_storage) == rt_handle_size * num_groups)
-
-    size := num_groups * rt_base_align
-    staging_buf := create_buffer(ctx, 1, int(size), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
-    defer destroy_buffer(ctx, &staging_buf)
-
-    data: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
-    for group_idx in 0..<num_groups
-    {
-        mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_base_align)),
-                 &shader_handle_storage[group_idx * rt_handle_size],
-                 int(rt_handle_size))
-    }
-    vk.UnmapMemory(device, staging_buf.mem)
-
-    res := create_buffer(ctx, 1, int(size), { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-    copy_buffer(ctx, staging_buf, res, vk.DeviceSize(size))
-
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .TRANSFER },
-        srcAccessMask = { .TRANSFER_WRITE },
-        dstStageMask = { .RAY_TRACING_SHADER_KHR },
-        dstAccessMask = { .SHADER_READ },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
-
-    return res
-}
-
-create_vertex_buffer :: proc(using ctx: ^Vk_Ctx, verts: []$T) -> Buffer
+create_vertex_buffer :: proc(using ctx: ^lm.Vulkan_Context, verts: []$T) -> Buffer
 {
     size := cast(vk.DeviceSize) (len(verts) * size_of(verts[0]))
 
@@ -1249,7 +921,7 @@ create_vertex_buffer :: proc(using ctx: ^Vk_Ctx, verts: []$T) -> Buffer
     return res
 }
 
-create_index_buffer :: proc(using ctx: ^Vk_Ctx, indices: []u32) -> Buffer
+create_index_buffer :: proc(using ctx: ^lm.Vulkan_Context, indices: []u32) -> Buffer
 {
     size := cast(vk.DeviceSize) (len(indices) * size_of(indices[0]))
 
@@ -1316,7 +988,7 @@ create_index_buffer :: proc(using ctx: ^Vk_Ctx, indices: []u32) -> Buffer
     return res
 }
 
-create_instances_buffer :: proc(using ctx: ^Vk_Ctx, instances: []vk.AccelerationStructureInstanceKHR) -> Buffer
+create_instances_buffer :: proc(using ctx: ^lm.Vulkan_Context, instances: []vk.AccelerationStructureInstanceKHR) -> Buffer
 {
     size := cast(vk.DeviceSize) (len(instances) * size_of(instances[0]))
 
@@ -1399,7 +1071,7 @@ Image :: struct
     height: u32,
 }
 
-create_buffer :: proc(using ctx: ^Vk_Ctx, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
+create_buffer :: proc(using ctx: ^lm.Vulkan_Context, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
 {
     res: Buffer
     res.size = vk.DeviceSize(el_size * count)
@@ -1438,7 +1110,7 @@ create_buffer :: proc(using ctx: ^Vk_Ctx, el_size: int, count: int, usage: vk.Bu
     return res
 }
 
-copy_buffer :: proc(using ctx: ^Vk_Ctx, src: Buffer, dst: Buffer, size: vk.DeviceSize)
+copy_buffer :: proc(using ctx: ^lm.Vulkan_Context, src: Buffer, dst: Buffer, size: vk.DeviceSize)
 {
     // TEMPORARY CMD_BUF!!!
     cmd_pool_ci := vk.CommandPoolCreateInfo {
@@ -1484,7 +1156,7 @@ copy_buffer :: proc(using ctx: ^Vk_Ctx, src: Buffer, dst: Buffer, size: vk.Devic
     vk_check(vk.QueueWaitIdle(queue))
 }
 
-destroy_buffer :: proc(using ctx: ^Vk_Ctx, buf: ^Buffer)
+destroy_buffer :: proc(using ctx: ^lm.Vulkan_Context, buf: ^Buffer)
 {
     vk.FreeMemory(device, buf.mem, nil)
     vk.DestroyBuffer(device, buf.buf, nil)
@@ -1492,7 +1164,7 @@ destroy_buffer :: proc(using ctx: ^Vk_Ctx, buf: ^Buffer)
     buf^ = {}
 }
 
-create_image :: proc(using ctx: ^Vk_Ctx, ci: vk.ImageCreateInfo, name := "") -> Image
+create_image :: proc(using ctx: ^lm.Vulkan_Context, ci: vk.ImageCreateInfo, name := "") -> Image
 {
     res: Image
 
@@ -1583,7 +1255,12 @@ create_image :: proc(using ctx: ^Vk_Ctx, ci: vk.ImageCreateInfo, name := "") -> 
     return res
 }
 
-find_mem_type :: proc(using ctx: ^Vk_Ctx, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
+destroy_image :: proc(using image: ^Image)
+{
+
+}
+
+find_mem_type :: proc(using ctx: ^lm.Vulkan_Context, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
 {
     mem_properties: vk.PhysicalDeviceMemoryProperties
     vk.GetPhysicalDeviceMemoryProperties(phys_device, &mem_properties)
@@ -1625,7 +1302,7 @@ world_to_view_mat :: proc(cam_pos: [3]f32, cam_rot: quaternion128) -> matrix[4, 
            #force_inline linalg.matrix4_translate(view_pos)
 }
 
-find_depth_format :: proc(using ctx: ^Vk_Ctx) -> vk.Format
+find_depth_format :: proc(using ctx: ^lm.Vulkan_Context) -> vk.Format
 {
     candidates := [?]vk.Format {
         .D32_SFLOAT,
@@ -1645,7 +1322,7 @@ find_depth_format :: proc(using ctx: ^Vk_Ctx) -> vk.Format
     return .D32_SFLOAT
 }
 
-create_depth_texture :: proc(using ctx: ^Vk_Ctx, width, height: u32) -> (vk.Image, vk.ImageView)
+create_depth_texture :: proc(using ctx: ^lm.Vulkan_Context, width, height: u32) -> (vk.Image, vk.ImageView)
 {
     image_ci := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
@@ -1821,11 +1498,14 @@ first_person_camera_view :: proc() -> matrix[4, 4]f32
 
     @(static) angle: [2]f32
 
+    /*
     min_t := f32(25.0)
     max_t := f32(35.0)
     @(static) t := f32(0.0)
     t = min(t + DELTA_TIME, max_t)
+    */
 
+    /*
     first_pos := [3]f32 { 2.2657561, 1.3119615, -1.8265065 }
     second_pos := [3]f32 { -0.96947265, 1.1673785, -0.88610756 }
     first_angle := [2]f32 { 6.1121435, -0.1221731 }
@@ -1835,6 +1515,7 @@ first_person_camera_view :: proc() -> matrix[4, 4]f32
     {
         return 4.0 * t * t * t if t < 0.5 else 1.0 - math.pow(-2.0 * t + 2.0, 3.0) / 2.0;
     }
+    */
 
     //cam_pos = math.lerp(first_pos, second_pos, ease_in_out_cubic(max(0.0, t - min_t) / (max_t - min_t)))
     //angle = math.lerp(first_angle, second_angle, ease_in_out_cubic(max(0.0, t - min_t) / (max_t - min_t)))
@@ -1904,7 +1585,7 @@ first_person_camera_view :: proc() -> matrix[4, 4]f32
     }
 }
 
-create_blas :: proc(using ctx: ^Vk_Ctx, positions: Buffer, indices: Buffer, verts_count: u32, idx_count: u32) -> Accel_Structure
+create_blas :: proc(using ctx: ^lm.Vulkan_Context, positions: Buffer, indices: Buffer, verts_count: u32, idx_count: u32) -> Accel_Structure
 {
     blas: Accel_Structure
 
@@ -2035,7 +1716,7 @@ create_blas :: proc(using ctx: ^Vk_Ctx, positions: Buffer, indices: Buffer, vert
     return blas
 }
 
-create_tlas :: proc(using ctx: ^Vk_Ctx, instances: []lm.Instance, meshes: []lm.Mesh) -> Tlas
+create_tlas :: proc(using ctx: ^lm.Vulkan_Context, instances: []lm.Instance, meshes: []lm.Mesh) -> Tlas
 {
     as: Accel_Structure
 
@@ -2199,7 +1880,7 @@ Tlas :: struct
     instances_buf: Buffer,
 }
 
-get_buffer_device_address :: proc(using ctx: ^Vk_Ctx, buffer: Buffer) -> vk.DeviceAddress
+get_buffer_device_address :: proc(using ctx: ^lm.Vulkan_Context, buffer: Buffer) -> vk.DeviceAddress
 {
     info := vk.BufferDeviceAddressInfo {
         sType = .BUFFER_DEVICE_ADDRESS_INFO,

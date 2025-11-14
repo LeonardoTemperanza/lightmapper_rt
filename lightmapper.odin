@@ -26,14 +26,11 @@ SOFTWARE.
 package lightmapper
 
 import "core:fmt"
-import "core:math"
-import "core:math/rand"
 import "core:math/linalg"
 import intr "base:intrinsics"
 import "core:slice"
 import "core:mem"
 import "core:log"
-import "core:time"
 import "core:sync"
 import "base:runtime"
 import "core:c"
@@ -49,17 +46,6 @@ Context :: struct
     using vk_ctx: Vulkan_Context,
     oidn_device: oidn.Device,
     shaders: Shaders,
-}
-
-Vulkan_Context :: struct
-{
-    phys_device: vk.PhysicalDevice,
-    device: vk.Device,
-    queue: vk.Queue,
-    queue_family_idx: u32,
-    rt_handle_alignment: u32,
-    rt_handle_size: u32,
-    rt_base_align: u32,
 }
 
 // Initialization
@@ -320,6 +306,248 @@ acquire_next_lightmap_view_vk :: proc(using bake: ^Bake) -> View_Info
 
     res.sem = sem
     return res
+}
+
+Vulkan_Context :: struct
+{
+    instance: vk.Instance,
+    debug_messenger: vk.DebugUtilsMessengerEXT,
+    surface: vk.SurfaceKHR,
+
+    phys_device: vk.PhysicalDevice,
+    device: vk.Device,
+    queue: vk.Queue,
+    lm_queue: vk.Queue,
+    queue_family_idx: u32,
+    rt_handle_alignment: u32,
+    rt_handle_size: u32,
+    rt_base_align: u32,
+}
+
+// Utility function, could be used to initialize Vulkan
+// with all the appropriate extensions for this library.
+init_vk_context :: proc(window: ^sdl.Window) -> Vulkan_Context
+{
+    res: Vulkan_Context
+
+    // Create instance
+    {
+        when ODIN_DEBUG
+        {
+            layers := []cstring {
+                "VK_LAYER_KHRONOS_validation",
+            }
+        }
+        else
+        {
+            layers := []cstring {}
+        }
+
+        count: u32
+        instance_extensions := sdl.Vulkan_GetInstanceExtensions(&count)
+        extensions := slice.concatenate([][]cstring {
+            instance_extensions[:count],
+
+            {
+                vk.EXT_DEBUG_UTILS_EXTENSION_NAME,
+                vk.KHR_WIN32_SURFACE_EXTENSION_NAME,
+            }
+        }, context.temp_allocator)
+
+        debug_messenger_ci := vk.DebugUtilsMessengerCreateInfoEXT {
+            sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+            messageSeverity = { .WARNING, .ERROR },
+            messageType = { .VALIDATION, .PERFORMANCE },
+            pfnUserCallback = vk_debug_callback
+        }
+
+        next: rawptr
+        next = &debug_messenger_ci
+
+        validation_feature := vk.ValidationFeatureEnableEXT.SYNCHRONIZATION_VALIDATION
+        next = &vk.ValidationFeaturesEXT {
+            sType = .VALIDATION_FEATURES_EXT,
+            pNext = next,
+            enabledValidationFeatureCount = 1,
+            pEnabledValidationFeatures = &validation_feature,
+        }
+
+        vk_check(vk.CreateInstance(&{
+            sType = .INSTANCE_CREATE_INFO,
+            pApplicationInfo = &{
+                sType = .APPLICATION_INFO,
+                apiVersion = vk.API_VERSION_1_3,
+            },
+            enabledLayerCount = u32(len(layers)),
+            ppEnabledLayerNames = raw_data(layers),
+            enabledExtensionCount = u32(len(extensions)),
+            ppEnabledExtensionNames = raw_data(extensions),
+            pNext = next,
+        }, nil, &res.instance))
+
+        vk.load_proc_addresses_instance(res.instance)
+        assert(vk.DestroyInstance != nil, "Failed to load Vulkan instance API")
+
+        vk_check(vk.CreateDebugUtilsMessengerEXT(res.instance, &debug_messenger_ci, nil, &res.debug_messenger))
+    }
+
+    // Create surface
+    {
+        ok_s := sdl.Vulkan_CreateSurface(window, res.instance, nil, &res.surface)
+        if !ok_s do fatal_error("Could not create vulkan surface.")
+    }
+
+    // Physical device
+    phys_device_count: u32
+    vk_check(vk.EnumeratePhysicalDevices(res.instance, &phys_device_count, nil))
+    if phys_device_count == 0 do fatal_error("Did not find any GPUs!")
+    phys_devices := make([]vk.PhysicalDevice, phys_device_count, context.temp_allocator)
+    vk_check(vk.EnumeratePhysicalDevices(res.instance, &phys_device_count, raw_data(phys_devices)))
+
+    chosen_phys_device: vk.PhysicalDevice
+    queue_family_idx: u32
+    found := false
+    device_loop: for candidate in phys_devices
+    {
+        queue_family_count: u32
+        vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, nil)
+        queue_families := make([]vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
+        vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, raw_data(queue_families))
+
+        for family, i in queue_families
+        {
+            supports_graphics := .GRAPHICS in family.queueFlags
+            supports_present: b32
+            vk_check(vk.GetPhysicalDeviceSurfaceSupportKHR(candidate, u32(i), res.surface, &supports_present))
+
+            if supports_graphics && supports_present
+            {
+                chosen_phys_device = candidate
+                queue_family_idx = u32(i)
+                found = true
+                break device_loop
+            }
+        }
+    }
+
+    if !found do fatal_error("Could not find suitable GPU.")
+
+    res.phys_device = chosen_phys_device
+
+    queue_priority := f32(1)
+    queue_create_infos := []vk.DeviceQueueCreateInfo {
+        {
+            sType = .DEVICE_QUEUE_CREATE_INFO,
+            queueFamilyIndex = queue_family_idx,
+            queueCount = 2,
+            pQueuePriorities = &queue_priority,
+        },
+    }
+
+    // Device
+    device_extensions := []cstring {
+        vk.KHR_SWAPCHAIN_EXTENSION_NAME,
+        vk.EXT_SHADER_OBJECT_EXTENSION_NAME,
+        vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        vk.EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,
+        vk.KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME,
+        vk.KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+    }
+
+    next: rawptr
+    next = &vk.PhysicalDeviceVulkan13Features {
+        sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        pNext = next,
+        dynamicRendering = true,
+        synchronization2 = true,
+    }
+    next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
+        sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        pNext = next,
+        shaderObject = true,
+    }
+    next = &vk.PhysicalDeviceDepthClipEnableFeaturesEXT {
+        sType = .PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT,
+        pNext = next,
+        depthClipEnable = true,
+    }
+    next = &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
+        sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+        pNext = next,
+        accelerationStructure = true,
+    }
+    next = &vk.PhysicalDeviceRayTracingPipelineFeaturesKHR {
+        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+        pNext = next,
+        rayTracingPipeline = true,
+    }
+    next = &vk.PhysicalDeviceBufferDeviceAddressFeatures {
+        sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+        pNext = next,
+        bufferDeviceAddress = true,
+    }
+    next = &vk.PhysicalDeviceTimelineSemaphoreFeatures {
+        sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+        pNext = next,
+        timelineSemaphore = true,
+    }
+    next = &vk.PhysicalDeviceFeatures2 {
+        sType = .PHYSICAL_DEVICE_FEATURES_2,
+        pNext = next,
+        features = {
+            geometryShader = true,  // For the tri_idx gbuffer.
+        }
+    }
+    next = &vk.PhysicalDeviceRayTracingPositionFetchFeaturesKHR {
+        sType = .PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR,
+        pNext = next,
+        rayTracingPositionFetch = true,
+    }
+
+    device_ci := vk.DeviceCreateInfo {
+        sType = .DEVICE_CREATE_INFO,
+        pNext = next,
+        queueCreateInfoCount = u32(len(queue_create_infos)),
+        pQueueCreateInfos = raw_data(queue_create_infos),
+        enabledExtensionCount = u32(len(device_extensions)),
+        ppEnabledExtensionNames = raw_data(device_extensions),
+    }
+    vk_check(vk.CreateDevice(chosen_phys_device, &device_ci, nil, &res.device))
+
+    vk.load_proc_addresses_device(res.device)
+    if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
+
+    vk.GetDeviceQueue(res.device, queue_family_idx, 0, &res.queue)
+    vk.GetDeviceQueue(res.device, queue_family_idx, 1, &res.lm_queue)
+
+    // Useful constants
+    {
+        rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
+            sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
+        }
+        properties := vk.PhysicalDeviceProperties2 {
+            sType = .PHYSICAL_DEVICE_PROPERTIES_2,
+            pNext = &rt_properties
+        }
+
+        vk.GetPhysicalDeviceProperties2(chosen_phys_device, &properties)
+
+        res.rt_handle_alignment = rt_properties.shaderGroupHandleAlignment
+        res.rt_base_align       = rt_properties.shaderGroupBaseAlignment
+        res.rt_handle_size      = rt_properties.shaderGroupHandleSize
+    }
+
+    return res
+}
+
+destroy_vk_context :: proc(using vk_ctx: ^Vulkan_Context)
+{
+    defer sdl.Vulkan_DestroySurface(instance, surface, nil)
+    if debug_messenger != 0 do vk.DestroyDebugUtilsMessengerEXT(instance, debug_messenger, nil)
+
+    vk.DestroyInstance(instance, nil)
 }
 
 ///////////////////////////////////
@@ -740,15 +968,6 @@ bake_main :: proc(using bake: ^Bake)
         sync.mutex_lock(debug_mutex0)
         defer sync.mutex_unlock(debug_mutex1)
 
-/*
-        mapped := test_copy_image_to_cpu(&vk_ctx, cmd_buf, lightmap_backbuffer, lightmap_size)
-        oidn.WriteBuffer(oidn_buf, 0, auto_cast (lightmap_size * lightmap_size * 4 * 2), mapped)
-
-        oidn_run_lightmap_filter(oidn_device, oidn_buf, lightmap_size, lightmap_size)
-
-        result_data := oidn.GetBufferData(oidn_buf)
-*/
-
         vk_check(vk.BeginCommandBuffer(cmd_buf, &{
             sType = .COMMAND_BUFFER_BEGIN_INFO,
             flags = { .ONE_TIME_SUBMIT },
@@ -1122,7 +1341,7 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
         vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE if use_conservative_rasterization else nil)
         vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
 
-        for instance, i in scene.instances
+        for instance in scene.instances
         {
             mesh := scene.meshes[instance.mesh_idx]
 
@@ -1429,41 +1648,30 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         vk_check(vk.CreatePipelineLayout(device, &rt_pipeline_layout_ci, nil, &res.rt_pipeline_layout))
     }
 
-    uv_space_vert_code              := #load("shaders/uv_space.vert.spv")
-    gbuffer_world_pos_frag_code     := #load("shaders/gbuffer_world_pos.frag.spv")
-    gbuffer_world_normals_frag_code := #load("shaders/gbuffer_world_normals.frag.spv")
-    gbuffer_tri_idx_frag_code       := #load("shaders/gbuffer_tri_idx.frag.spv")
-    push_samples_raygen_code        := #load("shaders/push_samples.rgen.spv")
-    push_samples_raymiss_code       := #load("shaders/push_samples.rmiss.spv")
-    push_samples_rayhit_code        := #load("shaders/push_samples.rchit.spv")
-    raygen_code                     := #load("shaders/raygen.rgen.spv")
-    raymiss_code                    := #load("shaders/raymiss.rmiss.spv")
-    rayhit_code                     := #load("shaders/rayhit.rchit.spv")
-    dilate_code                     := #load("shaders/dilate.comp.spv")
+    uv_space_vert_code              := #load("shaders/uv_space.vert.spv", []u32)
+    gbuffer_world_pos_frag_code     := #load("shaders/gbuffer_world_pos.frag.spv", []u32)
+    gbuffer_world_normals_frag_code := #load("shaders/gbuffer_world_normals.frag.spv", []u32)
+    gbuffer_tri_idx_frag_code       := #load("shaders/gbuffer_tri_idx.frag.spv", []u32)
+    push_samples_raygen_code        := #load("shaders/push_samples.rgen.spv", []u32)
+    push_samples_raymiss_code       := #load("shaders/push_samples.rmiss.spv", []u32)
+    push_samples_rayhit_code        := #load("shaders/push_samples.rchit.spv", []u32)
+    raygen_code                     := #load("shaders/raygen.rgen.spv", []u32)
+    raymiss_code                    := #load("shaders/raymiss.rmiss.spv", []u32)
+    rayhit_code                     := #load("shaders/rayhit.rchit.spv", []u32)
+    dilate_code                     := #load("shaders/dilate.comp.spv", []u32)
 
-    // NOTE: #load(<string-path>, <type>) produces unaligned reads and writes (https://github.com/odin-lang/Odin/issues/5771)
-    uv_space_vert_code_aligned: []byte = mem.make_aligned([]byte, len(uv_space_vert_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(uv_space_vert_code_aligned), raw_data(uv_space_vert_code), len(uv_space_vert_code))
-    gbuffer_world_pos_frag_code_aligned: []byte = mem.make_aligned([]byte, len(gbuffer_world_pos_frag_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(gbuffer_world_pos_frag_code_aligned), raw_data(gbuffer_world_pos_frag_code), len(gbuffer_world_pos_frag_code))
-    gbuffer_world_normals_frag_code_aligned: []byte = mem.make_aligned([]byte, len(gbuffer_world_normals_frag_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(gbuffer_world_normals_frag_code_aligned), raw_data(gbuffer_world_normals_frag_code), len(gbuffer_world_normals_frag_code))
-    gbuffer_tri_idx_frag_code_aligned: []byte = mem.make_aligned([]byte, len(gbuffer_tri_idx_frag_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(gbuffer_tri_idx_frag_code_aligned), raw_data(gbuffer_tri_idx_frag_code), len(gbuffer_world_normals_frag_code))
-    push_samples_raygen_code_aligned: []byte = mem.make_aligned([]byte, len(push_samples_raygen_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(push_samples_raygen_code_aligned), raw_data(push_samples_raygen_code), len(push_samples_raygen_code))
-    push_samples_raymiss_code_aligned: []byte = mem.make_aligned([]byte, len(push_samples_raymiss_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(push_samples_raymiss_code_aligned), raw_data(push_samples_raymiss_code), len(push_samples_raymiss_code))
-    push_samples_rayhit_code_aligned: []byte = mem.make_aligned([]byte, len(push_samples_rayhit_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(push_samples_rayhit_code_aligned), raw_data(push_samples_rayhit_code), len(push_samples_rayhit_code))
-    raygen_code_aligned: []byte = mem.make_aligned([]byte, len(raygen_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(raygen_code_aligned), raw_data(raygen_code), len(raygen_code))
-    raymiss_code_aligned: []byte = mem.make_aligned([]byte, len(raymiss_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(raymiss_code_aligned), raw_data(raymiss_code), len(raymiss_code))
-    rayhit_code_aligned: []byte = mem.make_aligned([]byte, len(rayhit_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(rayhit_code_aligned), raw_data(rayhit_code), len(rayhit_code))
-    dilate_code_aligned: []byte = mem.make_aligned([]byte, len(dilate_code), 4, context.temp_allocator) or_else panic("failed to align mesh shader bytecode")
-    mem.copy(raw_data(dilate_code_aligned), raw_data(dilate_code), len(dilate_code))
+    // NOTE: #load(<string-path>, <type>) used to produce unaligned reads and writes (https://github.com/odin-lang/Odin/issues/5771)
+    ensure(uintptr(raw_data(uv_space_vert_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(gbuffer_world_pos_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(gbuffer_world_normals_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(gbuffer_tri_idx_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(push_samples_raygen_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(push_samples_raymiss_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(push_samples_rayhit_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(raygen_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(raymiss_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(rayhit_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(dilate_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
 
     // Create shader objects.
     {
@@ -1471,8 +1679,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
-                codeSize = len(uv_space_vert_code_aligned) * size_of(uv_space_vert_code_aligned[0]),
-                pCode = raw_data(uv_space_vert_code_aligned),
+                codeSize = len(uv_space_vert_code) * size_of(uv_space_vert_code[0]),
+                pCode = raw_data(uv_space_vert_code),
                 pName = "main",
                 stage = { .VERTEX },
                 nextStage = { .FRAGMENT },
@@ -1483,8 +1691,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
-                codeSize = len(gbuffer_world_pos_frag_code_aligned) * size_of(gbuffer_world_pos_frag_code_aligned[0]),
-                pCode = raw_data(gbuffer_world_pos_frag_code_aligned),
+                codeSize = len(gbuffer_world_pos_frag_code) * size_of(gbuffer_world_pos_frag_code[0]),
+                pCode = raw_data(gbuffer_world_pos_frag_code),
                 pName = "main",
                 stage = { .FRAGMENT },
                 flags = { },
@@ -1494,8 +1702,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
-                codeSize = len(gbuffer_world_normals_frag_code_aligned) * size_of(gbuffer_world_normals_frag_code_aligned[0]),
-                pCode = raw_data(gbuffer_world_normals_frag_code_aligned),
+                codeSize = len(gbuffer_world_normals_frag_code) * size_of(gbuffer_world_normals_frag_code[0]),
+                pCode = raw_data(gbuffer_world_normals_frag_code),
                 pName = "main",
                 stage = { .FRAGMENT },
                 flags = { },
@@ -1505,8 +1713,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
-                codeSize = len(gbuffer_tri_idx_frag_code_aligned) * size_of(gbuffer_tri_idx_frag_code_aligned[0]),
-                pCode = raw_data(gbuffer_tri_idx_frag_code_aligned),
+                codeSize = len(gbuffer_tri_idx_frag_code) * size_of(gbuffer_tri_idx_frag_code[0]),
+                pCode = raw_data(gbuffer_tri_idx_frag_code),
                 pName = "main",
                 stage = { .FRAGMENT },
                 flags = { },
@@ -1516,8 +1724,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
             {
                 sType = .SHADER_CREATE_INFO_EXT,
                 codeType = .SPIRV,
-                codeSize = len(dilate_code_aligned) * size_of(dilate_code_aligned[0]),
-                pCode = raw_data(dilate_code_aligned),
+                codeSize = len(dilate_code) * size_of(dilate_code[0]),
+                pCode = raw_data(dilate_code),
                 pName = "main",
                 stage = { .COMPUTE },
                 flags = { },
@@ -1552,8 +1760,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         shader_module_ci := vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             flags = {},
-            codeSize = len(push_samples_raygen_code_aligned) * size_of(push_samples_raygen_code_aligned[0]),
-            pCode = auto_cast raw_data(push_samples_raygen_code_aligned),
+            codeSize = len(push_samples_raygen_code) * size_of(push_samples_raygen_code[0]),
+            pCode = auto_cast raw_data(push_samples_raygen_code),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_raygen_shader))
     }
@@ -1561,8 +1769,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         shader_module_ci := vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             flags = {},
-            codeSize = len(push_samples_raymiss_code_aligned) * size_of(push_samples_raymiss_code_aligned[0]),
-            pCode = auto_cast raw_data(push_samples_raymiss_code_aligned),
+            codeSize = len(push_samples_raymiss_code) * size_of(push_samples_raymiss_code[0]),
+            pCode = auto_cast raw_data(push_samples_raymiss_code),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_raymiss_shader))
     }
@@ -1570,8 +1778,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         shader_module_ci := vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             flags = {},
-            codeSize = len(push_samples_rayhit_code_aligned) * size_of(push_samples_rayhit_code_aligned[0]),
-            pCode = auto_cast raw_data(push_samples_rayhit_code_aligned),
+            codeSize = len(push_samples_rayhit_code) * size_of(push_samples_rayhit_code[0]),
+            pCode = auto_cast raw_data(push_samples_rayhit_code),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_rayhit_shader))
     }
@@ -1580,8 +1788,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         shader_module_ci := vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             flags = {},
-            codeSize = len(raygen_code_aligned) * size_of(raygen_code_aligned[0]),
-            pCode = auto_cast raw_data(raygen_code_aligned),
+            codeSize = len(raygen_code) * size_of(raygen_code[0]),
+            pCode = auto_cast raw_data(raygen_code),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raygen_shader))
     }
@@ -1589,8 +1797,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         shader_module_ci := vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             flags = {},
-            codeSize = len(raymiss_code_aligned) * size_of(raymiss_code_aligned[0]),
-            pCode = auto_cast raw_data(raymiss_code_aligned),
+            codeSize = len(raymiss_code) * size_of(raymiss_code[0]),
+            pCode = auto_cast raw_data(raymiss_code),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raymiss_shader))
     }
@@ -1598,8 +1806,8 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
         shader_module_ci := vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             flags = {},
-            codeSize = len(rayhit_code_aligned) * size_of(rayhit_code_aligned[0]),
-            pCode = auto_cast raw_data(rayhit_code_aligned),
+            codeSize = len(rayhit_code) * size_of(rayhit_code[0]),
+            pCode = auto_cast raw_data(rayhit_code),
         }
         vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &rayhit_shader))
     }
@@ -1851,6 +2059,7 @@ Image :: struct
     view: vk.ImageView,
     width: u32,
     height: u32,
+    layout: vk.ImageLayout,
 }
 
 create_image :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo, name := "") -> Image
@@ -1931,6 +2140,8 @@ create_image :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo, name := "") ->
         }
         vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
         vk_check(vk.QueueWaitIdle(queue))
+
+        res.layout = .GENERAL
     }
 
     // Create view
@@ -2132,207 +2343,6 @@ find_mem_type :: proc(using ctx: ^Vulkan_Context, type_filter: u32, properties: 
 
     panic("Vulkan Error: Could not find suitable memory type!")
 }
-/*
-create_instance :: proc() -> (vk.Instance, vk.DebugUtilsMessengerEXT)
-{
-    when ODIN_DEBUG
-    {
-        layers := []cstring {
-            "VK_LAYER_KHRONOS_validation",
-        }
-    }
-    else
-    {
-        layers := []cstring {}
-    }
-
-    count: u32
-    instance_extensions := sdl.Vulkan_GetInstanceExtensions(&count)
-    extensions := slice.concatenate([][]cstring {
-        instance_extensions[:count],
-
-        {
-            vk.EXT_DEBUG_UTILS_EXTENSION_NAME,
-            vk.KHR_WIN32_SURFACE_EXTENSION_NAME,
-        }
-    }, context.temp_allocator)
-
-    debug_messenger_ci := vk.DebugUtilsMessengerCreateInfoEXT {
-        sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-        messageSeverity = { .WARNING, .ERROR },
-        messageType = { .VALIDATION, .PERFORMANCE },
-        pfnUserCallback = vk_debug_callback
-    }
-
-    next: rawptr
-    next = &debug_messenger_ci
-
-    instance: vk.Instance
-    vk_check(vk.CreateInstance(&{
-        sType = .INSTANCE_CREATE_INFO,
-        pApplicationInfo = &{
-            sType = .APPLICATION_INFO,
-            apiVersion = vk.API_VERSION_1_3,
-        },
-        enabledLayerCount = u32(len(layers)),
-        ppEnabledLayerNames = raw_data(layers),
-        enabledExtensionCount = u32(len(extensions)),
-        ppEnabledExtensionNames = raw_data(extensions),
-        pNext = next,
-    }, nil, &instance))
-
-    vk.load_proc_addresses_instance(instance)
-    assert(vk.DestroyInstance != nil, "Failed to load Vulkan instance API")
-
-    debug_messenger: vk.DebugUtilsMessengerEXT
-    vk_check(vk.CreateDebugUtilsMessengerEXT(instance, &debug_messenger_ci, nil, &debug_messenger))
-
-    return instance, debug_messenger
-}
-
-create_ctx :: proc(instance: vk.Instance, surface: vk.SurfaceKHR) -> Vulkan_Context
-{
-    phys_device_count: u32
-    vk_check(vk.EnumeratePhysicalDevices(instance, &phys_device_count, nil))
-    if phys_device_count == 0 do fatal_error("Did not find any GPUs!")
-    phys_devices := make([]vk.PhysicalDevice, phys_device_count, context.temp_allocator)
-    vk_check(vk.EnumeratePhysicalDevices(instance, &phys_device_count, raw_data(phys_devices)))
-
-    chosen_phys_device: vk.PhysicalDevice
-    queue_family_idx: u32
-    found := false
-    device_loop: for candidate in phys_devices
-    {
-        queue_family_count: u32
-        vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, nil)
-        queue_families := make([]vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
-        vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, raw_data(queue_families))
-
-        for family, i in queue_families
-        {
-            supports_graphics := .GRAPHICS in family.queueFlags
-            supports_present: b32
-            vk_check(vk.GetPhysicalDeviceSurfaceSupportKHR(candidate, u32(i), surface, &supports_present))
-
-            if supports_graphics && supports_present
-            {
-                chosen_phys_device = candidate
-                queue_family_idx = u32(i)
-                found = true
-                break device_loop
-            }
-        }
-    }
-
-    if !found do fatal_error("Could not find suitable GPU.")
-
-    queue_priority := f32(1)
-    queue_create_infos := []vk.DeviceQueueCreateInfo {
-        {
-            sType = .DEVICE_QUEUE_CREATE_INFO,
-            queueFamilyIndex = queue_family_idx,
-            queueCount = 1,
-            pQueuePriorities = &queue_priority,
-        },
-    }
-
-    device_extensions := []cstring {
-        vk.KHR_SWAPCHAIN_EXTENSION_NAME,
-        vk.EXT_SHADER_OBJECT_EXTENSION_NAME,
-        vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-        vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-        vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-        vk.EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,
-    }
-
-    next: rawptr
-    next = &vk.PhysicalDeviceVulkan13Features {
-        sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        pNext = next,
-        dynamicRendering = true,
-        synchronization2 = true,
-    }
-    next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
-        pNext = next,
-        shaderObject = true,
-    }
-    next = &vk.PhysicalDeviceDepthClipEnableFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT,
-        pNext = next,
-        depthClipEnable = true,
-    }
-    next = &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
-        sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
-        pNext = next,
-        accelerationStructure = true,
-    }
-    next = &vk.PhysicalDeviceRayTracingPipelineFeaturesKHR {
-        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
-        pNext = next,
-        rayTracingPipeline = true,
-    }
-    next = &vk.PhysicalDeviceBufferDeviceAddressFeatures {
-        sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
-        pNext = next,
-        bufferDeviceAddress = true,
-    }
-    next = &vk.PhysicalDeviceFeatures2 {
-        sType = .PHYSICAL_DEVICE_FEATURES_2,
-        pNext = next,
-        features = {
-            geometryShader = true,  // For the tri_idx gbuffer.
-        }
-    }
-
-    device_ci := vk.DeviceCreateInfo {
-        sType = .DEVICE_CREATE_INFO,
-        pNext = next,
-        queueCreateInfoCount = u32(len(queue_create_infos)),
-        pQueueCreateInfos = raw_data(queue_create_infos),
-        enabledExtensionCount = u32(len(device_extensions)),
-        ppEnabledExtensionNames = raw_data(device_extensions),
-    }
-    device: vk.Device
-    vk_check(vk.CreateDevice(chosen_phys_device, &device_ci, nil, &device))
-
-    vk.load_proc_addresses_device(device)
-    if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
-
-    queue: vk.Queue
-    vk.GetDeviceQueue(device, queue_family_idx, 0, &queue)
-
-    // Useful constants
-    rt_handle_alignment: u32
-    rt_base_align: u32
-    rt_handle_size: u32
-    {
-        rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
-            sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
-        }
-        properties := vk.PhysicalDeviceProperties2 {
-            sType = .PHYSICAL_DEVICE_PROPERTIES_2,
-            pNext = &rt_properties
-        }
-
-        vk.GetPhysicalDeviceProperties2(chosen_phys_device, &properties)
-
-        rt_handle_alignment = rt_properties.shaderGroupHandleAlignment
-        rt_base_align       = rt_properties.shaderGroupBaseAlignment
-        rt_handle_size      = rt_properties.shaderGroupHandleSize
-    }
-
-    return {
-        phys_device = chosen_phys_device,
-        device = device,
-        queue = queue,
-        queue_family_idx = queue_family_idx,
-        rt_handle_alignment = rt_handle_alignment,
-        rt_base_align = rt_base_align,
-        rt_handle_size = rt_handle_size,
-    }
-}
-*/
 
 get_buffer_device_address :: proc(device: vk.Device, buffer: Buffer) -> vk.DeviceAddress
 {
@@ -2865,4 +2875,32 @@ test_copy_buffer_to_cpu :: proc(using vk_ctx: ^Vulkan_Context, buf: Buffer) -> r
 create_staging_buffer :: proc(using vk_ctx: ^Vulkan_Context, size: u32) -> Buffer
 {
     return create_buffer(vk_ctx, size, { .TRANSFER_SRC, .TRANSFER_DST }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
+}
+
+image_safe_slow_barrier :: proc(image: ^Image, cmd_buf: vk.CommandBuffer, new_layout: vk.ImageLayout)
+{
+    barrier := []vk.ImageMemoryBarrier2 {
+        {
+            sType = .IMAGE_MEMORY_BARRIER_2,
+            image = image.img,
+            subresourceRange = {
+                aspectMask = { .COLOR },
+                levelCount = 1,
+                layerCount = 1,
+            },
+            oldLayout = image.layout,
+            newLayout = new_layout,
+            srcStageMask = { .ALL_COMMANDS },
+            srcAccessMask = { .MEMORY_WRITE },
+            dstStageMask = { .ALL_COMMANDS },
+            dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
+        },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        imageMemoryBarrierCount = u32(len(barrier)),
+        pImageMemoryBarriers = raw_data(barrier),
+    })
+
+    image.layout = new_layout
 }

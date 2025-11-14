@@ -2,13 +2,9 @@
 package main
 
 import "core:fmt"
-import "core:log"
 import "core:math/linalg"
 import "core:math"
-import "core:mem"
 import "core:c"
-import sdl "vendor:sdl3"
-import vk "vendor:vulkan"
 import stbrp "vendor:stb/rect_pack"
 import lm "../"
 
@@ -18,7 +14,7 @@ LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 50
 LIGHTMAP_MIN_INSTANCE_TEXELS :: 64
 LIGHTMAP_MAX_INSTANCE_TEXELS :: 1024
 
-load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> lm.Scene
+load_scene_fbx :: proc(using ctx: ^lm.Vulkan_Context, path: cstring) -> lm.Scene
 {
     // Load the .fbx file
     opts := ufbx.Load_Opts {
@@ -51,9 +47,9 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> lm.Scene
         index_count := 3 * fbx_mesh.num_triangles
         indices := make([dynamic]u32, index_count)
         offset := u32(0)
-        for i in 0..<fbx_mesh.faces.count
+        for j in 0..<fbx_mesh.faces.count
         {
-            face := fbx_mesh.faces.data[i]
+            face := fbx_mesh.faces.data[j]
             num_tris := ufbx.catch_triangulate_face(nil, &indices[offset], uint(index_count), fbx_mesh, face)
             offset += 3 * num_tris
         }
@@ -64,9 +60,9 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> lm.Scene
         // NOTE: uv_set[0] is the same as fbx_mesh.vertex_uv
         // Find the lightmap UVs
         lightmap_uv_idx := -1
-        for i in 0..<fbx_mesh.uv_sets.count
+        for j in 0..<fbx_mesh.uv_sets.count
         {
-            uv_set := fbx_mesh.uv_sets.data[i]
+            uv_set := fbx_mesh.uv_sets.data[j]
             if uv_set.name.data == "LightMapUV" {
                 lightmap_uv_idx = int(uv_set.index)
             }
@@ -77,19 +73,19 @@ load_scene_fbx :: proc(using ctx: ^Vk_Ctx, path: cstring) -> lm.Scene
         pos_buf := make([dynamic][3]f32, vertex_count)
         normals_buf := make([][3]f32, vertex_count, allocator = context.temp_allocator)
         lm_uvs_buf := make([][2]f32, vertex_count, allocator = context.temp_allocator)
-        for i in 0..<vertex_count
+        for j in 0..<vertex_count
         {
-            assert(i < fbx_mesh.vertex_position.indices.count)
-            assert(fbx_mesh.vertex_position.indices.data[i] < u32(fbx_mesh.vertex_position.values.count))
+            assert(j < fbx_mesh.vertex_position.indices.count)
+            assert(fbx_mesh.vertex_position.indices.data[j] < u32(fbx_mesh.vertex_position.values.count))
 
-            pos := fbx_mesh.vertex_position.values.data[fbx_mesh.vertex_position.indices.data[i]]
-            norm := fbx_mesh.vertex_normal.values.data[fbx_mesh.vertex_normal.indices.data[i]]
-            pos_buf[i] = {f32(pos.x), f32(pos.y), f32(pos.z)}
-            normals_buf[i] = {f32(norm.x), f32(norm.y), f32(norm.z)}
+            pos := fbx_mesh.vertex_position.values.data[fbx_mesh.vertex_position.indices.data[j]]
+            norm := fbx_mesh.vertex_normal.values.data[fbx_mesh.vertex_normal.indices.data[j]]
+            pos_buf[j] = {f32(pos.x), f32(pos.y), f32(pos.z)}
+            normals_buf[j] = {f32(norm.x), f32(norm.y), f32(norm.z)}
             if lightmap_uv_idx != -1 {
                 uv_set := fbx_mesh.uv_sets.data[lightmap_uv_idx]
-                lm_uv := uv_set.vertex_uv.values.data[uv_set.vertex_uv.indices.data[i]]
-                lm_uvs_buf[i] = {f32(lm_uv.x), f32(lm_uv.y)}
+                lm_uv := uv_set.vertex_uv.values.data[uv_set.vertex_uv.indices.data[j]]
+                lm_uvs_buf[j] = {f32(lm_uv.x), f32(lm_uv.y)}
             }
         }
 
