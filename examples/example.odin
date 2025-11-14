@@ -1063,6 +1063,7 @@ Image :: struct
     view: vk.ImageView,
     width: u32,
     height: u32,
+    layout: vk.ImageLayout,
 }
 
 create_buffer :: proc(using ctx: ^lm.Vulkan_Context, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
@@ -1228,6 +1229,8 @@ create_image :: proc(using ctx: ^lm.Vulkan_Context, ci: vk.ImageCreateInfo, name
         })
 
         vk_check(vk.EndCommandBuffer(cmd_buf))
+
+        res.layout = .GENERAL
     }
 
     // Create view
@@ -1890,4 +1893,32 @@ v3_to_v4 :: proc(v: [3]f32, w: Maybe(f32) = nil) -> (res: [4]f32)
         res.w = num
     }
     return
+}
+
+image_barrier_safe_slow :: proc(image: ^Image, cmd_buf: vk.CommandBuffer, new_layout: vk.ImageLayout)
+{
+    barrier := []vk.ImageMemoryBarrier2 {
+        {
+            sType = .IMAGE_MEMORY_BARRIER_2,
+            image = image.img,
+            subresourceRange = {
+                aspectMask = { .COLOR },
+                levelCount = 1,
+                layerCount = 1,
+            },
+            oldLayout = image.layout,
+            newLayout = new_layout,
+            srcStageMask = { .ALL_COMMANDS },
+            srcAccessMask = { .MEMORY_WRITE },
+            dstStageMask = { .ALL_COMMANDS },
+            dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
+        },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        imageMemoryBarrierCount = u32(len(barrier)),
+        pImageMemoryBarriers = raw_data(barrier),
+    })
+
+    image.layout = new_layout
 }

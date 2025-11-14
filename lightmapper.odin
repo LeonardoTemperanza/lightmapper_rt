@@ -39,6 +39,7 @@ import thr "core:thread"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
+import vku "vk_utils"
 import oidn "oidn_odin_bindings"
 
 Context :: struct
@@ -684,7 +685,6 @@ bake_main :: proc(using bake: ^Bake)
         flags = { .ONE_TIME_SUBMIT },
     }))
 
-    // GBuffers
     render_gbuffers(bake, cmd_buf, &gbufs, rt_desc_set)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
@@ -705,6 +705,7 @@ bake_main :: proc(using bake: ^Bake)
     oidn.SetFilterImage(filter, "color", oidn_buf, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
     oidn.SetFilterImage(filter, "output", oidn_buf, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
     oidn.CommitFilter(filter)
+    oidn_check(oidn_device)
 
     vk_check(vk.WaitForFences(vk_ctx.device, 1, &fence, true, max(u64)))
     vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
@@ -2260,14 +2261,6 @@ create_geometries_buffer :: proc(using ctx: ^Vulkan_Context, geoms: []Geometry) 
     return res
 }
 
-vk_check :: proc(result: vk.Result, location := #caller_location)
-{
-    if result != .SUCCESS
-    {
-        fatal_error("Vulkan failure: %", result, location = location)
-    }
-}
-
 fatal_error :: proc(fmt: string, args: ..any, location := #caller_location)
 {
     when ODIN_DEBUG {
@@ -2356,17 +2349,14 @@ oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf
 
 oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter)
 {
-    msg: cstring
-    if oidn.GetDeviceError(device, &msg) != .NONE
-    {
-        log.error(msg)
-        panic("")
-    }
-
     oidn.ExecuteFilter(filter)
     oidn.SyncDevice(device)
+    oidn_check(device)
+}
 
-    msg = {}
+oidn_check :: proc(device: oidn.Device)
+{
+    msg: cstring
     if oidn.GetDeviceError(device, &msg) != .NONE
     {
         log.error(msg)
@@ -2628,4 +2618,11 @@ image_barrier_safe_slow :: proc(image: ^Image, cmd_buf: vk.CommandBuffer, new_la
     })
 
     image.layout = new_layout
+}
+
+vk_check :: proc(result: vk.Result, location := #caller_location)
+{
+    if result != .SUCCESS {
+        fatal_error("Vulkan failure: %", result, location = location)
+    }
 }
