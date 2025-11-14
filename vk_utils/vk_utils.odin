@@ -89,9 +89,37 @@ copy_buffer :: proc(cmd_buf: vk.CommandBuffer, src: Buffer, dst: Buffer, size: v
     memory_barrier_safe_slow(cmd_buf)
 }
 
-upload_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, buf: []byte) -> Buffer
+upload_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf: vk.CommandBuffer, buf: []byte, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
 {
-    return {}
+    size := u32(len(buf))
+
+    staging_buf_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
+    staging_buf_properties := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
+    staging_buf := create_buffer(device, phys_device, size, staging_buf_usage, staging_buf_properties, {})
+    defer destroy_buffer(device, &staging_buf)
+
+    data: rawptr
+    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
+    mem.copy(data, raw_data(buf), cast(int) size)
+    vk.UnmapMemory(device, staging_buf.mem)
+
+    res := create_buffer(device, phys_device, size, usage, properties, allocate_flags)
+    copy_buffer(cmd_buf, staging_buf, res, vk.DeviceSize(size))
+
+    barrier := vk.MemoryBarrier2 {
+        sType = .MEMORY_BARRIER_2,
+        srcStageMask = { .TRANSFER },
+        srcAccessMask = { .TRANSFER_WRITE },
+        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR, .VERTEX_INPUT },
+        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR, .VERTEX_ATTRIBUTE_READ },
+    }
+    vk.CmdPipelineBarrier2(cmd_buf, &{
+        sType = .DEPENDENCY_INFO,
+        memoryBarrierCount = 1,
+        pMemoryBarriers = &barrier,
+    })
+
+    return res
 }
 
 destroy_buffer :: proc(device: vk.Device, buf: ^Buffer)

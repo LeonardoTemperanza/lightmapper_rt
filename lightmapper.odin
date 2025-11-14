@@ -682,15 +682,17 @@ bake_main :: proc(using bake: ^Bake)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
-    wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        pWaitDstStageMask = &wait_stage_flags,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
+    {
+        wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
+        submit_info := vk.SubmitInfo {
+            sType = .SUBMIT_INFO,
+            pWaitDstStageMask = &wait_stage_flags,
+            commandBufferCount = 1,
+            pCommandBuffers = &cmd_buf,
+        }
+        vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
+        vk_check(vk.QueueWaitIdle(vk_ctx.queue))
     }
-    vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
 
     vk_external_buf = create_vk_external_buffer_for_oidn(&vk_ctx, lightmap_size * lightmap_size * 2 * 4)  // TODO: Replace 4 with channels size?
     oidn_buf = oidn_shared_buffer_from_vk_buffer(oidn_device, vk_external_buf)
@@ -725,7 +727,7 @@ bake_main :: proc(using bake: ^Bake)
         images := [2]^Image { &lightmap, &lightmap_backbuffer }
         src_idx := 0
         dst_idx := 1
-        for dilate_iter in 0..<1
+        for _ in 0..<1
         {
             src_image := images[src_idx]
             dst_image := images[dst_idx]
@@ -1148,17 +1150,7 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
 
 push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: ^GBuffers, rt_desc_set: vk.DescriptorSet)
 {
-    rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
-        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
-    }
-    properties := vk.PhysicalDeviceProperties2 {
-        sType = .PHYSICAL_DEVICE_PROPERTIES_2,
-        pNext = &rt_properties
-    }
-    vk.GetPhysicalDeviceProperties2(vk_ctx.phys_device, &properties)
-    rt_handle_alignment := rt_properties.shaderGroupHandleAlignment
-    rt_base_align       := rt_properties.shaderGroupBaseAlignment
-    rt_handle_size      := rt_properties.shaderGroupHandleSize
+    rt_info := vku.get_rt_info(vk_ctx.phys_device)
 
     vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.push_samples_pipeline)
 
@@ -1168,19 +1160,19 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
     sbt_addr := u64(get_buffer_device_address(device, shaders.push_samples_sbt_buf))
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_base_align)),
-        stride = vk.DeviceSize(rt_handle_alignment),
-        size = vk.DeviceSize(rt_handle_alignment),
+        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),
+        stride = vk.DeviceSize(rt_info.handle_alignment),
+        size = vk.DeviceSize(rt_info.handle_alignment),
     }
     raymiss_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_base_align)),
-        stride = vk.DeviceSize(rt_handle_alignment),
-        size = vk.DeviceSize(rt_handle_alignment),
+        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_info.base_align)),
+        stride = vk.DeviceSize(rt_info.handle_alignment),
+        size = vk.DeviceSize(rt_info.handle_alignment),
     }
     rayhit_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_base_align)),
-        stride = vk.DeviceSize(rt_handle_alignment),
-        size = vk.DeviceSize(rt_handle_alignment),
+        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_info.base_align)),
+        stride = vk.DeviceSize(rt_info.handle_alignment),
+        size = vk.DeviceSize(rt_info.handle_alignment),
     }
     callable_region := vk.StridedDeviceAddressRegionKHR {}
 

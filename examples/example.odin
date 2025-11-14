@@ -36,6 +36,8 @@ import "core:c"
 import os "core:os"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
+
+import vku "../vk_utils"
 import lm "../"
 
 NUM_FRAMES_IN_FLIGHT :: 1
