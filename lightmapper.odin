@@ -738,10 +738,6 @@ bake_main :: proc(using bake: ^Bake)
             flags = { .ONE_TIME_SUBMIT },
         }))
 
-        //image_barrier_safe_slow(&gbufs.world_pos, cmd_buf, .GENERAL)
-        //image_barrier_safe_slow(&gbufs.world_normals, cmd_buf, .GENERAL)
-        //image_barrier_safe_slow(&lightmap, cmd_buf, .GENERAL)
-
         pathtrace_iter(bake, cmd_buf, rt_desc_set, iter)
 
         image_barrier_safe_slow(&lightmap, cmd_buf, .GENERAL)
@@ -923,47 +919,6 @@ bake_main :: proc(using bake: ^Bake)
 
 render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: ^GBuffers, rt_desc_set: vk.DescriptorSet)
 {
-    // GBuffers barriers
-    {
-        gbufs_barriers := []vk.ImageMemoryBarrier2 {
-            {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                image = gbuffers.world_pos.img,
-                subresourceRange = {
-                    aspectMask = { .COLOR },
-                    levelCount = 1,
-                    layerCount = 1,
-                },
-                oldLayout = .UNDEFINED,
-                newLayout = .GENERAL,
-                srcStageMask = { .ALL_COMMANDS },
-                srcAccessMask = { .MEMORY_WRITE },
-                dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                dstAccessMask = { .COLOR_ATTACHMENT_WRITE },
-            },
-            {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                image = gbuffers.world_normals.img,
-                subresourceRange = {
-                    aspectMask = { .COLOR },
-                    levelCount = 1,
-                    layerCount = 1,
-                },
-                oldLayout = .UNDEFINED,
-                newLayout = .GENERAL,
-                srcStageMask = { .ALL_COMMANDS },
-                srcAccessMask = { .MEMORY_WRITE },
-                dstStageMask = { .ALL_COMMANDS },
-                dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
-            },
-        }
-        vk.CmdPipelineBarrier2(cmd_buf, &{
-            sType = .DEPENDENCY_INFO,
-            imageMemoryBarrierCount = u32(len(gbufs_barriers)),
-            pImageMemoryBarriers = raw_data(gbufs_barriers),
-        })
-    }
-
     vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
         {  // Positions
             sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
@@ -1241,32 +1196,6 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
 
     image_barrier_safe_slow(&gbuffers.world_pos, cmd_buf, .GENERAL)
-
-    // world_pos gbuffer barrier
-    {
-        worldpos_barrier := []vk.ImageMemoryBarrier2 {
-            {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                image = gbuffers.world_pos.img,
-                subresourceRange = {
-                    aspectMask = { .COLOR },
-                    levelCount = 1,
-                    layerCount = 1,
-                },
-                oldLayout = .GENERAL,
-                newLayout = .GENERAL,
-                srcStageMask = { .ALL_COMMANDS },
-                srcAccessMask = { .MEMORY_WRITE },
-                dstStageMask = { .ALL_COMMANDS },
-                dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
-            },
-        }
-        vk.CmdPipelineBarrier2(cmd_buf, &{
-            sType = .DEPENDENCY_INFO,
-            imageMemoryBarrierCount = u32(len(worldpos_barrier)),
-            pImageMemoryBarriers = raw_data(worldpos_barrier),
-        })
-    }
 }
 
 pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, rt_desc_set: vk.DescriptorSet, accum_counter: u32)
