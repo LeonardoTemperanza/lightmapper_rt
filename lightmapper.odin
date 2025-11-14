@@ -92,21 +92,6 @@ Scene :: struct
     tlas: Tlas,
 }
 
-/*
-Scene :: union
-{
-    Scene_Vulkan,
-    Scene_CPU
-}
-*/
-
-/*
-Scene_Vulkan :: struct
-{
-    instances:
-}
-*/
-
 Instance :: struct
 {
     transform: matrix[4, 4]f32,
@@ -2364,7 +2349,7 @@ oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf
     }
     else when ODIN_OS == .Linux
     {
-        return oidn.NewSharedBufferFromFD(device, { .OPAQUE_WIN32 }, buf.linux_handle, buf.buf.size)
+        return oidn.NewSharedBufferFromFD(device, { .OPAQUE_FD }, buf.linux_handle, buf.buf.size)
     }
     else do #panic("Unsupported OS.")
 }
