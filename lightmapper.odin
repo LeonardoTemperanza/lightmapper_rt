@@ -172,6 +172,7 @@ Bake :: struct
     // OIDN Resources
     oidn_buf: oidn.Buffer,
     vk_external_buf: External_Buf,
+    filter: oidn.Filter,
 
     // Synchronization counters
     submission_counter: u64,
@@ -283,6 +284,9 @@ cleanup_bake :: proc(using bake: ^Bake)
 {
     free(mutex)
     free(bake)
+
+    // Free vulkan resources
+    // Free OIDN resources
 }
 
 // Semaphore is owned by this library and shouldn't be destroyed.
@@ -712,6 +716,10 @@ bake_main :: proc(using bake: ^Bake)
 
     vk_external_buf = create_vk_external_buffer_for_oidn(&vk_ctx, lightmap_size * lightmap_size * 2 * 4)  // TODO: Replace 4 with channels size?
     oidn_buf = oidn_shared_buffer_from_vk_buffer(oidn_device, vk_external_buf)
+    filter = oidn.NewFilter(oidn_device, "RTLightmap")
+    oidn.SetFilterImage(filter, "color", oidn_buf, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
+    oidn.SetFilterImage(filter, "output", oidn_buf, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
+    oidn.CommitFilter(filter)
 
     vk_check(vk.WaitForFences(vk_ctx.device, 1, &fence, true, max(u64)))
     vk_check(vk.ResetFences(vk_ctx.device, 1, &fence))
@@ -1008,7 +1016,7 @@ bake_main :: proc(using bake: ^Bake)
         vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
         vk_check(vk.QueueWaitIdle(vk_ctx.queue))
 
-        oidn_run_lightmap_filter(oidn_device, oidn_buf, lightmap_size, lightmap_size)
+        oidn_run_lightmap_filter(oidn_device, filter)
         oidn.SyncDevice(oidn_device)
 
         vk_check(vk.BeginCommandBuffer(cmd_buf, &{
@@ -2622,13 +2630,8 @@ oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf
     else do #panic("Unsupported OS.")
 }
 
-oidn_run_lightmap_filter :: proc(device: oidn.Device, image: oidn.Buffer, width: u32, height: u32)
+oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter)
 {
-    filter := oidn.NewFilter(device, "RTLightmap")
-    oidn.SetFilterImage(filter, "color", image, .HALF3, auto_cast width, auto_cast height, pixelByteStride = 2 * 4)
-    oidn.SetFilterImage(filter, "output", image, .HALF3, auto_cast width, auto_cast height, pixelByteStride = 2 * 4)
-    oidn.CommitFilter(filter)
-
     msg: cstring
     if oidn.GetDeviceError(device, &msg) != .NONE
     {
@@ -2638,8 +2641,6 @@ oidn_run_lightmap_filter :: proc(device: oidn.Device, image: oidn.Buffer, width:
 
     oidn.ExecuteFilter(filter)
     oidn.SyncDevice(device)
-
-    oidn.ReleaseFilter(filter)
 
     msg = {}
     if oidn.GetDeviceError(device, &msg) != .NONE
