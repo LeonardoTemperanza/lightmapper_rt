@@ -767,7 +767,7 @@ bake_main :: proc(using bake: ^Bake)
 
         pathtrace_iter(bake, cmd_buf, pathtrace_sbt, rt_desc_set, iter)
 
-        image_barrier_safe_slow(&lightmap, cmd_buf, .GENERAL)
+        vku.image_barrier_safe_slow(&lightmap, cmd_buf, .GENERAL)
 
         // Blit to backbuffer, dilating the image in the process
         images := [2]^Image { &lightmap, &lightmap_backbuffer }
@@ -785,7 +785,7 @@ bake_main :: proc(using bake: ^Bake)
                 dst_idx = tmp
             }
 
-            image_barrier_safe_slow(dst_image, cmd_buf, .GENERAL)
+            vku.image_barrier_safe_slow(dst_image, cmd_buf, .GENERAL)
 
             shader_stages := vk.ShaderStageFlags { .COMPUTE }
             vk.CmdBindShadersEXT(cmd_buf, 1, &shader_stages, &shaders.dilate_shader)
@@ -795,8 +795,8 @@ bake_main :: proc(using bake: ^Bake)
             GROUP_SIZE :: u32(8)
             vk.CmdDispatch(cmd_buf, lightmap_size / GROUP_SIZE, lightmap_size / GROUP_SIZE, 1)
 
-            image_barrier_safe_slow(dst_image, cmd_buf, .GENERAL)
-            image_barrier_safe_slow(src_image, cmd_buf, .GENERAL)
+            vku.image_barrier_safe_slow(dst_image, cmd_buf, .GENERAL)
+            vku.image_barrier_safe_slow(src_image, cmd_buf, .GENERAL)
         }
 
         vk_check(vk.EndCommandBuffer(cmd_buf))
@@ -1101,9 +1101,9 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
     }
 
-    image_barrier_safe_slow(&gbuffers.world_pos, cmd_buf, .GENERAL)
-    image_barrier_safe_slow(&gbuffers.world_normals, cmd_buf, .GENERAL)
-    image_barrier_safe_slow(&gbuffers.tri_idx, cmd_buf, .GENERAL)
+    vku.image_barrier_safe_slow(&gbuffers.world_pos, cmd_buf, .GENERAL)
+    vku.image_barrier_safe_slow(&gbuffers.world_normals, cmd_buf, .GENERAL)
+    vku.image_barrier_safe_slow(&gbuffers.tri_idx, cmd_buf, .GENERAL)
 
     push_samples_outside_geometry(bake, cmd_buf, gbuffers, push_samples_sbt, rt_desc_set)
 }
@@ -1224,7 +1224,7 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
 
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
 
-    image_barrier_safe_slow(&gbuffers.world_pos, cmd_buf, .GENERAL)
+    vku.image_barrier_safe_slow(&gbuffers.world_pos, cmd_buf, .GENERAL)
 }
 
 pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer, rt_desc_set: vk.DescriptorSet, accum_counter: u32)
@@ -2102,34 +2102,6 @@ create_vk_external_buffer_for_oidn :: proc(using vk_ctx: ^Lightmapper_Vulkan_Con
     else do #panic("Unsupported OS.")
 
     return res
-}
-
-image_barrier_safe_slow :: proc(image: ^Image, cmd_buf: vk.CommandBuffer, new_layout: vk.ImageLayout)
-{
-    barrier := []vk.ImageMemoryBarrier2 {
-        {
-            sType = .IMAGE_MEMORY_BARRIER_2,
-            image = image.img,
-            subresourceRange = {
-                aspectMask = { .COLOR },
-                levelCount = 1,
-                layerCount = 1,
-            },
-            oldLayout = image.layout,
-            newLayout = new_layout,
-            srcStageMask = { .ALL_COMMANDS },
-            srcAccessMask = { .MEMORY_WRITE },
-            dstStageMask = { .ALL_COMMANDS },
-            dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
-        },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        imageMemoryBarrierCount = u32(len(barrier)),
-        pImageMemoryBarriers = raw_data(barrier),
-    })
-
-    image.layout = new_layout
 }
 
 vk_check :: proc(result: vk.Result, location := #caller_location)
