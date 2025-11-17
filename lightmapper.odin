@@ -227,7 +227,18 @@ start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_St
     vk_check(vk.CreateSemaphore(device, &sem_ci, nil, &bake.sem))
 
     // Lightmap backbuffer
-    bake.lightmap_backbuffer = create_image(ctx, {
+    upload_cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    upload_cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &upload_cmd_pool_ci, nil, &upload_cmd_pool))
+    defer vk.DestroyCommandPool(device, upload_cmd_pool, nil)
+
+    cmd_buf := vku.begin_tmp_cmd_buf(device, upload_cmd_pool)
+
+    bake.lightmap_backbuffer = vku.create_image(device, phys_device, cmd_buf, {
         sType = .IMAGE_CREATE_INFO,
         flags = {},
         imageType = .D2,
@@ -245,7 +256,9 @@ start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_St
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &vk_ctx.queue_family_idx,
         initialLayout = .UNDEFINED,
-    }, "lightmap_backbuffer")
+    })
+
+    vku.end_tmp_cmd_buf(device, upload_cmd_pool, queue, cmd_buf)
 
     thr.start(bake.thread)
     return bake
@@ -584,9 +597,24 @@ bake_main :: proc(using bake: ^Bake)
     fence: vk.Fence
     vk_check(vk.CreateFence(device, &fence_ci, nil, &fence))
 
-    gbufs := create_gbuffers(bake)
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
 
-    lightmap := create_image(ctx, {
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }))
+
+    gbufs := create_gbuffers(bake, cmd_buf)
+
+    lightmap := vku.create_image(device, phys_device, cmd_buf, {
         sType = .IMAGE_CREATE_INFO,
         flags = {},
         imageType = .D2,
@@ -604,7 +632,7 @@ bake_main :: proc(using bake: ^Bake)
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &vk_ctx.queue_family_idx,
         initialLayout = .UNDEFINED,
-    }, "lightmap")
+    })
 
     // RT Descriptor set.
     desc_pool_ci := vk.DescriptorPoolCreateInfo {
@@ -640,8 +668,8 @@ bake_main :: proc(using bake: ^Bake)
 
         for &geom, i in geoms
         {
-            geom.normals = get_buffer_device_address(device, scene.meshes[i].normals)
-            geom.indices = get_buffer_device_address(device, scene.meshes[i].indices_gpu)
+            geom.normals = vku.get_buffer_device_address(device, scene.meshes[i].normals)
+            geom.indices = vku.get_buffer_device_address(device, scene.meshes[i].indices_gpu)
         }
 
         usage := vk.BufferUsageFlags { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
@@ -695,21 +723,6 @@ bake_main :: proc(using bake: ^Bake)
     update_dilate_desc_set(device, dilate_desc_set[1], dummy_sampler, lightmap_backbuffer, lightmap)
 
     sync.mutex_lock(debug_mutex0)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &{
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }))
 
     render_gbuffers(bake, cmd_buf, &gbufs, push_samples_sbt, rt_desc_set)
 
@@ -1190,7 +1203,7 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
     tmp := rt_desc_set
     vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
 
-    sbt_addr := u64(get_buffer_device_address(device, sbt))
+    sbt_addr := u64(vku.get_buffer_device_address(device, sbt))
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),
@@ -1223,7 +1236,7 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
     tmp := rt_desc_set
     vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
 
-    sbt_addr := u64(get_buffer_device_address(device, sbt))
+    sbt_addr := u64(vku.get_buffer_device_address(device, sbt))
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),
@@ -1718,9 +1731,9 @@ GBuffers :: struct
     tri_idx: Image,
 }
 
-create_gbuffers :: proc(using bake: ^Bake) -> GBuffers
+create_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer) -> GBuffers
 {
-    world_pos := create_image(ctx, {
+    world_pos := vku.create_image(device, phys_device, cmd_buf, {
         sType = .IMAGE_CREATE_INFO,
         flags = {},
         imageType = .D2,
@@ -1738,9 +1751,9 @@ create_gbuffers :: proc(using bake: ^Bake) -> GBuffers
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &queue_family_idx,
         initialLayout = .UNDEFINED,
-    }, "gbuf_worldpos")
+    })
 
-    world_normals := create_image(ctx, {
+    world_normals := vku.create_image(device, phys_device, cmd_buf, {
         sType = .IMAGE_CREATE_INFO,
         flags = {},
         imageType = .D2,
@@ -1758,9 +1771,9 @@ create_gbuffers :: proc(using bake: ^Bake) -> GBuffers
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &queue_family_idx,
         initialLayout = .UNDEFINED,
-    }, "gbuf_worldnormals")
+    })
 
-    tri_idx := create_image(ctx, {
+    tri_idx := vku.create_image(device, phys_device, cmd_buf, {
         sType = .IMAGE_CREATE_INFO,
         flags = {},
         imageType = .D2,
@@ -1778,192 +1791,13 @@ create_gbuffers :: proc(using bake: ^Bake) -> GBuffers
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &queue_family_idx,
         initialLayout = .UNDEFINED,
-    }, "gbuf_tri_idx")
+    })
 
     return {
         world_pos,
         world_normals,
         tri_idx,
     }
-}
-
-create_image :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo, name := "") -> Image
-{
-    res: Image
-
-    image_ci := ci
-    vk_check(vk.CreateImage(device, &image_ci, nil, &res.img))
-
-    fmt.printfln("Created %v: 0x%x", name, res.img)
-
-    mem_requirements: vk.MemoryRequirements
-    vk.GetImageMemoryRequirements(device, res.img, &mem_requirements)
-
-    // Create image memory
-    memory_ai := vk.MemoryAllocateInfo {
-        sType = .MEMORY_ALLOCATE_INFO,
-        allocationSize = mem_requirements.size,
-        memoryTypeIndex = find_mem_type(ctx, mem_requirements.memoryTypeBits, { })
-    }
-    vk_check(vk.AllocateMemory(device, &memory_ai, nil, &res.mem))
-    vk.BindImageMemory(device, res.img, res.mem, 0)
-
-    // Perform transition to LAYOUT_GENERAL
-    {
-        cmd_pool_ci := vk.CommandPoolCreateInfo {
-            sType = .COMMAND_POOL_CREATE_INFO,
-            queueFamilyIndex = queue_family_idx,
-            flags = { .TRANSIENT }
-        }
-        cmd_pool: vk.CommandPool
-        vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-        defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-        cmd_buf_ai := vk.CommandBufferAllocateInfo {
-            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-            commandPool = cmd_pool,
-            level = .PRIMARY,
-            commandBufferCount = 1,
-        }
-        cmd_buf: vk.CommandBuffer
-        vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-        defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-        cmd_buf_bi := vk.CommandBufferBeginInfo {
-            sType = .COMMAND_BUFFER_BEGIN_INFO,
-            flags = { .ONE_TIME_SUBMIT },
-        }
-        vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-        transition_to_general_barrier := vk.ImageMemoryBarrier2 {
-            sType = .IMAGE_MEMORY_BARRIER_2,
-            image = res.img,
-            subresourceRange = {
-                aspectMask = { .COLOR },
-                levelCount = 1,
-                layerCount = 1,
-            },
-            oldLayout = .UNDEFINED,
-            newLayout = .GENERAL,
-            srcStageMask = { .ALL_COMMANDS },
-            srcAccessMask = { .MEMORY_READ },
-            dstStageMask = { .RAY_TRACING_SHADER_KHR },
-            dstAccessMask = { .SHADER_WRITE, .SHADER_READ },
-        }
-        vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
-            sType = .DEPENDENCY_INFO,
-            imageMemoryBarrierCount = 1,
-            pImageMemoryBarriers = &transition_to_general_barrier,
-        })
-
-        vk_check(vk.EndCommandBuffer(cmd_buf))
-
-        submit_info := vk.SubmitInfo {
-            sType = .SUBMIT_INFO,
-            commandBufferCount = 1,
-            pCommandBuffers = &cmd_buf,
-        }
-        vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-        vk_check(vk.QueueWaitIdle(queue))
-
-        res.layout = .GENERAL
-    }
-
-    // Create view
-    image_view_ci := vk.ImageViewCreateInfo {
-        sType = .IMAGE_VIEW_CREATE_INFO,
-        image = res.img,
-        viewType = .D2,
-        format = image_ci.format,
-        subresourceRange = {
-            aspectMask = { .COLOR },
-            levelCount = 1,
-            layerCount = 1,
-        }
-    }
-    vk_check(vk.CreateImageView(device, &image_view_ci, nil, &res.view))
-
-    res.width = ci.extent.width
-    res.height = ci.extent.height
-    return res
-}
-
-copy_buffer :: proc(using ctx: ^Lightmapper_Vulkan_Context, src: Buffer, dst: Buffer, size: vk.DeviceSize)
-{
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    copy_region := vk.BufferCopy {
-        srcOffset = 0,
-        dstOffset = 0,
-        size = size,
-    }
-    vk.CmdCopyBuffer(cmd_buf, src.handle, dst.handle, 1, &copy_region)
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
-}
-
-destroy_buffer :: proc(using ctx: ^Lightmapper_Vulkan_Context, buf: ^Buffer)
-{
-    vk.FreeMemory(device, buf.mem, nil)
-    vk.DestroyBuffer(device, buf.handle, nil)
-
-    buf^ = {}
-}
-
-find_mem_type :: proc(using ctx: ^Lightmapper_Vulkan_Context, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
-{
-    mem_properties: vk.PhysicalDeviceMemoryProperties
-    vk.GetPhysicalDeviceMemoryProperties(phys_device, &mem_properties)
-    for i in 0..<mem_properties.memoryTypeCount
-    {
-        if (type_filter & (1 << i) != 0) &&
-           (mem_properties.memoryTypes[i].propertyFlags & properties) == properties {
-            return i
-        }
-    }
-
-    panic("Vulkan Error: Could not find suitable memory type!")
-}
-
-get_buffer_device_address :: proc(device: vk.Device, buffer: Buffer) -> vk.DeviceAddress
-{
-    info := vk.BufferDeviceAddressInfo {
-        sType = .BUFFER_DEVICE_ADDRESS_INFO,
-        buffer = buffer.handle
-    }
-    return vk.GetBufferDeviceAddress(device, &info)
 }
 
 update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas: vk.AccelerationStructureKHR, lightmap: Image, gbuffers: GBuffers, geometries: Buffer)
@@ -2241,7 +2075,7 @@ create_vk_external_buffer_for_oidn :: proc(using vk_ctx: ^Lightmapper_Vulkan_Con
         sType = .MEMORY_ALLOCATE_INFO,
         pNext = next,
         allocationSize = mem_reqs.size,
-        memoryTypeIndex = find_mem_type(vk_ctx, mem_reqs.memoryTypeBits, { .DEVICE_LOCAL }),
+        memoryTypeIndex = vku.find_mem_type(phys_device, mem_reqs.memoryTypeBits, { .DEVICE_LOCAL }),
     }
     vk.AllocateMemory(device, &allocInfo, nil, &res.buf.mem);
 

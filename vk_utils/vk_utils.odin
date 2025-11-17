@@ -314,6 +314,15 @@ find_mem_type :: proc(phys_device: vk.PhysicalDevice, type_filter: u32, properti
     panic("Vulkan Error: Could not find suitable memory type!")
 }
 
+get_buffer_device_address :: proc(device: vk.Device, buffer: Buffer) -> vk.DeviceAddress
+{
+    info := vk.BufferDeviceAddressInfo {
+        sType = .BUFFER_DEVICE_ADDRESS_INFO,
+        buffer = buffer.handle
+    }
+    return vk.GetBufferDeviceAddress(device, &info)
+}
+
 RT_Info :: struct
 {
     handle_alignment: u32,
