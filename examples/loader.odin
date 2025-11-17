@@ -14,7 +14,7 @@ LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 50
 LIGHTMAP_MIN_INSTANCE_TEXELS :: 64
 LIGHTMAP_MAX_INSTANCE_TEXELS :: 1024
 
-load_scene_fbx :: proc(using ctx: ^lm.Vulkan_Context, path: cstring) -> lm.Scene
+load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, path: cstring) -> lm.Scene
 {
     // Load the .fbx file
     opts := ufbx.Load_Opts {

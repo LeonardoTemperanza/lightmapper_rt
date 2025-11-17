@@ -29,7 +29,6 @@ import "core:fmt"
 import "core:math/linalg"
 import intr "base:intrinsics"
 import "core:slice"
-import "core:mem"
 import "core:log"
 import "core:sync"
 import "base:runtime"
@@ -44,13 +43,13 @@ import oidn "oidn_odin_bindings"
 
 Context :: struct
 {
-    using vk_ctx: Vulkan_Context,
+    using vk_ctx: Lightmapper_Vulkan_Context,
     oidn_device: oidn.Device,
     shaders: Shaders,
 }
 
-//Buffer :: vku.Buffer
-//Image :: vku.Image
+Buffer :: vku.Buffer
+Image :: vku.Image
 
 // Initialization
 
@@ -85,7 +84,7 @@ init_from_vulkan_context :: proc(phys_device: vk.PhysicalDevice, device: vk.Devi
     return res
 }
 
-init_test :: proc(vk_ctx: Vulkan_Context) -> Context
+init_test :: proc(vk_ctx: Lightmapper_Vulkan_Context) -> Context
 {
     res: Context
     res.vk_ctx = vk_ctx
@@ -310,7 +309,7 @@ acquire_next_lightmap_view_vk :: proc(using bake: ^Bake) -> View_Info
     return res
 }
 
-Vulkan_Context :: struct
+App_Vulkan_Context :: struct
 {
     instance: vk.Instance,
     debug_messenger: vk.DebugUtilsMessengerEXT,
@@ -325,9 +324,9 @@ Vulkan_Context :: struct
 
 // Utility function, could be used to initialize Vulkan
 // with all the appropriate extensions for this library.
-init_vk_context :: proc(window: ^sdl.Window) -> Vulkan_Context
+init_vk_context :: proc(window: ^sdl.Window) -> App_Vulkan_Context
 {
-    res: Vulkan_Context
+    res: App_Vulkan_Context
 
     // Create instance
     {
@@ -523,7 +522,7 @@ init_vk_context :: proc(window: ^sdl.Window) -> Vulkan_Context
     return res
 }
 
-destroy_vk_context :: proc(using vk_ctx: ^Vulkan_Context)
+destroy_vk_context :: proc(using vk_ctx: ^App_Vulkan_Context)
 {
     sdl.Vulkan_DestroySurface(instance, surface, nil)
     if debug_messenger != 0 do vk.DestroyDebugUtilsMessengerEXT(instance, debug_messenger, nil)
@@ -534,7 +533,13 @@ destroy_vk_context :: proc(using vk_ctx: ^Vulkan_Context)
 ///////////////////////////////////
 // Internals
 
-Tmp_Cmd_Buf :: vku.Tmp_Cmd_Buf
+Lightmapper_Vulkan_Context :: struct
+{
+    device: vk.Device,
+    phys_device: vk.PhysicalDevice,
+    queue: vk.Queue,  // NOTE: Use a separate queue from the main render queue!
+    queue_family_idx: u32
+}
 
 Geometry :: struct
 {
@@ -560,15 +565,17 @@ bake_main :: proc(using bake: ^Bake)
     }
     cmd_pool: vk.CommandPool
     vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
+    defer vk.DestroyCommandPool(device, cmd_pool, nil)
 
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
+    // GPU Upload command pool
+    upload_cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = queue_family_idx,
+        flags = { .TRANSIENT }
     }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    upload_cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(device, &upload_cmd_pool_ci, nil, &upload_cmd_pool))
+    defer vk.DestroyCommandPool(device, upload_cmd_pool, nil)
 
     fence_ci := vk.FenceCreateInfo {
         sType = .FENCE_CREATE_INFO,
@@ -622,8 +629,12 @@ bake_main :: proc(using bake: ^Bake)
     }
     desc_pool: vk.DescriptorPool
     vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &desc_pool))
+    defer vk.DestroyDescriptorPool(device, desc_pool, nil)
 
     // Create geometries buffer
+    geoms_buf: Buffer
+    defer vku.destroy_buffer(device, &geoms_buf)
+    {
         geoms := make([]Geometry, len(scene.meshes))
         defer delete(geoms)
 
@@ -633,7 +644,17 @@ bake_main :: proc(using bake: ^Bake)
             geom.indices = get_buffer_device_address(device, scene.meshes[i].indices_gpu)
         }
 
-        geoms_buf := create_geometries_buffer(&vk_ctx, geoms)
+        usage := vk.BufferUsageFlags { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
+        properties := vk.MemoryPropertyFlags { .DEVICE_LOCAL }
+        allocate_flags := vk.MemoryAllocateFlags { .DEVICE_ADDRESS }
+        geoms_buf = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, geoms, usage, properties, allocate_flags)
+    }
+
+    // Create SBT buffers
+    pathtrace_sbt    := vku.create_sbt_buffer(device, phys_device, queue, cmd_pool, shaders.rt_pipeline, 3)
+    defer vku.destroy_buffer(device, &pathtrace_sbt)
+    push_samples_sbt := vku.create_sbt_buffer(device, phys_device, queue, cmd_pool, shaders.push_samples_pipeline, 3)
+    defer vku.destroy_buffer(device, &push_samples_sbt)
 
     desc_set_ai := vk.DescriptorSetAllocateInfo {
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -643,6 +664,7 @@ bake_main :: proc(using bake: ^Bake)
     }
     rt_desc_set: vk.DescriptorSet
     vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &rt_desc_set))
+    //defer vk.FreeDescriptorSets(device, 1, &rt_desc_set, nil)
     update_rt_desc_set(device, rt_desc_set, scene.tlas.as.handle, lightmap, gbufs, geoms_buf)
 
     // Dummy sampler
@@ -657,6 +679,7 @@ bake_main :: proc(using bake: ^Bake)
     }
     dummy_sampler: vk.Sampler
     vk_check(vk.CreateSampler(vk_ctx.device, &dummy_sampler_ci, nil, &dummy_sampler))
+    defer vk.DestroySampler(device, dummy_sampler, nil)
 
     // Dilate desc set
     dilate_desc_set_ai := vk.DescriptorSetAllocateInfo {
@@ -673,12 +696,22 @@ bake_main :: proc(using bake: ^Bake)
 
     sync.mutex_lock(debug_mutex0)
 
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+
     vk_check(vk.BeginCommandBuffer(cmd_buf, &{
         sType = .COMMAND_BUFFER_BEGIN_INFO,
         flags = { .ONE_TIME_SUBMIT },
     }))
 
-    render_gbuffers(bake, cmd_buf, &gbufs, rt_desc_set)
+    render_gbuffers(bake, cmd_buf, &gbufs, push_samples_sbt, rt_desc_set)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
@@ -719,7 +752,7 @@ bake_main :: proc(using bake: ^Bake)
             flags = { .ONE_TIME_SUBMIT },
         }))
 
-        pathtrace_iter(bake, cmd_buf, rt_desc_set, iter)
+        pathtrace_iter(bake, cmd_buf, pathtrace_sbt, rt_desc_set, iter)
 
         image_barrier_safe_slow(&lightmap, cmd_buf, .GENERAL)
 
@@ -898,7 +931,7 @@ bake_main :: proc(using bake: ^Bake)
     }
 }
 
-render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: ^GBuffers, rt_desc_set: vk.DescriptorSet)
+render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: ^GBuffers, push_samples_sbt: Buffer, rt_desc_set: vk.DescriptorSet)
 {
     vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
         {  // Positions
@@ -1059,7 +1092,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
     image_barrier_safe_slow(&gbuffers.world_normals, cmd_buf, .GENERAL)
     image_barrier_safe_slow(&gbuffers.tri_idx, cmd_buf, .GENERAL)
 
-    push_samples_outside_geometry(bake, cmd_buf, gbuffers, rt_desc_set)
+    push_samples_outside_geometry(bake, cmd_buf, gbuffers, push_samples_sbt, rt_desc_set)
 }
 
 draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout)
@@ -1148,7 +1181,7 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
     }
 }
 
-push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: ^GBuffers, rt_desc_set: vk.DescriptorSet)
+push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: ^GBuffers, sbt: Buffer, rt_desc_set: vk.DescriptorSet)
 {
     rt_info := vku.get_rt_info(vk_ctx.phys_device)
 
@@ -1157,7 +1190,7 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
     tmp := rt_desc_set
     vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
 
-    sbt_addr := u64(get_buffer_device_address(device, shaders.push_samples_sbt_buf))
+    sbt_addr := u64(get_buffer_device_address(device, sbt))
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),
@@ -1181,7 +1214,7 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
     image_barrier_safe_slow(&gbuffers.world_pos, cmd_buf, .GENERAL)
 }
 
-pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, rt_desc_set: vk.DescriptorSet, accum_counter: u32)
+pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer, rt_desc_set: vk.DescriptorSet, accum_counter: u32)
 {
     rt_info := vku.get_rt_info(vk_ctx.phys_device)
 
@@ -1190,7 +1223,7 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, rt_desc_set
     tmp := rt_desc_set
     vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
 
-    sbt_addr := u64(get_buffer_device_address(device, shaders.sbt_buf))
+    sbt_addr := u64(get_buffer_device_address(device, sbt))
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),
@@ -1239,23 +1272,14 @@ Shaders :: struct
 
     // Sample pushing
     push_samples_pipeline: vk.Pipeline,
-    push_samples_sbt_buf: Buffer,
 
     // RT
     rt_desc_set_layout: vk.DescriptorSetLayout,
     rt_pipeline_layout: vk.PipelineLayout,
     rt_pipeline: vk.Pipeline,
-    sbt_buf: Buffer,
 }
 
-Buffer :: struct
-{
-    handle: vk.Buffer,
-    mem: vk.DeviceMemory,
-    size: vk.DeviceSize,
-}
-
-create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
+create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
 {
     res: Shaders
 
@@ -1672,32 +1696,10 @@ create_shaders :: proc(using ctx: ^Vulkan_Context) -> Shaders
     }
     vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &rt_pipeline_ci, nil, &res.rt_pipeline))
 
-    rt_info := vku.get_rt_info(phys_device)
-
-    // Push samples raytracing resources
-    {
-        // Shader Binding Table
-        group_count := u32(3)
-        size := group_count * rt_info.handle_size
-        shader_handle_storage := make([]byte, size, allocator = context.temp_allocator)
-        vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, res.push_samples_pipeline, 0, group_count, int(size), raw_data(shader_handle_storage)))
-        res.push_samples_sbt_buf = create_sbt_buffer(ctx, shader_handle_storage, group_count)
-    }
-
-    // Raytracing resources
-    {
-        // Shader Binding Table
-        group_count := u32(3)
-        size := group_count * rt_info.handle_size
-        shader_handle_storage := make([]byte, size, allocator = context.temp_allocator)
-        vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, res.rt_pipeline, 0, group_count, int(size), raw_data(shader_handle_storage)))
-        res.sbt_buf = create_sbt_buffer(ctx, shader_handle_storage, group_count)
-    }
-
     return res
 }
 
-destroy_shaders :: proc(using ctx: ^Vulkan_Context, shaders: ^Shaders)
+destroy_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context, shaders: ^Shaders)
 {
     vk.DestroyPipelineLayout(device, shaders.pipeline_layout, nil)
     vk.DestroyShaderEXT(device, shaders.uv_space, nil)
@@ -1707,7 +1709,6 @@ destroy_shaders :: proc(using ctx: ^Vulkan_Context, shaders: ^Shaders)
     vk.DestroyDescriptorSetLayout(device, shaders.rt_desc_set_layout, nil)
     vk.DestroyPipelineLayout(device, shaders.rt_pipeline_layout, nil)
     vk.DestroyPipeline(device, shaders.rt_pipeline, nil)
-    destroy_buffer(ctx, &shaders.sbt_buf)
 }
 
 GBuffers :: struct
@@ -1784,16 +1785,6 @@ create_gbuffers :: proc(using bake: ^Bake) -> GBuffers
         world_normals,
         tri_idx,
     }
-}
-
-Image :: struct
-{
-    img: vk.Image,
-    mem: vk.DeviceMemory,
-    view: vk.ImageView,
-    width: u32,
-    height: u32,
-    layout: vk.ImageLayout,
 }
 
 create_image :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo, name := "") -> Image
@@ -1897,46 +1888,7 @@ create_image :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo, name := "") ->
     return res
 }
 
-create_buffer :: proc(using ctx: ^Vulkan_Context, byte_size: u32, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
-{
-    res: Buffer
-    res.size = vk.DeviceSize(byte_size)
-
-    buf_ci := vk.BufferCreateInfo {
-        sType = .BUFFER_CREATE_INFO,
-        size = cast(vk.DeviceSize) (byte_size),
-        usage = usage,
-        sharingMode = .EXCLUSIVE,
-    }
-    vk_check(vk.CreateBuffer(device, &buf_ci, nil, &res.handle))
-
-    mem_requirements: vk.MemoryRequirements
-    vk.GetBufferMemoryRequirements(device, res.handle, &mem_requirements)
-
-    alloc_info := vk.MemoryAllocateFlagsInfo {
-        sType = .MEMORY_ALLOCATE_FLAGS_INFO,
-        flags = allocate_flags,
-    }
-
-    next: rawptr
-    if allocate_flags != {} {
-        next = &alloc_info
-    }
-
-    memory_ai := vk.MemoryAllocateInfo {
-        sType = .MEMORY_ALLOCATE_INFO,
-        pNext = next,
-        allocationSize = mem_requirements.size,
-        memoryTypeIndex = find_mem_type(ctx, mem_requirements.memoryTypeBits, properties)
-    }
-    vk_check(vk.AllocateMemory(device, &memory_ai, nil, &res.mem))
-
-    vk.BindBufferMemory(device, res.handle, res.mem, 0)
-
-    return res
-}
-
-copy_buffer :: proc(using ctx: ^Vulkan_Context, src: Buffer, dst: Buffer, size: vk.DeviceSize)
+copy_buffer :: proc(using ctx: ^Lightmapper_Vulkan_Context, src: Buffer, dst: Buffer, size: vk.DeviceSize)
 {
     // TEMPORARY CMD_BUF!!!
     cmd_pool_ci := vk.CommandPoolCreateInfo {
@@ -1982,7 +1934,7 @@ copy_buffer :: proc(using ctx: ^Vulkan_Context, src: Buffer, dst: Buffer, size: 
     vk_check(vk.QueueWaitIdle(queue))
 }
 
-destroy_buffer :: proc(using ctx: ^Vulkan_Context, buf: ^Buffer)
+destroy_buffer :: proc(using ctx: ^Lightmapper_Vulkan_Context, buf: ^Buffer)
 {
     vk.FreeMemory(device, buf.mem, nil)
     vk.DestroyBuffer(device, buf.handle, nil)
@@ -1990,81 +1942,7 @@ destroy_buffer :: proc(using ctx: ^Vulkan_Context, buf: ^Buffer)
     buf^ = {}
 }
 
-create_sbt_buffer :: proc(using ctx: ^Vulkan_Context, shader_handle_storage: []byte, num_groups: u32) -> Buffer
-{
-    rt_info := vku.get_rt_info(phys_device)
-    assert(auto_cast len(shader_handle_storage) == rt_info.handle_size * num_groups)
-
-    size := num_groups * rt_info.base_align
-    staging_buf := create_buffer(ctx, size, { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
-    defer destroy_buffer(ctx, &staging_buf)
-
-    data: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
-    for group_idx in 0..<num_groups
-    {
-        mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_info.base_align)),
-                 &shader_handle_storage[group_idx * rt_info.handle_size],
-                 int(rt_info.handle_size))
-    }
-    vk.UnmapMemory(device, staging_buf.mem)
-
-    res := create_buffer(ctx, size, { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-    copy_buffer(ctx, staging_buf, res, vk.DeviceSize(size))
-
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .TRANSFER },
-        srcAccessMask = { .TRANSFER_WRITE },
-        dstStageMask = { .RAY_TRACING_SHADER_KHR },
-        dstAccessMask = { .SHADER_READ },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
-
-    return res
-}
-
-find_mem_type :: proc(using ctx: ^Vulkan_Context, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
+find_mem_type :: proc(using ctx: ^Lightmapper_Vulkan_Context, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
 {
     mem_properties: vk.PhysicalDeviceMemoryProperties
     vk.GetPhysicalDeviceMemoryProperties(phys_device, &mem_properties)
@@ -2196,73 +2074,6 @@ update_dilate_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, d
     vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
 }
 
-create_geometries_buffer :: proc(using ctx: ^Vulkan_Context, geoms: []Geometry) -> Buffer
-{
-    size := cast(vk.DeviceSize) (len(geoms) * size_of(geoms[0]))
-
-    staging_buf := create_buffer(ctx, auto_cast (size_of(geoms[0]) * len(geoms)), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
-    defer destroy_buffer(ctx, &staging_buf)
-
-    data: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, size, {}, &data)
-    mem.copy(data, raw_data(geoms), cast(int) size)
-    vk.UnmapMemory(device, staging_buf.mem)
-
-    res := create_buffer(ctx, auto_cast (size_of(geoms[0]) * len(geoms)), { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-    copy_buffer(ctx, staging_buf, res, size)
-
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .TRANSFER },
-        srcAccessMask = { .TRANSFER_WRITE },
-        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR, .VERTEX_INPUT },
-        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR, .VERTEX_ATTRIBUTE_READ },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
-
-    return res
-}
-
 fatal_error :: proc(fmt: string, args: ..any, location := #caller_location)
 {
     when ODIN_DEBUG {
@@ -2373,7 +2184,7 @@ External_Buf :: struct
     buf: Buffer,
 }
 
-create_vk_external_buffer_for_oidn :: proc(using vk_ctx: ^Vulkan_Context, size: u32) -> External_Buf
+create_vk_external_buffer_for_oidn :: proc(using vk_ctx: ^Lightmapper_Vulkan_Context, size: u32) -> External_Buf
 {
     res: External_Buf
     res.buf.size = vk.DeviceSize(size)
@@ -2457,141 +2268,6 @@ create_vk_external_buffer_for_oidn :: proc(using vk_ctx: ^Vulkan_Context, size: 
     else do #panic("Unsupported OS.")
 
     return res
-}
-
-test_copy_image_to_cpu :: proc(using vk_ctx: ^Vulkan_Context, image: Image, lightmap_size: u32) -> rawptr
-{
-    total_size := lightmap_size * lightmap_size * 2 * 4
-
-    staging_buf := create_staging_buffer(vk_ctx, total_size)
-
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &{
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }))
-
-    vk.CmdCopyImageToBuffer2(cmd_buf, &vk.CopyImageToBufferInfo2 {
-        sType = .COPY_IMAGE_TO_BUFFER_INFO_2,
-        pNext = nil,
-        srcImage = image.img,
-        srcImageLayout = .GENERAL,
-        dstBuffer = staging_buf.handle,
-        regionCount = 1,
-        pRegions = &vk.BufferImageCopy2 {
-            sType = .BUFFER_IMAGE_COPY_2,
-            bufferRowLength = 0,
-            bufferImageHeight = 0,
-            imageSubresource = vk.ImageSubresourceLayers {
-                aspectMask = { .COLOR },
-                layerCount = 1,
-            },
-            imageExtent = vk.Extent3D {
-                width = lightmap_size,
-                height = lightmap_size,
-                depth = 1,
-            },
-        },
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    tmp := cmd_buf
-    wait_stage_flags := vk.PipelineStageFlags { .ALL_COMMANDS }
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        pWaitDstStageMask = &wait_stage_flags,
-        commandBufferCount = 1,
-        pCommandBuffers = &tmp,
-    }
-    vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
-
-    mapped: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, auto_cast total_size, {}, &mapped)
-    return mapped
-}
-
-test_copy_buffer_to_cpu :: proc(using vk_ctx: ^Vulkan_Context, buf: Buffer) -> rawptr
-{
-    total_size := buf.size
-
-    staging_buf := create_staging_buffer(vk_ctx, auto_cast total_size)
-
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &{
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }))
-
-    vk.CmdCopyBuffer2(cmd_buf, &vk.CopyBufferInfo2 {
-        sType = .COPY_BUFFER_INFO_2,
-        srcBuffer = buf.handle,
-        dstBuffer = staging_buf.handle,
-        regionCount = 1,
-        pRegions = &vk.BufferCopy2 {
-            sType = .BUFFER_COPY_2,
-            size = total_size,
-        },
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    tmp := cmd_buf
-    wait_stage_flags := vk.PipelineStageFlags { .ALL_COMMANDS }
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        pWaitDstStageMask = &wait_stage_flags,
-        commandBufferCount = 1,
-        pCommandBuffers = &tmp,
-    }
-    vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
-
-    mapped: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, auto_cast total_size, {}, &mapped)
-    return mapped
-}
-
-create_staging_buffer :: proc(using vk_ctx: ^Vulkan_Context, size: u32) -> Buffer
-{
-    return create_buffer(vk_ctx, size, { .TRANSFER_SRC, .TRANSFER_DST }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
 }
 
 image_barrier_safe_slow :: proc(image: ^Image, cmd_buf: vk.CommandBuffer, new_layout: vk.ImageLayout)

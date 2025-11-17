@@ -1,10 +1,14 @@
 
-package test
+package vk_utils
 
 import vk "vendor:vulkan"
 import "core:mem"
 import "base:runtime"
 import "core:log"
+
+// Utilities to make using Vulkan a little more bearable. Stuff here
+// is not really optimal, mostly for prototyping or for things that don't
+// need good performance.
 
 // Buffers
 Buffer :: struct
@@ -53,18 +57,23 @@ create_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, byte_si
     return res
 }
 
-create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf: vk.CommandBuffer, shader_handle_storage: []byte, num_groups: u32) -> Buffer
+create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, pipeline: vk.Pipeline, group_count: u32) -> Buffer
 {
     rt_info := get_rt_info(phys_device)
-    assert(auto_cast len(shader_handle_storage) == rt_info.handle_size * num_groups)
 
-    size := num_groups * rt_info.base_align
-    staging_buf := create_buffer(device, phys_device, size, { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
+    storage_size := group_count * rt_info.handle_size
+    shader_handle_storage := make([]byte, storage_size, allocator = context.temp_allocator)
+    vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, pipeline, 0, group_count, int(storage_size), raw_data(shader_handle_storage)))
+
+    size := group_count * rt_info.base_align
+    staging_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
+    staging_properties := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
+    staging_buf := create_buffer(device, phys_device, size, staging_usage, staging_properties, {})
     defer destroy_buffer(device, &staging_buf)
 
     data: rawptr
     vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
-    for group_idx in 0..<num_groups
+    for group_idx in 0..<group_count
     {
         mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_info.base_align)),
                  &shader_handle_storage[group_idx * rt_info.handle_size],
@@ -72,53 +81,50 @@ create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd
     }
     vk.UnmapMemory(device, staging_buf.mem)
 
+    cmd_buf := begin_tmp_cmd_buf(device, cmd_pool)
     res := create_buffer(device, phys_device, size, { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     copy_buffer(cmd_buf, staging_buf, res, vk.DeviceSize(size))
+    end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
+
     return res
 }
 
-copy_buffer :: proc(cmd_buf: vk.CommandBuffer, src: Buffer, dst: Buffer, size: vk.DeviceSize)
+copy_buffer :: proc(cmd_buf: vk.CommandBuffer, src, dst: Buffer, size: vk.DeviceSize)
 {
-    copy_region := vk.BufferCopy {
-        srcOffset = 0,
-        dstOffset = 0,
-        size = size,
+    copy_regions := []vk.BufferCopy {
+        {
+            srcOffset = 0,
+            dstOffset = 0,
+            size = size,
+        }
     }
-    vk.CmdCopyBuffer(cmd_buf, src.handle, dst.handle, 1, &copy_region)
-
-    memory_barrier_safe_slow(cmd_buf)
+    vk.CmdCopyBuffer(cmd_buf, src.handle, dst.handle, u32(len(copy_regions)), raw_data(copy_regions))
 }
 
-upload_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf: vk.CommandBuffer, buf: []byte, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
+upload_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, buf: []$T, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
 {
-    size := u32(len(buf))
+    byte_slice := mem.byte_slice(raw_data(buf), len(buf) * size_of(T))
+    return upload_buffer_raw(device, phys_device, queue, cmd_pool, byte_slice, usage, properties, allocate_flags)
+}
 
+upload_buffer_raw :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, buf: []byte, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
+{
     staging_buf_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
     staging_buf_properties := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
-    staging_buf := create_buffer(device, phys_device, size, staging_buf_usage, staging_buf_properties, {})
+    staging_buf := create_buffer(device, phys_device, auto_cast len(buf), staging_buf_usage, staging_buf_properties, {})
     defer destroy_buffer(device, &staging_buf)
 
     data: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
-    mem.copy(data, raw_data(buf), cast(int) size)
+    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(len(buf)), {}, &data)
+    mem.copy(data, raw_data(buf), len(buf))
     vk.UnmapMemory(device, staging_buf.mem)
 
-    res := create_buffer(device, phys_device, size, usage, properties, allocate_flags)
-    copy_buffer(cmd_buf, staging_buf, res, vk.DeviceSize(size))
+    dst_usage := usage | { .TRANSFER_DST }
+    res := create_buffer(device, phys_device, auto_cast len(buf), dst_usage, properties, allocate_flags)
 
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .TRANSFER },
-        srcAccessMask = { .TRANSFER_WRITE },
-        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR, .VERTEX_INPUT },
-        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR, .VERTEX_ATTRIBUTE_READ },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-
+    cmd_buf := begin_tmp_cmd_buf(device, cmd_pool)
+    copy_buffer(cmd_buf, staging_buf, res, vk.DeviceSize(len(buf)))
+    end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
     return res
 }
 
@@ -193,38 +199,58 @@ destroy_image :: proc(device: vk.Device, image: ^Image)
 
 // Command buffers
 
-Tmp_Cmd_Buf :: struct
+begin_tmp_cmd_buf :: proc(device: vk.Device, cmd_pool: vk.CommandPool) -> vk.CommandBuffer
 {
-    test: u32,
+    cmd_buf_ai := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool = cmd_pool,
+        level = .PRIMARY,
+        commandBufferCount = 1,
+    }
+    cmd_buf: vk.CommandBuffer
+    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
+
+    cmd_buf_bi := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+    return cmd_buf
 }
 
-create_tmp_cmd_buf :: proc(device: vk.Device) -> Tmp_Cmd_Buf
+end_tmp_cmd_buf :: proc(device: vk.Device, cmd_pool: vk.CommandPool, queue: vk.Queue, cmd_buf: vk.CommandBuffer)
 {
-    return {}
-}
+    vk_check(vk.EndCommandBuffer(cmd_buf))
 
-destroy_tmp_cmd_buf :: proc(using tmp_cmd_buf: ^Tmp_Cmd_Buf, device: vk.Device)
-{
+    // Submit and wait
+    {
+        fence_info := vk.FenceCreateInfo{
+            sType = .FENCE_CREATE_INFO,
+        }
 
+        fence: vk.Fence
+        vk_check(vk.CreateFence(device, &fence_info, nil, &fence))
+        defer vk.DestroyFence(device, fence, nil)
+
+        to_submit := []vk.CommandBuffer { cmd_buf }
+        submit_info := vk.SubmitInfo{
+            sType              = .SUBMIT_INFO,
+            commandBufferCount = u32(len(to_submit)),
+            pCommandBuffers    = raw_data(to_submit),
+        }
+        vk_check(vk.QueueSubmit(queue, 1, &submit_info, fence))
+
+        // Block until upload is done
+        vk_check(vk.WaitForFences(device, 1, &fence, true, u64(-1)))
+        vk_check(vk.QueueWaitIdle(queue))
+    }
+
+    to_free := []vk.CommandBuffer { cmd_buf }
+    vk.FreeCommandBuffers(device, cmd_pool, u32(len(to_free)), raw_data(to_free))
 }
 
 // Barriers
-
-memory_barrier_safe_slow :: proc(cmd_buf: vk.CommandBuffer)
-{
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .ALL_COMMANDS },
-        srcAccessMask = { .MEMORY_WRITE },
-        dstStageMask = { .ALL_COMMANDS },
-        dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-}
 
 image_barrier_safe_slow :: proc(image: ^Image, cmd_buf: vk.CommandBuffer, new_layout: vk.ImageLayout)
 {

@@ -37,7 +37,6 @@ import os "core:os"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
-import vku "../vk_utils"
 import lm "../"
 
 NUM_FRAMES_IN_FLIGHT :: 1
@@ -150,7 +149,7 @@ main :: proc()
     lightmap_sampler: vk.Sampler
     vk_check(vk.CreateSampler(vk_ctx.device, &lightmap_sampler_ci, nil, &lightmap_sampler))
 
-    lm_vk_ctx := lm.Vulkan_Context {
+    lm_vk_ctx := lm.Lightmapper_Vulkan_Context {
         phys_device = vk_ctx.phys_device,
         device = vk_ctx.device,
         //queue = vk_ctx.lm_queue,
@@ -349,7 +348,7 @@ vk_debug_callback :: proc "system" (severity: vk.DebugUtilsMessageSeverityFlagsE
     return false
 }
 
-create_swapchain :: proc(using ctx: ^lm.Vulkan_Context, width: u32, height: u32) -> Swapchain
+create_swapchain :: proc(using ctx: ^lm.App_Vulkan_Context, width: u32, height: u32) -> Swapchain
 {
     res: Swapchain
 
@@ -437,7 +436,7 @@ create_swapchain :: proc(using ctx: ^lm.Vulkan_Context, width: u32, height: u32)
     return res
 }
 
-destroy_swapchain :: proc(using ctx: ^lm.Vulkan_Context, swapchain: Swapchain)
+destroy_swapchain :: proc(using ctx: ^lm.App_Vulkan_Context, swapchain: Swapchain)
 {
     delete(swapchain.images)
     for semaphore in swapchain.present_semaphores {
@@ -457,7 +456,7 @@ Frame_Data :: struct
     view_to_proj: matrix[4, 4]f32
 }
 
-create_vk_frames :: proc(using ctx: ^lm.Vulkan_Context) -> [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame
+create_vk_frames :: proc(using ctx: ^lm.App_Vulkan_Context) -> [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame
 {
     res: [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame
     for &frame in res
@@ -490,7 +489,7 @@ create_vk_frames :: proc(using ctx: ^lm.Vulkan_Context) -> [NUM_FRAMES_IN_FLIGHT
     return res
 }
 
-destroy_vk_frames :: proc(using ctx: ^lm.Vulkan_Context, frames: [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame)
+destroy_vk_frames :: proc(using ctx: ^lm.App_Vulkan_Context, frames: [NUM_FRAMES_IN_FLIGHT]Vulkan_Per_Frame)
 {
     for frame in frames
     {
@@ -500,7 +499,7 @@ destroy_vk_frames :: proc(using ctx: ^lm.Vulkan_Context, frames: [NUM_FRAMES_IN_
     }
 }
 
-create_shaders :: proc(using ctx: ^lm.Vulkan_Context) -> Shaders
+create_shaders :: proc(using ctx: ^lm.App_Vulkan_Context) -> Shaders
 {
     res: Shaders
 
@@ -588,7 +587,7 @@ create_shaders :: proc(using ctx: ^lm.Vulkan_Context) -> Shaders
     return res
 }
 
-destroy_shaders :: proc(using ctx: ^lm.Vulkan_Context, shaders: Shaders)
+destroy_shaders :: proc(using ctx: ^lm.App_Vulkan_Context, shaders: Shaders)
 {
     vk.DestroyPipelineLayout(device, shaders.pipeline_layout, nil)
     vk.DestroyShaderEXT(device, shaders.test_vert, nil)
@@ -608,7 +607,7 @@ Shaders :: struct
     lm_desc_set_layout: vk.DescriptorSetLayout,
 }
 
-render_scene :: proc(using ctx: ^lm.Vulkan_Context, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: lm.Scene, width: u32, height: u32)
+render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: lm.Scene, width: u32, height: u32)
 {
     depth_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO,
@@ -817,7 +816,7 @@ load_file :: proc(filename: string, allocator: runtime.Allocator) -> []byte
 // This part can be ignored.
 
 /*
-destroy_mesh :: proc(using ctx: ^lm.Vulkan_Context, mesh: ^Mesh)
+destroy_mesh :: proc(using ctx: ^lm.App_Vulkan_Context, mesh: ^Mesh)
 {
     destroy_buffer(ctx, &mesh.pos)
     destroy_buffer(ctx, &mesh.normals)
@@ -829,7 +828,7 @@ destroy_mesh :: proc(using ctx: ^lm.Vulkan_Context, mesh: ^Mesh)
     mesh^ = {}
 }
 
-destroy_scene :: proc(using ctx: ^lm.Vulkan_Context, scene: ^Scene)
+destroy_scene :: proc(using ctx: ^lm.App_Vulkan_Context, scene: ^Scene)
 {
     delete(scene.instances)
     for &mesh in scene.meshes {
@@ -847,7 +846,7 @@ xform_to_mat :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4
            #force_inline linalg.matrix4_scale(scale))
 }
 
-create_vertex_buffer :: proc(using ctx: ^lm.Vulkan_Context, verts: []$T) -> Buffer
+create_vertex_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, verts: []$T) -> Buffer
 {
     size := cast(vk.DeviceSize) (len(verts) * size_of(verts[0]))
 
@@ -914,7 +913,7 @@ create_vertex_buffer :: proc(using ctx: ^lm.Vulkan_Context, verts: []$T) -> Buff
     return res
 }
 
-create_index_buffer :: proc(using ctx: ^lm.Vulkan_Context, indices: []u32) -> Buffer
+create_index_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, indices: []u32) -> Buffer
 {
     size := cast(vk.DeviceSize) (len(indices) * size_of(indices[0]))
 
@@ -981,7 +980,7 @@ create_index_buffer :: proc(using ctx: ^lm.Vulkan_Context, indices: []u32) -> Bu
     return res
 }
 
-create_instances_buffer :: proc(using ctx: ^lm.Vulkan_Context, instances: []vk.AccelerationStructureInstanceKHR) -> Buffer
+create_instances_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, instances: []vk.AccelerationStructureInstanceKHR) -> Buffer
 {
     size := cast(vk.DeviceSize) (len(instances) * size_of(instances[0]))
 
@@ -1065,7 +1064,7 @@ Image :: struct
     layout: vk.ImageLayout,
 }
 
-create_buffer :: proc(using ctx: ^lm.Vulkan_Context, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
+create_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
 {
     res: Buffer
     res.size = vk.DeviceSize(el_size * count)
@@ -1104,7 +1103,7 @@ create_buffer :: proc(using ctx: ^lm.Vulkan_Context, el_size: int, count: int, u
     return res
 }
 
-copy_buffer :: proc(using ctx: ^lm.Vulkan_Context, src: Buffer, dst: Buffer, size: vk.DeviceSize)
+copy_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, src: Buffer, dst: Buffer, size: vk.DeviceSize)
 {
     // TEMPORARY CMD_BUF!!!
     cmd_pool_ci := vk.CommandPoolCreateInfo {
@@ -1150,7 +1149,7 @@ copy_buffer :: proc(using ctx: ^lm.Vulkan_Context, src: Buffer, dst: Buffer, siz
     vk_check(vk.QueueWaitIdle(queue))
 }
 
-destroy_buffer :: proc(using ctx: ^lm.Vulkan_Context, buf: ^Buffer)
+destroy_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, buf: ^Buffer)
 {
     vk.FreeMemory(device, buf.mem, nil)
     vk.DestroyBuffer(device, buf.buf, nil)
@@ -1158,7 +1157,7 @@ destroy_buffer :: proc(using ctx: ^lm.Vulkan_Context, buf: ^Buffer)
     buf^ = {}
 }
 
-create_image :: proc(using ctx: ^lm.Vulkan_Context, ci: vk.ImageCreateInfo, name := "") -> Image
+create_image :: proc(using ctx: ^lm.App_Vulkan_Context, ci: vk.ImageCreateInfo, name := "") -> Image
 {
     res: Image
 
@@ -1256,7 +1255,7 @@ destroy_image :: proc(using image: ^Image)
 
 }
 
-find_mem_type :: proc(using ctx: ^lm.Vulkan_Context, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
+find_mem_type :: proc(using ctx: ^lm.App_Vulkan_Context, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
 {
     mem_properties: vk.PhysicalDeviceMemoryProperties
     vk.GetPhysicalDeviceMemoryProperties(phys_device, &mem_properties)
@@ -1298,7 +1297,7 @@ world_to_view_mat :: proc(cam_pos: [3]f32, cam_rot: quaternion128) -> matrix[4, 
            #force_inline linalg.matrix4_translate(view_pos)
 }
 
-find_depth_format :: proc(using ctx: ^lm.Vulkan_Context) -> vk.Format
+find_depth_format :: proc(using ctx: ^lm.App_Vulkan_Context) -> vk.Format
 {
     candidates := [?]vk.Format {
         .D32_SFLOAT,
@@ -1318,7 +1317,7 @@ find_depth_format :: proc(using ctx: ^lm.Vulkan_Context) -> vk.Format
     return .D32_SFLOAT
 }
 
-create_depth_texture :: proc(using ctx: ^lm.Vulkan_Context, width, height: u32) -> (vk.Image, vk.ImageView)
+create_depth_texture :: proc(using ctx: ^lm.App_Vulkan_Context, width, height: u32) -> (vk.Image, vk.ImageView)
 {
     image_ci := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
@@ -1581,7 +1580,7 @@ first_person_camera_view :: proc() -> matrix[4, 4]f32
     }
 }
 
-create_blas :: proc(using ctx: ^lm.Vulkan_Context, positions: Buffer, indices: Buffer, verts_count: u32, idx_count: u32) -> Accel_Structure
+create_blas :: proc(using ctx: ^lm.App_Vulkan_Context, positions: Buffer, indices: Buffer, verts_count: u32, idx_count: u32) -> Accel_Structure
 {
     blas: Accel_Structure
 
@@ -1712,7 +1711,7 @@ create_blas :: proc(using ctx: ^lm.Vulkan_Context, positions: Buffer, indices: B
     return blas
 }
 
-create_tlas :: proc(using ctx: ^lm.Vulkan_Context, instances: []lm.Instance, meshes: []lm.Mesh) -> Tlas
+create_tlas :: proc(using ctx: ^lm.App_Vulkan_Context, instances: []lm.Instance, meshes: []lm.Mesh) -> Tlas
 {
     as: Accel_Structure
 
@@ -1876,7 +1875,7 @@ Tlas :: struct
     instances_buf: Buffer,
 }
 
-get_buffer_device_address :: proc(using ctx: ^lm.Vulkan_Context, buffer: Buffer) -> vk.DeviceAddress
+get_buffer_device_address :: proc(using ctx: ^lm.App_Vulkan_Context, buffer: Buffer) -> vk.DeviceAddress
 {
     info := vk.BufferDeviceAddressInfo {
         sType = .BUFFER_DEVICE_ADDRESS_INFO,
