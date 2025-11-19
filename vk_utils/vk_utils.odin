@@ -6,7 +6,7 @@ import "core:mem"
 import "base:runtime"
 import "core:log"
 
-// Utilities to make using Vulkan a little more bearable. Stuff here
+// Utilities to make using Vulkan a little more bearable. A lot of stuff here
 // is not really optimal, mostly for prototyping or for things that don't
 // need good performance.
 
@@ -243,7 +243,6 @@ end_tmp_cmd_buf :: proc(device: vk.Device, cmd_pool: vk.CommandPool, queue: vk.Q
 
         // Block until upload is done
         vk_check(vk.WaitForFences(device, 1, &fence, true, u64(-1)))
-        vk_check(vk.QueueWaitIdle(queue))
     }
 
     to_free := []vk.CommandBuffer { cmd_buf }

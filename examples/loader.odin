@@ -8,13 +8,15 @@ import "core:c"
 import stbrp "vendor:stb/rect_pack"
 import lm "../"
 
+import vku "../vk_utils"
+import vk "vendor:vulkan"
 import "ufbx"
 
 LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 50
 LIGHTMAP_MIN_INSTANCE_TEXELS :: 64
 LIGHTMAP_MAX_INSTANCE_TEXELS :: 1024
 
-load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, path: cstring) -> lm.Scene
+load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPool, path: cstring) -> lm.Scene
 {
     // Load the .fbx file
     opts := ufbx.Load_Opts {
@@ -54,7 +56,8 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, path: cstring) -> lm.S
             offset += 3 * num_tris
         }
 
-        mesh.indices_gpu = transmute(lm.Buffer) create_index_buffer(ctx, indices[:])
+        idx_usage_flags := vk.BufferUsageFlags { .INDEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }
+        mesh.indices_gpu = vku.upload_buffer(device, phys_device, queue, cmd_pool, indices[:], idx_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
         mesh.indices_cpu = indices
 
         // NOTE: uv_set[0] is the same as fbx_mesh.vertex_uv
@@ -89,8 +92,9 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, path: cstring) -> lm.S
             }
         }
 
-        mesh.pos = transmute(lm.Buffer) create_vertex_buffer(ctx, pos_buf[:])
-        mesh.normals = transmute(lm.Buffer) create_vertex_buffer(ctx, normals_buf)
+        v_usage_flags := vk.BufferUsageFlags { .VERTEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }
+        mesh.pos = vku.upload_buffer(device, phys_device, queue, cmd_pool, pos_buf[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+        mesh.normals = vku.upload_buffer(device, phys_device, queue, cmd_pool, normals_buf[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
         mesh.pos_cpu = pos_buf
 
         if lightmap_uv_idx == -1 {
@@ -98,12 +102,12 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, path: cstring) -> lm.S
             fmt.println("no lm uvs")
         } else {
             mesh.lm_uvs_present = true
-            mesh.lm_uvs = transmute(lm.Buffer) create_vertex_buffer(ctx, lm_uvs_buf)
+            mesh.lm_uvs = vku.upload_buffer(device, phys_device, queue, cmd_pool, lm_uvs_buf[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
         }
 
         mesh.idx_count = u32(index_count)
 
-        mesh.blas = transmute(lm.Accel_Structure) create_blas(ctx, transmute(Buffer) mesh.pos, transmute(Buffer) mesh.indices_gpu, u32(len(pos_buf)), u32(len(indices)))
+        mesh.blas = cast(lm.Accel_Structure) create_blas(ctx, cmd_pool, mesh.pos, mesh.indices_gpu, u32(len(pos_buf)), u32(len(indices)))
 
         append(&res.meshes, mesh)
     }
@@ -193,7 +197,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, path: cstring) -> lm.S
         }
     }
 
-    res.tlas = transmute(lm.Tlas) create_tlas(ctx, res.instances[:], res.meshes[:])
+    res.tlas = transmute(lm.Tlas) create_tlas(ctx, cmd_pool, res.instances[:], res.meshes[:])
 
     return res
 }

@@ -62,7 +62,7 @@ init_from_scratch :: proc() -> Context
 
 // Initializes this library with an already existing Vulkan context.
 // NOTE: This library is completely asynchronous, so use a separate queue here!
-// NOTE: This library necessitates the following extensions:
+// NOTE: This library needs the following extensions:
 // - VK_EXT_SHADER_OBJECT
 // - VK_KHR_ACCELERATION_STRUCTURE
 // - VK_KHR_RAY_TRACING_PIPELINE
@@ -337,7 +337,7 @@ App_Vulkan_Context :: struct
 
 // Utility function, could be used to initialize Vulkan
 // with all the appropriate extensions for this library.
-init_vk_context :: proc(window: ^sdl.Window) -> App_Vulkan_Context
+init_vk_context :: proc(window: ^sdl.Window, debug_callback: vk.ProcDebugUtilsMessengerCallbackEXT) -> App_Vulkan_Context
 {
     res: App_Vulkan_Context
 
@@ -369,12 +369,11 @@ init_vk_context :: proc(window: ^sdl.Window) -> App_Vulkan_Context
             sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
             messageSeverity = { .WARNING, .ERROR },
             messageType = { .VALIDATION, .PERFORMANCE },
-            pfnUserCallback = vk_debug_callback
+            pfnUserCallback = debug_callback
         }
 
         next: rawptr
         next = &debug_messenger_ci
-
         validation_feature := vk.ValidationFeatureEnableEXT.SYNCHRONIZATION_VALIDATION
         next = &vk.ValidationFeaturesEXT {
             sType = .VALIDATION_FEATURES_EXT,
@@ -928,13 +927,6 @@ bake_main :: proc(using bake: ^Bake)
         }
         vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
         vk_check(vk.QueueWaitIdle(vk_ctx.queue))
-
-        //mapped := test_copy_image_to_cpu(&vk_ctx, cmd_buf, lightmap_backbuffer, lightmap_size)
-    }
-
-    // Cleanup
-    {
-
     }
 
     for
@@ -946,7 +938,7 @@ bake_main :: proc(using bake: ^Bake)
 
 render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: ^GBuffers, push_samples_sbt: Buffer, rt_desc_set: vk.DescriptorSet)
 {
-    vert_input_bindings := [?]vk.VertexInputBindingDescription2EXT {
+    vert_input_bindings := []vk.VertexInputBindingDescription2EXT {
         {  // Positions
             sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
             binding = 0,
@@ -969,7 +961,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
             divisor = 1,
         },
     }
-    vert_attributes := [?]vk.VertexInputAttributeDescription2EXT {
+    vert_attributes := []vk.VertexInputAttributeDescription2EXT {
         {
             sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
             location = 0,
@@ -992,7 +984,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
             offset = 0
         },
     }
-    vk.CmdSetVertexInputEXT(cmd_buf, len(vert_input_bindings), &vert_input_bindings[0], len(vert_attributes), &vert_attributes[0])
+    vk.CmdSetVertexInputEXT(cmd_buf, u32(len(vert_input_bindings)), raw_data(vert_input_bindings), u32(len(vert_attributes)), raw_data(vert_attributes))
     vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_LIST)
     vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
 
@@ -1918,25 +1910,6 @@ fatal_error :: proc(fmt: string, args: ..any, location := #caller_location)
     }
 }
 
-vk_debug_callback :: proc "system" (severity: vk.DebugUtilsMessageSeverityFlagsEXT,
-                                    types: vk.DebugUtilsMessageTypeFlagsEXT,
-                                    callback_data: ^vk.DebugUtilsMessengerCallbackDataEXT,
-                                    user_data: rawptr) -> b32
-{
-    context = runtime.default_context()
-    // TODO
-    //context.logger = vk_logger
-
-    level: log.Level
-    if .ERROR in severity        do level = .Error
-    else if .WARNING in severity do level = .Warning
-    else if .INFO in severity    do level = .Info
-    else                         do level = .Debug
-    log.log(level, callback_data.pMessage)
-
-    return false
-}
-
 // OIDN
 
 create_oidn_context :: proc(phys_device: vk.PhysicalDevice) -> oidn.Device
@@ -1965,12 +1938,7 @@ create_oidn_context :: proc(phys_device: vk.PhysicalDevice) -> oidn.Device
     oidn.SetDeviceErrorFunction(device, oidn_error_callback, nil)
     oidn.CommitDevice(device)
 
-    msg: cstring
-    if oidn.GetDeviceError(device, &msg) != .NONE
-    {
-        log.error(msg)
-        panic("")
-    }
+    oidn_check(device)
 
     return device
 }

@@ -25,18 +25,17 @@ SOFTWARE.
 
 package main
 
-import "core:fmt"
 import "core:log"
 import "base:runtime"
 import "core:math/linalg"
 import "core:math"
-import "core:mem"
 import "core:sync"
 import "core:c"
 import os "core:os"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
+import vku "../vk_utils"
 import lm "../"
 
 NUM_FRAMES_IN_FLIGHT :: 1
@@ -88,7 +87,7 @@ main :: proc()
 
     vk.load_proc_addresses_global(cast(rawptr) sdl.Vulkan_GetVkGetInstanceProcAddr())
 
-    vk_ctx := lm.init_vk_context(window)
+    vk_ctx := lm.init_vk_context(window, vk_debug_callback)
     defer lm.destroy_vk_context(&vk_ctx)
 
     width, height: c.int
@@ -103,7 +102,16 @@ main :: proc()
     shaders := create_shaders(&vk_ctx)
     defer destroy_shaders(&vk_ctx, shaders)
 
-    scene := load_scene_fbx(&vk_ctx, "D:/lightmapper_test_scenes/ArchVis_RT.fbx")
+    upload_cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = vk_ctx.queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    upload_cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(vk_ctx.device, &upload_cmd_pool_ci, nil, &upload_cmd_pool))
+    defer vk.DestroyCommandPool(vk_ctx.device, upload_cmd_pool, nil)
+
+    scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT.fbx")
     // defer destroy_scene(&vk_ctx, &scene)
 
     vk_frames := create_vk_frames(&vk_ctx)
@@ -148,6 +156,8 @@ main :: proc()
 
     lightmap_sampler: vk.Sampler
     vk_check(vk.CreateSampler(vk_ctx.device, &lightmap_sampler_ci, nil, &lightmap_sampler))
+
+    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
 
     lm_vk_ctx := lm.Lightmapper_Vulkan_Context {
         phys_device = vk_ctx.phys_device,
@@ -328,6 +338,8 @@ main :: proc()
 
         free_all(context.temp_allocator)
     }
+
+    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
 }
 
 vk_debug_callback :: proc "system" (severity: vk.DebugUtilsMessageSeverityFlagsEXT,
@@ -846,429 +858,8 @@ xform_to_mat :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4
            #force_inline linalg.matrix4_scale(scale))
 }
 
-create_vertex_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, verts: []$T) -> Buffer
-{
-    size := cast(vk.DeviceSize) (len(verts) * size_of(verts[0]))
-
-    staging_buf := create_buffer(ctx, size_of(verts[0]), len(verts), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
-    defer destroy_buffer(ctx, &staging_buf)
-
-    data: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, size, {}, &data)
-    mem.copy(data, raw_data(verts), cast(int) size)
-    vk.UnmapMemory(device, staging_buf.mem)
-
-    res := create_buffer(ctx, size_of(verts[0]), len(verts), { .VERTEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-    copy_buffer(ctx, staging_buf, res, size)
-
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .TRANSFER },
-        srcAccessMask = { .TRANSFER_WRITE },
-        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR, .VERTEX_INPUT },
-        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR, .VERTEX_ATTRIBUTE_READ },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
-
-    return res
-}
-
-create_index_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, indices: []u32) -> Buffer
-{
-    size := cast(vk.DeviceSize) (len(indices) * size_of(indices[0]))
-
-    staging_buf := create_buffer(ctx, size_of(indices[0]), len(indices), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
-    defer destroy_buffer(ctx, &staging_buf)
-
-    data: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, size, {}, &data)
-    mem.copy(data, raw_data(indices), cast(int) size)
-    vk.UnmapMemory(device, staging_buf.mem)
-
-    res := create_buffer(ctx, size_of(indices[0]), len(indices), { .INDEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-    copy_buffer(ctx, staging_buf, res, size)
-
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .TRANSFER },
-        srcAccessMask = { .TRANSFER_WRITE },
-        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR, .VERTEX_INPUT },
-        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR, .VERTEX_ATTRIBUTE_READ },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
-
-    return res
-}
-
-create_instances_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, instances: []vk.AccelerationStructureInstanceKHR) -> Buffer
-{
-    size := cast(vk.DeviceSize) (len(instances) * size_of(instances[0]))
-
-    staging_buf := create_buffer(ctx, size_of(instances[0]), len(instances), { .TRANSFER_SRC }, { .HOST_VISIBLE, .HOST_COHERENT }, {})
-    defer destroy_buffer(ctx, &staging_buf)
-
-    data: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, size, {}, &data)
-    mem.copy(data, raw_data(instances), cast(int) size)
-    vk.UnmapMemory(device, staging_buf.mem)
-
-    res := create_buffer(ctx, size_of(instances[0]), len(instances), { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .TRANSFER_DST }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-    copy_buffer(ctx, staging_buf, res, size)
-
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .TRANSFER },
-        srcAccessMask = { .TRANSFER_WRITE },
-        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR },
-        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
-
-    return res
-}
-
-Buffer :: struct
-{
-    buf: vk.Buffer,
-    mem: vk.DeviceMemory,
-    size: vk.DeviceSize,
-}
-
-Image :: struct
-{
-    img: vk.Image,
-    mem: vk.DeviceMemory,
-    view: vk.ImageView,
-    width: u32,
-    height: u32,
-    layout: vk.ImageLayout,
-}
-
-create_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, el_size: int, count: int, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
-{
-    res: Buffer
-    res.size = vk.DeviceSize(el_size * count)
-
-    buf_ci := vk.BufferCreateInfo {
-        sType = .BUFFER_CREATE_INFO,
-        size = cast(vk.DeviceSize) (el_size * count),
-        usage = usage,
-        sharingMode = .EXCLUSIVE,
-    }
-    vk_check(vk.CreateBuffer(device, &buf_ci, nil, &res.buf))
-
-    mem_requirements: vk.MemoryRequirements
-    vk.GetBufferMemoryRequirements(device, res.buf, &mem_requirements)
-
-    alloc_info := vk.MemoryAllocateFlagsInfo {
-        sType = .MEMORY_ALLOCATE_FLAGS_INFO,
-        flags = allocate_flags,
-    }
-
-    next: rawptr
-    if allocate_flags != {} {
-        next = &alloc_info
-    }
-
-    memory_ai := vk.MemoryAllocateInfo {
-        sType = .MEMORY_ALLOCATE_INFO,
-        pNext = next,
-        allocationSize = mem_requirements.size,
-        memoryTypeIndex = find_mem_type(ctx, mem_requirements.memoryTypeBits, properties)
-    }
-    vk_check(vk.AllocateMemory(device, &memory_ai, nil, &res.mem))
-
-    vk.BindBufferMemory(device, res.buf, res.mem, 0)
-
-    return res
-}
-
-copy_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, src: Buffer, dst: Buffer, size: vk.DeviceSize)
-{
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    copy_region := vk.BufferCopy {
-        srcOffset = 0,
-        dstOffset = 0,
-        size = size,
-    }
-    vk.CmdCopyBuffer(cmd_buf, src.buf, dst.buf, 1, &copy_region)
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
-}
-
-destroy_buffer :: proc(using ctx: ^lm.App_Vulkan_Context, buf: ^Buffer)
-{
-    vk.FreeMemory(device, buf.mem, nil)
-    vk.DestroyBuffer(device, buf.buf, nil)
-
-    buf^ = {}
-}
-
-create_image :: proc(using ctx: ^lm.App_Vulkan_Context, ci: vk.ImageCreateInfo, name := "") -> Image
-{
-    res: Image
-
-    image_ci := ci
-    vk_check(vk.CreateImage(device, &image_ci, nil, &res.img))
-
-    fmt.printfln("Created %v: 0x%x", name, res.img)
-
-    mem_requirements: vk.MemoryRequirements
-    vk.GetImageMemoryRequirements(device, res.img, &mem_requirements)
-
-    // Create image memory
-    memory_ai := vk.MemoryAllocateInfo {
-        sType = .MEMORY_ALLOCATE_INFO,
-        allocationSize = mem_requirements.size,
-        memoryTypeIndex = find_mem_type(ctx, mem_requirements.memoryTypeBits, { })
-    }
-    vk_check(vk.AllocateMemory(device, &memory_ai, nil, &res.mem))
-    vk.BindImageMemory(device, res.img, res.mem, 0)
-
-    // Perform transition to LAYOUT_GENERAL
-    {
-        cmd_pool_ci := vk.CommandPoolCreateInfo {
-            sType = .COMMAND_POOL_CREATE_INFO,
-            queueFamilyIndex = queue_family_idx,
-            flags = { .TRANSIENT }
-        }
-        cmd_pool: vk.CommandPool
-        vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-        defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-        cmd_buf_ai := vk.CommandBufferAllocateInfo {
-            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-            commandPool = cmd_pool,
-            level = .PRIMARY,
-            commandBufferCount = 1,
-        }
-        cmd_buf: vk.CommandBuffer
-        vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-        defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-        cmd_buf_bi := vk.CommandBufferBeginInfo {
-            sType = .COMMAND_BUFFER_BEGIN_INFO,
-            flags = { .ONE_TIME_SUBMIT },
-        }
-        vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-        transition_to_general_barrier := vk.ImageMemoryBarrier2 {
-            sType = .IMAGE_MEMORY_BARRIER_2,
-            image = res.img,
-            subresourceRange = {
-                aspectMask = { .COLOR },
-                levelCount = 1,
-                layerCount = 1,
-            },
-            oldLayout = .UNDEFINED,
-            newLayout = .GENERAL,
-            srcStageMask = { .ALL_COMMANDS },
-            srcAccessMask = { .MEMORY_READ },
-            dstStageMask = { .RAY_TRACING_SHADER_KHR },
-            dstAccessMask = { .SHADER_WRITE, .SHADER_READ },
-        }
-        vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
-            sType = .DEPENDENCY_INFO,
-            imageMemoryBarrierCount = 1,
-            pImageMemoryBarriers = &transition_to_general_barrier,
-        })
-
-        vk_check(vk.EndCommandBuffer(cmd_buf))
-
-        res.layout = .GENERAL
-    }
-
-    // Create view
-    image_view_ci := vk.ImageViewCreateInfo {
-        sType = .IMAGE_VIEW_CREATE_INFO,
-        image = res.img,
-        viewType = .D2,
-        format = image_ci.format,
-        subresourceRange = {
-            aspectMask = { .COLOR },
-            levelCount = 1,
-            layerCount = 1,
-        }
-    }
-    vk_check(vk.CreateImageView(device, &image_view_ci, nil, &res.view))
-
-    res.width = ci.extent.width
-    res.height = ci.extent.height
-    return res
-}
-
-destroy_image :: proc(using image: ^Image)
-{
-
-}
-
-find_mem_type :: proc(using ctx: ^lm.App_Vulkan_Context, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
-{
-    mem_properties: vk.PhysicalDeviceMemoryProperties
-    vk.GetPhysicalDeviceMemoryProperties(phys_device, &mem_properties)
-    for i in 0..<mem_properties.memoryTypeCount
-    {
-        if (type_filter & (1 << i) != 0) &&
-           (mem_properties.memoryTypes[i].propertyFlags & properties) == properties {
-            return i
-        }
-    }
-
-    panic("Vulkan Error: Could not find suitable memory type!")
-}
+Buffer :: vku.Buffer
+Image :: vku.Image
 
 Key_State :: struct
 {
@@ -1348,7 +939,7 @@ create_depth_texture :: proc(using ctx: ^lm.App_Vulkan_Context, width, height: u
     memory_ai := vk.MemoryAllocateInfo {
         sType = .MEMORY_ALLOCATE_INFO,
         allocationSize = mem_requirements.size,
-        memoryTypeIndex = find_mem_type(ctx, mem_requirements.memoryTypeBits, { })
+        memoryTypeIndex = vku.find_mem_type(phys_device, mem_requirements.memoryTypeBits, { })
     }
     image_mem: vk.DeviceMemory
     vk_check(vk.AllocateMemory(device, &memory_ai, nil, &image_mem))
@@ -1580,7 +1171,7 @@ first_person_camera_view :: proc() -> matrix[4, 4]f32
     }
 }
 
-create_blas :: proc(using ctx: ^lm.App_Vulkan_Context, positions: Buffer, indices: Buffer, verts_count: u32, idx_count: u32) -> Accel_Structure
+create_blas :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPool, positions: Buffer, indices: Buffer, verts_count: u32, idx_count: u32) -> Accel_Structure
 {
     blas: Accel_Structure
 
@@ -1588,13 +1179,13 @@ create_blas :: proc(using ctx: ^lm.App_Vulkan_Context, positions: Buffer, indice
         sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
         vertexFormat = .R32G32B32_SFLOAT,
         vertexData = {
-            deviceAddress = get_buffer_device_address(ctx, positions)
+            deviceAddress = vku.get_buffer_device_address(device, positions)
         },
         vertexStride = size_of([3]f32),
         maxVertex = verts_count,
         indexType = .UINT32,
         indexData = {
-            deviceAddress = get_buffer_device_address(ctx, indices)
+            deviceAddress = vku.get_buffer_device_address(device, indices)
         },
     }
 
@@ -1633,72 +1224,30 @@ create_blas :: proc(using ctx: ^lm.App_Vulkan_Context, positions: Buffer, indice
     }
     vk.GetAccelerationStructureBuildSizesKHR(device, .DEVICE, &build_info, &primitive_count, &size_info)
 
-    blas.buf = create_buffer(ctx, cast(int) size_info.accelerationStructureSize, 1, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    blas_usages := vk.BufferUsageFlags { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS }
+    blas.buf = vku.create_buffer(device, phys_device, auto_cast size_info.accelerationStructureSize, blas_usages, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
 
     // Create the scratch buffer for blas building
-    scratch_buf := create_buffer(ctx, cast(int) size_info.buildScratchSize, 1, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    scratch_usages := vk.BufferUsageFlags { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
+    scratch_buf := vku.create_buffer(device, phys_device, auto_cast size_info.buildScratchSize, scratch_usages, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
 
     // Build acceleration structure
     blas_ci := vk.AccelerationStructureCreateInfoKHR {
         sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        buffer = blas.buf.buf,
+        buffer = blas.buf.handle,
         size = size_info.accelerationStructureSize,
         type = .BOTTOM_LEVEL,
     }
     vk_check(vk.CreateAccelerationStructureKHR(device, &blas_ci, nil, &blas.handle))
 
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
+    {
+        cmd_buf := vku.begin_tmp_cmd_buf(device, cmd_pool)
+        defer vku.end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
+        build_info.dstAccelerationStructure = blas.handle
+        build_info.scratchData.deviceAddress = vku.get_buffer_device_address(device, scratch_buf)
+
+        vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
     }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
-
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
-
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
-    }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    build_info.dstAccelerationStructure = blas.handle
-    build_info.scratchData.deviceAddress = get_buffer_device_address(ctx, scratch_buf)
-    vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
-
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR },
-        srcAccessMask = { .ACCELERATION_STRUCTURE_WRITE_KHR },
-        dstStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR },
-        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
 
     // Get device address
     addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
@@ -1706,12 +1255,11 @@ create_blas :: proc(using ctx: ^lm.App_Vulkan_Context, positions: Buffer, indice
         accelerationStructure = blas.handle,
     }
     blas.addr = vk.GetAccelerationStructureDeviceAddressKHR(device, &addr_info)
-    // fmt.println("get accel struct addr:", blas.addr)
 
     return blas
 }
 
-create_tlas :: proc(using ctx: ^lm.App_Vulkan_Context, instances: []lm.Instance, meshes: []lm.Mesh) -> Tlas
+create_tlas :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPool, instances: []lm.Instance, meshes: []lm.Mesh) -> Tlas
 {
     as: Accel_Structure
 
@@ -1740,13 +1288,13 @@ create_tlas :: proc(using ctx: ^lm.App_Vulkan_Context, instances: []lm.Instance,
         }
     }
 
-    instances_buf := create_instances_buffer(ctx, vk_instances)
+    instances_buf := vku.upload_buffer(device, phys_device, queue, cmd_pool, vk_instances, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .TRANSFER_DST }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
 
     instances_data := vk.AccelerationStructureGeometryInstancesDataKHR {
         sType = .ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
         arrayOfPointers = false,
         data = {
-            deviceAddress = get_buffer_device_address(ctx, instances_buf)
+            deviceAddress = vku.get_buffer_device_address(device, instances_buf)
         }
     }
 
@@ -1772,82 +1320,38 @@ create_tlas :: proc(using ctx: ^lm.App_Vulkan_Context, instances: []lm.Instance,
     }
     vk.GetAccelerationStructureBuildSizesKHR(device, .DEVICE, &build_info, &primitive_count, &size_info)
 
-    as.buf = create_buffer(ctx, cast(int) size_info.accelerationStructureSize, 1, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    as.buf = vku.create_buffer(device, phys_device, auto_cast size_info.accelerationStructureSize, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
 
     // Create the scratch buffer for tlas building
-    scratch_buf := create_buffer(ctx, cast(int) size_info.buildScratchSize, 1, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    scratch_buf := vku.create_buffer(device, phys_device, auto_cast size_info.buildScratchSize, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
 
     // Build acceleration structure
     blas_ci := vk.AccelerationStructureCreateInfoKHR {
         sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        buffer = as.buf.buf,
+        buffer = as.buf.handle,
         size = size_info.accelerationStructureSize,
         type = .TOP_LEVEL,
     }
     vk_check(vk.CreateAccelerationStructureKHR(device, &blas_ci, nil, &as.handle))
 
-    // TEMPORARY CMD_BUF!!!
-    cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
-    defer vk.DestroyCommandPool(device, cmd_pool, nil)
+    {
+        cmd_buf := vku.begin_tmp_cmd_buf(device, cmd_pool)
+        defer vku.end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
 
-    cmd_buf_ai := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = cmd_pool,
-        level = .PRIMARY,
-        commandBufferCount = 1,
-    }
-    cmd_buf: vk.CommandBuffer
-    vk_check(vk.AllocateCommandBuffers(device, &cmd_buf_ai, &cmd_buf))
-    defer vk.FreeCommandBuffers(device, cmd_pool, 1, &cmd_buf)
+        range_info := vk.AccelerationStructureBuildRangeInfoKHR {
+            primitiveCount = u32(len(instances)),
+            primitiveOffset = 0,
+            firstVertex = 0,
+            transformOffset = 0,
+        }
+        range_info_ptrs := []^vk.AccelerationStructureBuildRangeInfoKHR {
+            &range_info
+        }
 
-    cmd_buf_bi := vk.CommandBufferBeginInfo {
-        sType = .COMMAND_BUFFER_BEGIN_INFO,
-        flags = { .ONE_TIME_SUBMIT },
+        build_info.dstAccelerationStructure = as.handle
+        build_info.scratchData.deviceAddress = vku.get_buffer_device_address(device, scratch_buf)
+        vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
     }
-    vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
-
-    range_info := vk.AccelerationStructureBuildRangeInfoKHR {
-        primitiveCount = u32(len(instances)),
-        primitiveOffset = 0,
-        firstVertex = 0,
-        transformOffset = 0,
-    }
-    range_info_ptrs := []^vk.AccelerationStructureBuildRangeInfoKHR {
-        &range_info
-    }
-
-    build_info.dstAccelerationStructure = as.handle
-    build_info.scratchData.deviceAddress = get_buffer_device_address(ctx, scratch_buf)
-    vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
-
-    barrier := vk.MemoryBarrier2 {
-        sType = .MEMORY_BARRIER_2,
-        srcStageMask = { .ACCELERATION_STRUCTURE_BUILD_KHR },
-        srcAccessMask = { .ACCELERATION_STRUCTURE_WRITE_KHR },
-        dstStageMask = { .RAY_TRACING_SHADER_KHR },
-        dstAccessMask = { .ACCELERATION_STRUCTURE_READ_KHR },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        memoryBarrierCount = 1,
-        pMemoryBarriers = &barrier,
-    })
-
-    vk_check(vk.EndCommandBuffer(cmd_buf))
-
-    submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers = &cmd_buf,
-    }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
-    vk_check(vk.QueueWaitIdle(queue))
 
     // Get device address
     addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
@@ -1875,15 +1379,6 @@ Tlas :: struct
     instances_buf: Buffer,
 }
 
-get_buffer_device_address :: proc(using ctx: ^lm.App_Vulkan_Context, buffer: Buffer) -> vk.DeviceAddress
-{
-    info := vk.BufferDeviceAddressInfo {
-        sType = .BUFFER_DEVICE_ADDRESS_INFO,
-        buffer = buffer.buf
-    }
-    return vk.GetBufferDeviceAddress(device, &info)
-}
-
 v3_to_v4 :: proc(v: [3]f32, w: Maybe(f32) = nil) -> (res: [4]f32)
 {
     res.xyz = v.xyz
@@ -1891,32 +1386,4 @@ v3_to_v4 :: proc(v: [3]f32, w: Maybe(f32) = nil) -> (res: [4]f32)
         res.w = num
     }
     return
-}
-
-image_barrier_safe_slow :: proc(image: ^Image, cmd_buf: vk.CommandBuffer, new_layout: vk.ImageLayout)
-{
-    barrier := []vk.ImageMemoryBarrier2 {
-        {
-            sType = .IMAGE_MEMORY_BARRIER_2,
-            image = image.img,
-            subresourceRange = {
-                aspectMask = { .COLOR },
-                levelCount = 1,
-                layerCount = 1,
-            },
-            oldLayout = image.layout,
-            newLayout = new_layout,
-            srcStageMask = { .ALL_COMMANDS },
-            srcAccessMask = { .MEMORY_WRITE },
-            dstStageMask = { .ALL_COMMANDS },
-            dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
-        },
-    }
-    vk.CmdPipelineBarrier2(cmd_buf, &{
-        sType = .DEPENDENCY_INFO,
-        imageMemoryBarrierCount = u32(len(barrier)),
-        pImageMemoryBarriers = raw_data(barrier),
-    })
-
-    image.layout = new_layout
 }
