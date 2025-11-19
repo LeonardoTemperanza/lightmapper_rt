@@ -28,7 +28,7 @@ layout(location = 0) rayPayloadEXT HitInfo hit_info;
 #define PI      3.1415926
 #define DEG2RAD PI / 180.0f;
 
-const float T_MIN = 0.001;
+const float T_MIN = 0.01;
 const float T_MAX = 1000000.0f;
 
 uint RNG_STATE = 0;
@@ -166,7 +166,7 @@ vec4 pathtrace(vec3 start_pos, vec3 world_normal)
 
     vec3 hit_pos = start_pos;
 
-    const uint MAX_BOUNCES = 8;
+    const uint MAX_BOUNCES = 5;
     uint backface_hits_count = 0;
     for(uint bounce = 0; bounce <= MAX_BOUNCES; ++bounce)
     {
@@ -225,7 +225,7 @@ void main()
 
     init_rng(pixel.y * size.x + pixel.x);
 
-    uint NUM_SAMPLES = 5;
+    uint NUM_SAMPLES = 1;
     vec4 color = vec4(0.0f);
     for(int i = 0; i < NUM_SAMPLES; ++i)
         color += pathtrace(world_pos, world_normal);

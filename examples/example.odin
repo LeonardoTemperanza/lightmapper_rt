@@ -117,7 +117,8 @@ main :: proc()
     vk_check(vk.CreateCommandPool(vk_ctx.device, &upload_cmd_pool_ci, nil, &upload_cmd_pool))
     defer vk.DestroyCommandPool(vk_ctx.device, upload_cmd_pool, nil)
 
-    scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT.fbx")
+    //scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT.fbx")
+    scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", 10, 4096, 4096)
     // defer destroy_scene(&vk_ctx, &scene)
 
     vk_frames := create_vk_frames(&vk_ctx)
@@ -177,7 +178,7 @@ main :: proc()
         meshes = scene.meshes,
         tlas = scene.tlas,
     }
-    bake := lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 1000, 1)
+    bake := lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 2000, 1)
 
     // time.sleep(30 * time.Second)
 

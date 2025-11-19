@@ -193,7 +193,7 @@ Bake :: struct
 // - num_accums: Number of accumulations for pathtracing.
 // - num_samples_per_pixel: Number of pathtrace samples per pixel done on each accumulation.
 start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_Structures,
-                   lightmap_size: u32 = 4096, num_accums: u32 = 200, num_samples_per_pixel: u32 = 1,
+                   lightmap_size: u32 = 4096, num_accums: u32 = 400, num_samples_per_pixel: u32 = 1,
                    ) -> ^Bake
 {
     bake := new(Bake)

@@ -4,6 +4,7 @@
 layout(location = 0) in vec3 in_world_pos;
 layout(location = 1) in vec3 in_world_normal;
 layout(location = 2) in vec2 in_lm_uv;
+layout(location = 3) in vec2 in_local_lm_uv;
 
 layout(location = 0) out vec4 out_color;
 
@@ -54,6 +55,15 @@ vec4 sample_texture_bicubic(sampler2D image, vec2 texCoords)
     , sy);
 }
 
+vec4 uv_checkerboard(vec2 uv)
+{
+    //float checkerSize = 0.05f;
+    float checkerSize = 0.005f;
+    float total = floor(uv.x / checkerSize) + floor(uv.y / checkerSize);
+    bool isEven = mod(total, 2.0) == 0.0;
+    return isEven? vec4(0.05f) : vec4(0.9f);
+}
+
 void main()
 {
     vec3 world_normal = normalize(in_world_normal);
@@ -61,4 +71,5 @@ void main()
     //out_color = vec4(in_lm_uv, 0.0f, 1.0f);
     //out_color = texture(lightmap, in_lm_uv);
     out_color = sample_texture_bicubic(lightmap, in_lm_uv);
+    //out_color = uv_checkerboard(in_lm_uv);
 }

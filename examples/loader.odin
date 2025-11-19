@@ -12,11 +12,8 @@ import vku "../vk_utils"
 import vk "vendor:vulkan"
 import "ufbx"
 
-LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 100
-LIGHTMAP_MIN_INSTANCE_TEXELS :: 64
-LIGHTMAP_MAX_INSTANCE_TEXELS :: 1024
-
-load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPool, path: cstring) -> lm.Scene
+load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPool, path: cstring,
+                       texels_per_world_unit := 100, min_instance_texels := 64, max_instance_texels := 1024) -> lm.Scene
 {
     // Load the .fbx file
     opts := ufbx.Load_Opts {
@@ -66,7 +63,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPo
         for j in 0..<fbx_mesh.uv_sets.count
         {
             uv_set := fbx_mesh.uv_sets.data[j]
-            if uv_set.name.data == "LightMapUV" {
+            if uv_set.name.data == "LightMapUV" || uv_set.name.data == "UVMap_Lightmap" {
                 lightmap_uv_idx = int(uv_set.index)
             }
         }
@@ -113,36 +110,23 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPo
     }
 
     // Loop through instances.
-    tmp_count := u32(0)
     instance_loop: for i in 0..<scene.nodes.count
     {
         node := scene.nodes.data[i]
         if node.is_root || node.mesh == nil do continue
-
-        ignore_list := []u32 {
-            52, 53, 54,  55, 56, 57, 58, 59, 174
-        }
-
-        // @tmp
-        for ignore in ignore_list
-        {
-            if tmp_count == ignore
-            {
-                tmp_count += 1
-                continue instance_loop
-            }
-        }
 
         instance := lm.Instance {
             transform = get_node_world_transform(node),
             mesh_idx = node.mesh.element.typed_id,
         }
         append(&res.instances, instance)
-        tmp_count += 1
     }
 
     // Pack lightmap uvs.
     {
+        fmt.println("Packing uvs...")
+        defer fmt.println("Done packing uvs.")
+
         num_nodes := LIGHTMAP_SIZE
         tmp_nodes := make([]stbrp.Node, num_nodes, allocator = context.temp_allocator)
         stbrp_ctx: stbrp.Context
@@ -153,7 +137,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPo
 
         for instance, i in res.instances
         {
-            rect_size := get_instance_lm_size(instance, res.meshes[instance.mesh_idx])
+            rect_size := get_instance_lm_size(instance, res.meshes[instance.mesh_idx], texels_per_world_unit, min_instance_texels, max_instance_texels)
 
             rects[i].id = c.int(i)
             rects[i].w = rect_size
@@ -202,7 +186,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPo
     return res
 }
 
-get_instance_lm_size :: proc(instance: lm.Instance, mesh: lm.Mesh) -> stbrp.Coord
+get_instance_lm_size :: proc(instance: lm.Instance, mesh: lm.Mesh, texels_per_world_unit: int, min_instance_texels: int, max_instance_texels: int) -> stbrp.Coord
 {
     res := f32(0.0)
     for i := 0; i < len(mesh.indices_cpu); i += 3
@@ -219,8 +203,8 @@ get_instance_lm_size :: proc(instance: lm.Instance, mesh: lm.Mesh) -> stbrp.Coor
         res += area
     }
 
-    size := stbrp.Coord(math.ceil(math.sqrt(res) * LIGHTMAP_TEXELS_PER_WORLD_UNIT))
-    size = clamp(size, LIGHTMAP_MIN_INSTANCE_TEXELS, LIGHTMAP_MAX_INSTANCE_TEXELS)
+    size := stbrp.Coord(math.ceil(math.sqrt(res) * f32(texels_per_world_unit)))
+    size = stbrp.Coord(clamp(int(size), min_instance_texels, max_instance_texels))
     return size
 }
 

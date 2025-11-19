@@ -30,5 +30,7 @@ vec4 hdr_to_ldr(vec4 color)
 
 void main()
 {
-    out_color = linear_to_srgb(hdr_to_ldr(max(vec4(0.0f), texture(src, in_uv))));
+    vec4 color = texture(src, in_uv);
+    //color *= pow(2.0, 5.0);
+    out_color = linear_to_srgb(hdr_to_ldr(max(vec4(0.0f), color)));
 }
