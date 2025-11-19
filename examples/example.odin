@@ -40,6 +40,8 @@ import lm "../"
 
 NUM_FRAMES_IN_FLIGHT :: 1
 NUM_SWAPCHAIN_IMAGES :: 2
+WINDOW_SIZE_X: u32
+WINDOW_SIZE_Y: u32
 
 vk_logger: log.Logger
 glfw_logger: log.Logger
@@ -82,7 +84,11 @@ main :: proc()
         .VULKAN,
         .FULLSCREEN,
     }
-    window := sdl.CreateWindow("Lightmapper RT Example", 2100, 2100, window_flags)
+    window := sdl.CreateWindow("Lightmapper RT Example", 1920, 1080, window_flags)
+    win_width, win_height: c.int
+    assert(sdl.GetWindowSize(window, &win_width, &win_height))
+    WINDOW_SIZE_X = auto_cast max(0, win_width)
+    WINDOW_SIZE_Y = auto_cast max(0, win_height)
     ensure(window != nil)
 
     vk.load_proc_addresses_global(cast(rawptr) sdl.Vulkan_GetVkGetInstanceProcAddr())
@@ -157,8 +163,6 @@ main :: proc()
     lightmap_sampler: vk.Sampler
     vk_check(vk.CreateSampler(vk_ctx.device, &lightmap_sampler_ci, nil, &lightmap_sampler))
 
-    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
-
     lm_vk_ctx := lm.Lightmapper_Vulkan_Context {
         phys_device = vk_ctx.phys_device,
         device = vk_ctx.device,
@@ -177,6 +181,33 @@ main :: proc()
 
     // time.sleep(30 * time.Second)
 
+    // Create main render target
+    render_target: Image
+    {
+        cmd_buf := vku.begin_tmp_cmd_buf(vk_ctx.device, upload_cmd_pool)
+        defer vku.end_tmp_cmd_buf(vk_ctx.device, upload_cmd_pool, vk_ctx.queue, cmd_buf)
+
+        render_target = vku.create_image(vk_ctx.device, vk_ctx.phys_device, cmd_buf, {
+            sType = .IMAGE_CREATE_INFO,
+            flags = {},
+            imageType = .D2,
+            format = .R16G16B16A16_SFLOAT,
+            extent = {
+                width = WINDOW_SIZE_X,
+                height = WINDOW_SIZE_Y,
+                depth = 1,
+            },
+            mipLevels = 1,
+            arrayLayers = 1,
+            samples = { ._1 },
+            usage = { .COLOR_ATTACHMENT, .SAMPLED },
+            sharingMode = .EXCLUSIVE,
+            queueFamilyIndexCount = 1,
+            pQueueFamilyIndices = &vk_ctx.queue_family_idx,
+            initialLayout = .UNDEFINED,
+        })
+    }
+
     // Create lightmap desc set
     desc_set_ai := vk.DescriptorSetAllocateInfo {
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -187,6 +218,8 @@ main :: proc()
 
     lm_desc_set: vk.DescriptorSet
     vk_check(vk.AllocateDescriptorSets(vk_ctx.device, &desc_set_ai, &lm_desc_set))
+    tonemap_desc_set: vk.DescriptorSet
+    vk_check(vk.AllocateDescriptorSets(vk_ctx.device, &desc_set_ai, &tonemap_desc_set))
 
     // Update lightmap desc set
     writes := []vk.WriteDescriptorSet {
@@ -205,7 +238,26 @@ main :: proc()
             })
         }
     }
-    vk.UpdateDescriptorSets(vk_ctx.device, 1, raw_data(writes), 0, nil)
+    vk.UpdateDescriptorSets(vk_ctx.device, u32(len(writes)), raw_data(writes), 0, nil)
+
+    // Update tonemap desc set
+    writes_2 := []vk.WriteDescriptorSet {
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = tonemap_desc_set,
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = .COMBINED_IMAGE_SAMPLER,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = render_target.view,
+                    imageLayout = .GENERAL,
+                    sampler = lightmap_sampler,
+                }
+            })
+        }
+    }
+    vk.UpdateDescriptorSets(vk_ctx.device, u32(len(writes_2)), raw_data(writes_2), 0, nil)
 
     for
     {
@@ -262,7 +314,9 @@ main :: proc()
             pImageMemoryBarriers = &transition_to_color_attachment_barrier,
         })
 
-        render_scene(&vk_ctx, cmd_buf, depth_image_view, swapchain.image_views[image_idx], lm_desc_set, shaders, swapchain, scene, auto_cast width, auto_cast height)
+        render_scene(&vk_ctx, cmd_buf, depth_image_view, render_target.view, lm_desc_set, shaders, swapchain, scene, auto_cast width, auto_cast height)
+        vku.image_barrier_safe_slow(&render_target, cmd_buf, .GENERAL)
+        tonemap_image(&vk_ctx, cmd_buf, shaders, tonemap_desc_set, render_target, swapchain.image_views[image_idx])
 
         transition_to_present_src_barrier := vk.ImageMemoryBarrier2 {
             sType = .IMAGE_MEMORY_BARRIER_2,
@@ -558,6 +612,10 @@ create_shaders :: proc(using ctx: ^lm.App_Vulkan_Context) -> Shaders
     defer delete(model_to_proj_vert)
     lit_frag := load_file("examples/shaders/lit.frag.spv", context.allocator)
     defer delete(lit_frag)
+    tonemap_vert := load_file("examples/shaders/tonemap.vert.spv", context.allocator)
+    defer delete(tonemap_vert)
+    tonemap_frag := load_file("examples/shaders/tonemap.frag.spv", context.allocator)
+    defer delete(tonemap_frag)
 
     // Create shader objects.
     {
@@ -588,35 +646,66 @@ create_shaders :: proc(using ctx: ^lm.App_Vulkan_Context) -> Shaders
                 pPushConstantRanges = raw_data(push_constant_ranges),
                 setLayoutCount = 1,
                 pSetLayouts = &res.lm_desc_set_layout
-            }
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(tonemap_vert),
+                pCode = raw_data(tonemap_vert),
+                pName = "main",
+                stage = { .VERTEX },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 1,
+                pSetLayouts = &res.lm_desc_set_layout
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(tonemap_frag),
+                pCode = raw_data(tonemap_frag),
+                pName = "main",
+                stage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 1,
+                pSetLayouts = &res.lm_desc_set_layout
+            },
         }
         shaders: [len(shader_cis)]vk.ShaderEXT
         vk_check(vk.CreateShadersEXT(device, len(shaders), raw_data(&shader_cis), nil, raw_data(&shaders)))
+
         res.model_to_proj = shaders[0]
         res.lit = shaders[1]
+        res.tonemap_vert = shaders[2]
+        res.tonemap_frag = shaders[3]
     }
 
     return res
 }
 
-destroy_shaders :: proc(using ctx: ^lm.App_Vulkan_Context, shaders: Shaders)
-{
-    vk.DestroyPipelineLayout(device, shaders.pipeline_layout, nil)
-    vk.DestroyShaderEXT(device, shaders.test_vert, nil)
-    vk.DestroyShaderEXT(device, shaders.test_frag, nil)
-}
-
 Shaders :: struct
 {
     pipeline_layout: vk.PipelineLayout,
-    test_vert: vk.ShaderEXT,
-    test_frag: vk.ShaderEXT,
 
     model_to_proj: vk.ShaderEXT,
     lit: vk.ShaderEXT,
+    tonemap_vert: vk.ShaderEXT,
+    tonemap_frag: vk.ShaderEXT,
 
     // Desc set layouts
     lm_desc_set_layout: vk.DescriptorSetLayout,
+}
+
+destroy_shaders :: proc(using ctx: ^lm.App_Vulkan_Context, shaders: Shaders)
+{
+    vk.DestroyPipelineLayout(device, shaders.pipeline_layout, nil)
+    vk.DestroyShaderEXT(device, shaders.model_to_proj, nil)
+    vk.DestroyShaderEXT(device, shaders.lit, nil)
+    vk.DestroyShaderEXT(device, shaders.tonemap_vert, nil)
+    vk.DestroyShaderEXT(device, shaders.tonemap_frag, nil)
 }
 
 render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: lm.Scene, width: u32, height: u32)
@@ -790,6 +879,51 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
 
         vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
     }
+
+    vk.CmdEndRendering(cmd_buf)
+}
+
+tonemap_image :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffer, shaders: Shaders, tonemap_desc_set: vk.DescriptorSet, src: Image, dst_view: vk.ImageView)
+{
+    color_attachment := vk.RenderingAttachmentInfo {
+        sType = .RENDERING_ATTACHMENT_INFO,
+        imageView = dst_view,
+        imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+        loadOp = .CLEAR,
+        storeOp = .STORE,
+        clearValue = {
+            color = { float32 = { 0.0, 0.0, 0.0, 1.0 } }
+        }
+    }
+    rendering_info := vk.RenderingInfo {
+        sType = .RENDERING_INFO,
+        renderArea = {
+            offset = { 0, 0 },
+            extent = { src.width, src.height }
+        },
+        layerCount = 1,
+        colorAttachmentCount = 1,
+        pColorAttachments = &color_attachment,
+        pDepthAttachment = nil,
+    }
+    vk.CmdBeginRendering(cmd_buf, &rendering_info)
+
+    vk.CmdSetCullMode(cmd_buf, nil)
+    vk.CmdSetDepthTestEnable(cmd_buf, false)
+    vk.CmdSetDepthWriteEnable(cmd_buf, false)
+
+    tmp := tonemap_desc_set
+    vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.pipeline_layout, 0, 1, &tmp, 0, nil)
+
+    color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
+    vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
+
+    shader_stages := []vk.ShaderStageFlags { { .VERTEX }, { .GEOMETRY }, { .FRAGMENT } }
+    to_bind := []vk.ShaderEXT { shaders.tonemap_vert, vk.ShaderEXT(0), shaders.tonemap_frag }
+    assert(len(shader_stages) == len(to_bind))
+    vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
+
+    vk.CmdDrawIndexed(cmd_buf, 6, 1, 0, 0, 0)
 
     vk.CmdEndRendering(cmd_buf)
 }

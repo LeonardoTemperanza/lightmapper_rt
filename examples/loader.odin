@@ -12,7 +12,7 @@ import vku "../vk_utils"
 import vk "vendor:vulkan"
 import "ufbx"
 
-LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 50
+LIGHTMAP_TEXELS_PER_WORLD_UNIT :: 100
 LIGHTMAP_MIN_INSTANCE_TEXELS :: 64
 LIGHTMAP_MAX_INSTANCE_TEXELS :: 1024
 

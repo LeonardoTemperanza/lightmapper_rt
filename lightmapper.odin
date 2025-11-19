@@ -772,7 +772,7 @@ bake_main :: proc(using bake: ^Bake)
         images := [2]^Image { &lightmap, &lightmap_backbuffer }
         src_idx := 0
         dst_idx := 1
-        for _ in 0..<1
+        for _ in 0..<2
         {
             src_image := images[src_idx]
             dst_image := images[dst_idx]

@@ -279,6 +279,11 @@ image_barrier_safe_slow :: proc(image: ^Image, cmd_buf: vk.CommandBuffer, new_la
     image.layout = new_layout
 }
 
+image_barrier_transition_to_present :: proc(image: ^Image, cmd_buf: vk.CommandBuffer)
+{
+    image_barrier_safe_slow(image, cmd_buf, .PRESENT_SRC_KHR)
+}
+
 // Misc
 
 vk_check :: proc(result: vk.Result, location := #caller_location)

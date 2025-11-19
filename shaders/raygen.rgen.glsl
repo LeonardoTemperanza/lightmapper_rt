@@ -166,7 +166,7 @@ vec4 pathtrace(vec3 start_pos, vec3 world_normal)
 
     vec3 hit_pos = start_pos;
 
-    const uint MAX_BOUNCES = 4;
+    const uint MAX_BOUNCES = 8;
     uint backface_hits_count = 0;
     for(uint bounce = 0; bounce <= MAX_BOUNCES; ++bounce)
     {
@@ -225,7 +225,11 @@ void main()
 
     init_rng(pixel.y * size.x + pixel.x);
 
-    vec4 color = pathtrace(world_pos, world_normal);
+    uint NUM_SAMPLES = 5;
+    vec4 color = vec4(0.0f);
+    for(int i = 0; i < NUM_SAMPLES; ++i)
+        color += pathtrace(world_pos, world_normal);
+    color /= NUM_SAMPLES;
 
     // Progressive pathtracing.
     if(push.accum_counter != 0)
