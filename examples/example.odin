@@ -185,7 +185,7 @@ main :: proc()
         phys_device = vk_ctx.phys_device,
         device = vk_ctx.device,
         //queue = vk_ctx.lm_queue,
-        queue = vk_ctx.queue,
+        queue = vk_ctx.lm_queue,
         queue_family_idx = vk_ctx.queue_family_idx,
     }
     lm_ctx := lm.init_test(lm_vk_ctx)
@@ -196,8 +196,6 @@ main :: proc()
         tlas = scene.tlas,
     }
     bake := lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 2000, 1)
-
-    // time.sleep(30 * time.Second)
 
     // Create main render target
     render_target: Image

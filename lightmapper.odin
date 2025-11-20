@@ -34,6 +34,7 @@ import "core:sync"
 import "base:runtime"
 import "core:c"
 import thr "core:thread"
+import "core:time"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -731,11 +732,13 @@ bake_main :: proc(using bake: ^Bake)
 
     sync.mutex_lock(debug_mutex0)
 
-    render_gbuffers(bake, cmd_buf, &gbufs, push_samples_sbt, rt_desc_set)
+    // render_gbuffers(bake, cmd_buf, &gbufs, push_samples_sbt, rt_desc_set)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
     {
+        time.sleep(10000)
+
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
         submit_info := vk.SubmitInfo {
             sType = .SUBMIT_INFO,
