@@ -140,7 +140,7 @@ main :: proc()
         sType = .DESCRIPTOR_POOL_CREATE_INFO,
         flags = { .FREE_DESCRIPTOR_SET },
         maxSets = 50,
-        poolSizeCount = 3,
+        poolSizeCount = 5,
         pPoolSizes = raw_data([]vk.DescriptorPoolSize {
             {
                 type = .ACCELERATION_STRUCTURE_KHR,
@@ -152,6 +152,14 @@ main :: proc()
             },
             {
                 type = .SAMPLED_IMAGE,
+                descriptorCount = 10,
+            },
+            {
+                type = .COMBINED_IMAGE_SAMPLER,
+                descriptorCount = 10,
+            },
+            {
+                type = .STORAGE_BUFFER,
                 descriptorCount = 10,
             }
         })

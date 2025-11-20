@@ -638,7 +638,7 @@ bake_main :: proc(using bake: ^Bake)
         sType = .DESCRIPTOR_POOL_CREATE_INFO,
         flags = { .FREE_DESCRIPTOR_SET },
         maxSets = 50,
-        poolSizeCount = 3,
+        poolSizeCount = 5,
         pPoolSizes = raw_data([]vk.DescriptorPoolSize {
             {
                 type = .ACCELERATION_STRUCTURE_KHR,
@@ -651,7 +651,15 @@ bake_main :: proc(using bake: ^Bake)
             {
                 type = .SAMPLED_IMAGE,
                 descriptorCount = 10,
-            }
+            },
+            {
+                type = .COMBINED_IMAGE_SAMPLER,
+                descriptorCount = 10,
+            },
+            {
+                type = .STORAGE_BUFFER,
+                descriptorCount = 10,
+            },
         })
     }
     desc_pool: vk.DescriptorPool
@@ -764,7 +772,7 @@ bake_main :: proc(using bake: ^Bake)
             flags = { .ONE_TIME_SUBMIT },
         }))
 
-        pathtrace_iter(bake, cmd_buf, pathtrace_sbt, rt_desc_set, iter)
+        // pathtrace_iter(bake, cmd_buf, pathtrace_sbt, rt_desc_set, iter)
 
         vku.image_barrier_safe_slow(&lightmap, cmd_buf, .GENERAL)
 
