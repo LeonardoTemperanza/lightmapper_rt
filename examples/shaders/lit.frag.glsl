@@ -10,6 +10,16 @@ layout(location = 0) out vec4 out_color;
 
 layout(set = 0, binding = 0) uniform sampler2D lightmap;
 
+layout(push_constant) uniform PerObj
+{
+    mat4 model_to_world;
+    mat4 normal_mat;
+    mat4 world_to_proj;
+    vec2 lm_uv_offset;
+    float lm_uv_scale;
+    uint bicubic;  // b32
+} per_obj;
+
 vec4 cubic(float v)
 {
     vec4 n = vec4(1.0, 2.0, 3.0, 4.0) - v;
@@ -70,6 +80,10 @@ void main()
     //out_color = vec4(world_normal * 0.5f + 0.5f, 1);
     //out_color = vec4(in_lm_uv, 0.0f, 1.0f);
     //out_color = texture(lightmap, in_lm_uv);
-    out_color = sample_texture_bicubic(lightmap, in_lm_uv);
     //out_color = uv_checkerboard(in_lm_uv);
+
+    if(per_obj.bicubic != 0)
+        out_color = sample_texture_bicubic(lightmap, in_lm_uv);
+    else
+        out_color = texture(lightmap, in_lm_uv);
 }

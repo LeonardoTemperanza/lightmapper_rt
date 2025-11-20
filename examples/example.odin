@@ -38,6 +38,15 @@ import vk "vendor:vulkan"
 import vku "../vk_utils"
 import lm "../"
 
+Filter_Mode :: enum
+{
+    Point,  // For testing
+    Bilinear,
+    Bicubic
+}
+
+FILTER_MODE :: Filter_Mode.Bicubic
+
 NUM_FRAMES_IN_FLIGHT :: 1
 NUM_SWAPCHAIN_IMAGES :: 2
 WINDOW_SIZE_X: u32
@@ -153,8 +162,8 @@ main :: proc()
     // Create linear sampler
     lightmap_sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
-        magFilter = .LINEAR,
-        minFilter = .LINEAR,
+        magFilter = .NEAREST if FILTER_MODE == .Point else .LINEAR,
+        minFilter = .NEAREST if FILTER_MODE == .Point else .LINEAR,
         mipmapMode = .LINEAR,
         addressModeU = .REPEAT,
         addressModeV = .REPEAT,
@@ -848,11 +857,11 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
     world_to_view := compute_world_to_view()
     view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false)
 
-    loop: for instance in scene.instances
+    for instance in scene.instances
     {
         mesh := scene.meshes[instance.mesh_idx]
 
-        if !mesh.lm_uvs_present { continue loop }
+        if !mesh.lm_uvs_present { continue }
 
         offset := vk.DeviceSize(0)
         vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
@@ -868,6 +877,7 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
             world_to_proj: matrix[4, 4]f32,
             lm_uv_offset: [2]f32,
             lm_uv_scale: f32,
+            is_bicubic: b32,
         }
         push := Push {
             model_to_world = instance.transform,
@@ -875,6 +885,7 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
             world_to_proj = view_to_proj * world_to_view,
             lm_uv_offset = instance.lm_offset,
             lm_uv_scale = instance.lm_scale,
+            is_bicubic = FILTER_MODE == .Bicubic
         }
         vk.CmdPushConstants(cmd_buf, shaders.pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
 

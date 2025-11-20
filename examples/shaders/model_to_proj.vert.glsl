@@ -8,6 +8,7 @@ layout(push_constant) uniform PerObj
     mat4 world_to_proj;
     vec2 lm_uv_offset;
     float lm_uv_scale;
+    uint bicubic;  // b32
 } per_obj;
 
 layout(location = 0) in vec3 in_pos;
