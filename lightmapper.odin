@@ -1213,9 +1213,9 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
     raymiss_size   := align_up(rt_info.handle_size, rt_info.handle_align);
     callable_size  := u32(0)
     raygen_offset := u32(0)
-    rayhit_offset := align_up(raygen_size, rt_info.base_align)
-    raymiss_offset := align_up(rayhit_size, rt_info.base_align)
-    callable_offset := align_up(raymiss_size, rt_info.base_align)
+    rayhit_offset := align_up(raygen_offset + raygen_size, rt_info.base_align)
+    raymiss_offset := align_up(rayhit_offset + rayhit_size, rt_info.base_align)
+    callable_offset := align_up(raymiss_offset + raymiss_size, rt_info.base_align)
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + u64(raygen_offset)),
@@ -1250,20 +1250,32 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
 
     sbt_addr := u64(vku.get_buffer_device_address(device, sbt))
 
+    data_size := u32(0)
+    count := u32(1)
+    raygen_size    := align_up(rt_info.handle_size, rt_info.handle_align);
+    rayhit_size    := align_up(rt_info.handle_size, rt_info.handle_align);
+    raymiss_size   := align_up(rt_info.handle_size, rt_info.handle_align);
+    callable_size  := u32(0)
+
+    raygen_offset := u32(0)
+    rayhit_offset := align_up(raygen_offset + raygen_size, rt_info.base_align)
+    raymiss_offset := align_up(rayhit_offset + rayhit_size, rt_info.base_align)
+    callable_offset := align_up(raymiss_offset + raymiss_size, rt_info.base_align)
+
     raygen_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),
-        stride = vk.DeviceSize(rt_info.handle_align),
-        size = vk.DeviceSize(rt_info.handle_align),
+        deviceAddress = vk.DeviceAddress(sbt_addr + u64(raygen_offset)),
+        stride = vk.DeviceSize(raygen_size),
+        size = vk.DeviceSize(raygen_size),
     }
     raymiss_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_info.base_align)),
-        stride = vk.DeviceSize(rt_info.handle_align),
-        size = vk.DeviceSize(rt_info.handle_align),
+        deviceAddress = vk.DeviceAddress(sbt_addr + u64(raymiss_offset)),
+        stride = vk.DeviceSize(raymiss_size),
+        size = vk.DeviceSize(raymiss_size),
     }
     rayhit_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_info.base_align)),
-        stride = vk.DeviceSize(rt_info.handle_align),
-        size = vk.DeviceSize(rt_info.handle_align),
+        deviceAddress = vk.DeviceAddress(sbt_addr + u64(rayhit_offset)),
+        stride = vk.DeviceSize(rayhit_size),
+        size = vk.DeviceSize(rayhit_size),
     }
     callable_region := vk.StridedDeviceAddressRegionKHR {}
 

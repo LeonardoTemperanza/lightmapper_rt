@@ -75,9 +75,9 @@ create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, que
     callable_size  := u32(0)
 
     raygen_offset := u32(0)
-    rayhit_offset := align_up(raygen_size, rt_info.base_align)
-    raymiss_offset := align_up(rayhit_size, rt_info.base_align)
-    callable_offset := align_up(raymiss_size, rt_info.base_align)
+    rayhit_offset := align_up(raygen_offset + raygen_size, rt_info.base_align)
+    raymiss_offset := align_up(rayhit_offset + rayhit_size, rt_info.base_align)
+    callable_offset := align_up(raymiss_offset + raymiss_size, rt_info.base_align)
 
     buf_size := callable_offset + callable_size
     shader_handle_storage := make([]byte, buf_size)
