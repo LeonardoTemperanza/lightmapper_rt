@@ -1208,31 +1208,29 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
 
     sbt_addr := u64(vku.get_buffer_device_address(device, sbt))
 
-    raygen_size := align_up(rt_info.handle_size, rt_info.handle_align)
-    miss_size   := align_up(rt_info.handle_size, rt_info.handle_align)
-    hit_size    := align_up(rt_info.handle_size, rt_info.handle_align)
-
-    // Ensure each region starts at a baseAlignment boundary
-    raygenOffset := 0
-    missOffset   := align_up(raygen_size, baseAlignment)
-    hitOffset    := align_up(missOffset + miss_size, baseAlignment)
-
-    buffer_size := hit_offset + hit_size
+    raygen_size    := align_up(rt_info.handle_size, rt_info.handle_align);
+    rayhit_size    := align_up(rt_info.handle_size, rt_info.handle_align);
+    raymiss_size   := align_up(rt_info.handle_size, rt_info.handle_align);
+    callable_size  := u32(0)
+    raygen_offset := u32(0)
+    rayhit_offset := align_up(raygen_size, rt_info.base_align)
+    raymiss_offset := align_up(rayhit_size, rt_info.base_align)
+    callable_offset := align_up(raymiss_size, rt_info.base_align)
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),
-        stride = vk.DeviceSize(rt_info.handle_alignment),
-        size = vk.DeviceSize(rt_info.handle_alignment),
+        deviceAddress = vk.DeviceAddress(sbt_addr + u64(raygen_offset)),
+        stride = vk.DeviceSize(raygen_size),
+        size = vk.DeviceSize(raygen_size),
     }
     raymiss_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_info.base_align)),
-        stride = vk.DeviceSize(rt_info.handle_alignment),
-        size = vk.DeviceSize(rt_info.handle_alignment),
+        deviceAddress = vk.DeviceAddress(sbt_addr + u64(raymiss_offset)),
+        stride = vk.DeviceSize(raymiss_size),
+        size = vk.DeviceSize(raymiss_size),
     }
     rayhit_region := vk.StridedDeviceAddressRegionKHR {
-        deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_info.base_align)),
-        stride = vk.DeviceSize(rt_info.handle_alignment),
-        size = vk.DeviceSize(rt_info.handle_alignment),
+        deviceAddress = vk.DeviceAddress(sbt_addr + u64(rayhit_offset)),
+        stride = vk.DeviceSize(rayhit_size),
+        size = vk.DeviceSize(rayhit_size),
     }
     callable_region := vk.StridedDeviceAddressRegionKHR {}
 
@@ -1254,18 +1252,18 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),
-        stride = vk.DeviceSize(rt_info.handle_alignment),
-        size = vk.DeviceSize(rt_info.handle_alignment),
+        stride = vk.DeviceSize(rt_info.handle_align),
+        size = vk.DeviceSize(rt_info.handle_align),
     }
     raymiss_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 1 * u64(rt_info.base_align)),
-        stride = vk.DeviceSize(rt_info.handle_alignment),
-        size = vk.DeviceSize(rt_info.handle_alignment),
+        stride = vk.DeviceSize(rt_info.handle_align),
+        size = vk.DeviceSize(rt_info.handle_align),
     }
     rayhit_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 2 * u64(rt_info.base_align)),
-        stride = vk.DeviceSize(rt_info.handle_alignment),
-        size = vk.DeviceSize(rt_info.handle_alignment),
+        stride = vk.DeviceSize(rt_info.handle_align),
+        size = vk.DeviceSize(rt_info.handle_align),
     }
     callable_region := vk.StridedDeviceAddressRegionKHR {}
 
@@ -2099,4 +2097,10 @@ vk_check :: proc(result: vk.Result, location := #caller_location)
     if result != .SUCCESS {
         fatal_error("Vulkan failure: %", result, location = location)
     }
+}
+
+align_up :: proc(x, align: u32) -> (aligned: u32)
+{
+    assert(0 == (align & (align - 1)), "must align to a power of two")
+    return (x + (align - 1)) &~ (align - 1)
 }

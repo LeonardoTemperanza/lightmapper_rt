@@ -5,6 +5,7 @@ import vk "vendor:vulkan"
 import "core:mem"
 import "base:runtime"
 import "core:log"
+import intr "base:intrinsics"
 
 // Utilities to make using Vulkan a little more bearable. A lot of stuff here
 // is not really optimal, mostly for prototyping or for things that don't
@@ -68,18 +69,20 @@ create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, que
 
     data_size := u32(0)
     count := u32(1)
-    raygen_stride  := align_up(rt_info.handle_size + data_size, rt_info.handle_alignment);
-    raygen_size    := align_up(count * raygen_stride, rt_info.base_align);
-    rayhit_stride  := align_up(rt_info.handle_size + data_size, rt_info.handle_alignment);
-    rayhit_size    := align_up(count * rayhit_stride, rt_info.base_align);
-    raymiss_stride := align_up(rt_info.handle_size + data_size, rt_info.handle_alignment);
-    raymiss_size   := align_up(count * raymiss_stride, rt_info.base_align);
+    raygen_size    := align_up(rt_info.handle_size, rt_info.handle_align);
+    rayhit_size    := align_up(rt_info.handle_size, rt_info.handle_align);
+    raymiss_size   := align_up(rt_info.handle_size, rt_info.handle_align);
+    callable_size  := u32(0)
 
-    storage_size := align_up(raygen_size,  rt_info.buf_align) +
-                    align_up(raymiss_size, rt_info.buf_align) +
-                    align_up(rayhit_size,  rt_info.buf_align)
-    shader_handle_storage := make([]byte, storage_size, allocator = context.temp_allocator)
-    vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, pipeline, 0, group_count, int(storage_size), raw_data(shader_handle_storage)))
+    raygen_offset := u32(0)
+    rayhit_offset := align_up(raygen_size, rt_info.base_align)
+    raymiss_offset := align_up(rayhit_size, rt_info.base_align)
+    callable_offset := align_up(raymiss_size, rt_info.base_align)
+
+    buf_size := callable_offset + callable_size
+    shader_handle_storage := make([]byte, buf_size)
+    defer delete(shader_handle_storage)
+    vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, pipeline, 0, group_count, int(buf_size), raw_data(shader_handle_storage)))
 
     size := group_count * rt_info.base_align
     staging_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
@@ -89,12 +92,9 @@ create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, que
 
     data: rawptr
     vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
-    for group_idx in 0..<group_count
-    {
-        mem.copy(rawptr(uintptr(data) + uintptr(group_idx * rt_info.base_align)),
-                 &shader_handle_storage[group_idx * rt_info.handle_size],
-                 int(rt_info.handle_size))
-    }
+    intr.mem_copy(rawptr(uintptr(data) + uintptr(raygen_offset)),  &shader_handle_storage[0 * rt_info.handle_size], rt_info.handle_size)
+    intr.mem_copy(rawptr(uintptr(data) + uintptr(raymiss_offset)), &shader_handle_storage[1 * rt_info.handle_size], rt_info.handle_size)
+    intr.mem_copy(rawptr(uintptr(data) + uintptr(rayhit_offset)),  &shader_handle_storage[2 * rt_info.handle_size], rt_info.handle_size)
     vk.UnmapMemory(device, staging_buf.mem)
 
     cmd_buf := begin_tmp_cmd_buf(device, cmd_pool)
@@ -345,22 +345,17 @@ get_buffer_device_address :: proc(device: vk.Device, buffer: Buffer) -> vk.Devic
 
 RT_Info :: struct
 {
-    handle_alignment: u32,
+    handle_align: u32,
     base_align: u32,
     handle_size: u32,
-    buf_align: u32,
 }
 
 get_rt_info :: proc(phys_device: vk.PhysicalDevice) -> RT_Info
 {
     res: RT_Info
 
-    device_address_properties := vk.PhysicalDeviceBufferDeviceAddressPropertiesKHR {
-        sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_PROPERTIES_KHR,
-    }
     rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
         sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR,
-        pNext = &device_address_properties
     }
     properties := vk.PhysicalDeviceProperties2 {
         sType = .PHYSICAL_DEVICE_PROPERTIES_2,
@@ -368,9 +363,8 @@ get_rt_info :: proc(phys_device: vk.PhysicalDevice) -> RT_Info
     }
     vk.GetPhysicalDeviceProperties2(phys_device, &properties)
 
-    res.handle_alignment = rt_properties.shaderGroupHandleAlignment
-    res.base_align       = rt_properties.shaderGroupBaseAlignment
-    res.handle_size      = rt_properties.shaderGroupHandleSize
-    res.buf_align        = device_address_properties.minStorageBufferOffsetAlignment
+    res.handle_align = rt_properties.shaderGroupHandleAlignment
+    res.base_align   = rt_properties.shaderGroupBaseAlignment
+    res.handle_size  = rt_properties.shaderGroupHandleSize
     return res
 }
