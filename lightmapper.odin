@@ -732,7 +732,7 @@ bake_main :: proc(using bake: ^Bake)
 
     sync.mutex_lock(debug_mutex0)
 
-    // render_gbuffers(bake, cmd_buf, &gbufs, push_samples_sbt, rt_desc_set)
+    render_gbuffers(bake, cmd_buf, &gbufs, push_samples_sbt, rt_desc_set)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
@@ -775,7 +775,7 @@ bake_main :: proc(using bake: ^Bake)
             flags = { .ONE_TIME_SUBMIT },
         }))
 
-        // pathtrace_iter(bake, cmd_buf, pathtrace_sbt, rt_desc_set, iter)
+        pathtrace_iter(bake, cmd_buf, pathtrace_sbt, rt_desc_set, iter)
 
         vku.image_barrier_safe_slow(&lightmap, cmd_buf, .GENERAL)
 
@@ -1136,7 +1136,7 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
 
     // Perform 2 passes, the first with conservative rasterization and
     // the second one without, which cleans up edges on contiguous triangles.
-    for use_conservative_rasterization in ([2]bool{ true, false })
+    for use_conservative_rasterization in ([?]bool{ true, false })
     {
         vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
         vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE if use_conservative_rasterization else nil)
@@ -1207,6 +1207,17 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
     vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
 
     sbt_addr := u64(vku.get_buffer_device_address(device, sbt))
+
+    raygen_size := align_up(rt_info.handle_size, rt_info.handle_align)
+    miss_size   := align_up(rt_info.handle_size, rt_info.handle_align)
+    hit_size    := align_up(rt_info.handle_size, rt_info.handle_align)
+
+    // Ensure each region starts at a baseAlignment boundary
+    raygenOffset := 0
+    missOffset   := align_up(raygen_size, baseAlignment)
+    hitOffset    := align_up(missOffset + miss_size, baseAlignment)
+
+    buffer_size := hit_offset + hit_size
 
     raygen_region := vk.StridedDeviceAddressRegionKHR {
         deviceAddress = vk.DeviceAddress(sbt_addr + 0 * u64(rt_info.base_align)),

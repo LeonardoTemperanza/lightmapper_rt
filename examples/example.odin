@@ -45,7 +45,7 @@ Filter_Mode :: enum
     Bicubic
 }
 
-FILTER_MODE :: Filter_Mode.Bicubic
+FILTER_MODE :: Filter_Mode.Point
 
 NUM_FRAMES_IN_FLIGHT :: 1
 NUM_SWAPCHAIN_IMAGES :: 2

@@ -27,17 +27,14 @@ layout(set = 0, binding = 4) readonly buffer Geometries
 
 struct HitInfo
 {
-    // Input
-    vec3 geom_normal;
-
-    // Output
     bool hit_backface;
     vec3 adjusted_pos;
+    float dst;
 };
 
 layout(location = 0) rayPayloadInEXT HitInfo hit_info;
 
-const float BIAS = 0.0001f;
+const float BIAS = 0.001f;
 
 hitAttributeEXT vec2 attribs;
 
@@ -57,5 +54,6 @@ void main()
 
     vec3 hit_pos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
     hit_info.hit_backface = true;
-    hit_info.adjusted_pos = hit_pos - geom_normal_out * BIAS;
+    hit_info.adjusted_pos = hit_pos + geom_normal_out * BIAS;
+    hit_info.dst = gl_HitTEXT;
 }

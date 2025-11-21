@@ -59,9 +59,25 @@ create_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, byte_si
 
 create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, pipeline: vk.Pipeline, group_count: u32) -> Buffer
 {
+    align_up :: proc(x, align: u32) -> (aligned: u32) {
+        assert(0 == (align & (align - 1)), "must align to a power of two")
+        return (x + (align - 1)) &~ (align - 1)
+    }
+
     rt_info := get_rt_info(phys_device)
 
-    storage_size := group_count * rt_info.handle_size
+    data_size := u32(0)
+    count := u32(1)
+    raygen_stride  := align_up(rt_info.handle_size + data_size, rt_info.handle_alignment);
+    raygen_size    := align_up(count * raygen_stride, rt_info.base_align);
+    rayhit_stride  := align_up(rt_info.handle_size + data_size, rt_info.handle_alignment);
+    rayhit_size    := align_up(count * rayhit_stride, rt_info.base_align);
+    raymiss_stride := align_up(rt_info.handle_size + data_size, rt_info.handle_alignment);
+    raymiss_size   := align_up(count * raymiss_stride, rt_info.base_align);
+
+    storage_size := align_up(raygen_size,  rt_info.buf_align) +
+                    align_up(raymiss_size, rt_info.buf_align) +
+                    align_up(rayhit_size,  rt_info.buf_align)
     shader_handle_storage := make([]byte, storage_size, allocator = context.temp_allocator)
     vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, pipeline, 0, group_count, int(storage_size), raw_data(shader_handle_storage)))
 
@@ -332,14 +348,19 @@ RT_Info :: struct
     handle_alignment: u32,
     base_align: u32,
     handle_size: u32,
+    buf_align: u32,
 }
 
 get_rt_info :: proc(phys_device: vk.PhysicalDevice) -> RT_Info
 {
     res: RT_Info
 
+    device_address_properties := vk.PhysicalDeviceBufferDeviceAddressPropertiesKHR {
+        sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_PROPERTIES_KHR,
+    }
     rt_properties := vk.PhysicalDeviceRayTracingPipelinePropertiesKHR {
-        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
+        sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR,
+        pNext = &device_address_properties
     }
     properties := vk.PhysicalDeviceProperties2 {
         sType = .PHYSICAL_DEVICE_PROPERTIES_2,
@@ -350,5 +371,6 @@ get_rt_info :: proc(phys_device: vk.PhysicalDevice) -> RT_Info
     res.handle_alignment = rt_properties.shaderGroupHandleAlignment
     res.base_align       = rt_properties.shaderGroupBaseAlignment
     res.handle_size      = rt_properties.shaderGroupHandleSize
+    res.buf_align        = device_address_properties.minStorageBufferOffsetAlignment
     return res
 }

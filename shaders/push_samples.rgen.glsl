@@ -10,12 +10,9 @@ layout(set = 0, binding = 3, rgba8) uniform image2D gbuf_worldnormals;
 
 struct Payload
 {
-    // Input
-    vec3 geom_normal;
-
-    // Output
     bool hit_backface;
     vec3 adjusted_pos;
+    float dst;
 };
 
 layout(location = 0) rayPayloadEXT Payload payload;
@@ -23,7 +20,8 @@ layout(location = 0) rayPayloadEXT Payload payload;
 #define PI      3.1415926
 #define DEG2RAD PI / 180.0f;
 
-const float T_MIN = 0.001;
+const float T_MIN = 0.001f;
+const float OVERSHOOT_FACTOR = 1.25f;
 
 struct Ray
 {
@@ -66,7 +64,7 @@ void main()
 
     vec3 right = normalize(cross(world_normal, vec3(0.0f, 1.0f, 0.0f)));
     vec3 up = normalize(cross(right, world_normal));
-    float ray_length = texel_size * 0.5f * 1.25f;
+    float ray_length = texel_size * 0.5f * ;
 
     const uint NUM_RAYS = 8;
     vec3 dirs[NUM_RAYS] = {
@@ -80,16 +78,28 @@ void main()
         (-up + right),
     };
 
+    bool found = false;
+    float min_dst = 1000000000.0f;
+    vec3 adjusted = vec3(0.0f);
     payload.hit_backface = false;
     for(int i = 0; i < NUM_RAYS; ++i)
     {
-        ray_scene_intersection(Ray(world_pos + world_normal * 0.001f, dirs[i]), ray_length);
-        if(payload.hit_backface) break;
+        ray_scene_intersection(Ray(world_pos + world_normal * 0.001f, normalize(dirs[i])), ray_length * length(dirs[i]));
+        if(payload.hit_backface)
+        {
+            if(min_dst > payload.dst)
+            {
+                min_dst = payload.dst;
+                adjusted = payload.adjusted_pos;
+            }
+
+            found = true;
+        }
     }
 
-    //if(payload.hit_backface) {
-    //    imageStore(gbuf_worldpos, pixel, vec4(payload.adjusted_pos, texel_size));
-    //}
+    if(found) {
+        imageStore(gbuf_worldpos, pixel, vec4(adjusted, -1.0f));
+    }
 
     //imageStore(gbuf_worldpos, pixel, vec4(texel_size));
 }
