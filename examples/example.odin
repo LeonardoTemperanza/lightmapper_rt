@@ -185,7 +185,7 @@ main :: proc()
         phys_device = vk_ctx.phys_device,
         device = vk_ctx.device,
         //queue = vk_ctx.lm_queue,
-        queue = vk_ctx.lm_queue,
+        queue = vk_ctx.queue,
         queue_family_idx = vk_ctx.queue_family_idx,
     }
     lm_ctx := lm.init_test(lm_vk_ctx)

@@ -67,8 +67,11 @@ create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, que
 
     rt_info := get_rt_info(phys_device)
 
-    data_size := u32(0)
-    count := u32(1)
+    data_size := rt_info.handle_size * group_count
+    shader_handle_storage := make([]byte, data_size)
+    defer delete(shader_handle_storage)
+    vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, pipeline, 0, group_count, int(data_size), raw_data(shader_handle_storage)))
+
     raygen_size    := align_up(rt_info.handle_size, rt_info.handle_align);
     rayhit_size    := align_up(rt_info.handle_size, rt_info.handle_align);
     raymiss_size   := align_up(rt_info.handle_size, rt_info.handle_align);
@@ -80,26 +83,22 @@ create_sbt_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, que
     callable_offset := align_up(raymiss_offset + raymiss_size, rt_info.base_align)
 
     buf_size := callable_offset + callable_size
-    shader_handle_storage := make([]byte, buf_size)
-    defer delete(shader_handle_storage)
-    vk_check(vk.GetRayTracingShaderGroupHandlesKHR(device, pipeline, 0, group_count, int(buf_size), raw_data(shader_handle_storage)))
 
-    size := group_count * rt_info.base_align
     staging_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
     staging_properties := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
-    staging_buf := create_buffer(device, phys_device, size, staging_usage, staging_properties, {})
+    staging_buf := create_buffer(device, phys_device, buf_size, staging_usage, staging_properties, {})
     defer destroy_buffer(device, &staging_buf)
 
     data: rawptr
-    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(size), {}, &data)
+    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(buf_size), {}, &data)
     intr.mem_copy(rawptr(uintptr(data) + uintptr(raygen_offset)),  &shader_handle_storage[0 * rt_info.handle_size], rt_info.handle_size)
     intr.mem_copy(rawptr(uintptr(data) + uintptr(raymiss_offset)), &shader_handle_storage[1 * rt_info.handle_size], rt_info.handle_size)
     intr.mem_copy(rawptr(uintptr(data) + uintptr(rayhit_offset)),  &shader_handle_storage[2 * rt_info.handle_size], rt_info.handle_size)
     vk.UnmapMemory(device, staging_buf.mem)
 
     cmd_buf := begin_tmp_cmd_buf(device, cmd_pool)
-    res := create_buffer(device, phys_device, size, { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-    copy_buffer(cmd_buf, staging_buf, res, vk.DeviceSize(size))
+    res := create_buffer(device, phys_device, buf_size, { .SHADER_BINDING_TABLE_KHR, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    copy_buffer(cmd_buf, staging_buf, res, vk.DeviceSize(buf_size))
     end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
 
     return res

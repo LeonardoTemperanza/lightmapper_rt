@@ -4,12 +4,9 @@
 
 struct Payload
 {
-    // Input
-    vec3 geom_normal;
-
-    // Output
     bool hit_backface;
     vec3 adjusted_pos;
+    float dst;
 };
 
 layout(location = 0) rayPayloadInEXT Payload payload;

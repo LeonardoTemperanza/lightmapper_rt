@@ -64,7 +64,7 @@ void main()
 
     vec3 right = normalize(cross(world_normal, vec3(0.0f, 1.0f, 0.0f)));
     vec3 up = normalize(cross(right, world_normal));
-    float ray_length = texel_size * 0.5f * ;
+    float ray_length = texel_size * 0.5f * OVERSHOOT_FACTOR;
 
     const uint NUM_RAYS = 8;
     vec3 dirs[NUM_RAYS] = {
@@ -100,6 +100,4 @@ void main()
     if(found) {
         imageStore(gbuf_worldpos, pixel, vec4(adjusted, -1.0f));
     }
-
-    //imageStore(gbuf_worldpos, pixel, vec4(texel_size));
 }

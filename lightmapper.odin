@@ -373,14 +373,19 @@ init_vk_context :: proc(window: ^sdl.Window, debug_callback: vk.ProcDebugUtilsMe
             pfnUserCallback = debug_callback
         }
 
+        validation_features := []vk.ValidationFeatureEnableEXT {
+            .GPU_ASSISTED,
+            .GPU_ASSISTED_RESERVE_BINDING_SLOT,
+            .SYNCHRONIZATION_VALIDATION,
+        }
+
         next: rawptr
         next = &debug_messenger_ci
-        validation_feature := vk.ValidationFeatureEnableEXT.SYNCHRONIZATION_VALIDATION
         next = &vk.ValidationFeaturesEXT {
             sType = .VALIDATION_FEATURES_EXT,
             pNext = next,
-            enabledValidationFeatureCount = 1,
-            pEnabledValidationFeatures = &validation_feature,
+            enabledValidationFeatureCount = u32(len(validation_features)),
+            pEnabledValidationFeatures = raw_data(validation_features),
         }
 
         vk_check(vk.CreateInstance(&{
@@ -737,8 +742,6 @@ bake_main :: proc(using bake: ^Bake)
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
     {
-        time.sleep(10000)
-
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
         submit_info := vk.SubmitInfo {
             sType = .SUBMIT_INFO,
@@ -1004,7 +1007,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         color_attachment := vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
             imageView = gbuffers.world_pos.view,
-            imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+            imageLayout = gbuffers.world_normals.layout,
             loadOp = .CLEAR,
             storeOp = .STORE,
             clearValue = {
@@ -1039,7 +1042,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         color_attachment := vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
             imageView = gbuffers.world_normals.view,
-            imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+            imageLayout = gbuffers.world_normals.layout,
             loadOp = .CLEAR,
             storeOp = .STORE,
             clearValue = {
@@ -1074,7 +1077,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         color_attachment := vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
             imageView = gbuffers.tri_idx.view,
-            imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+            imageLayout = gbuffers.tri_idx.layout,
             loadOp = .CLEAR,
             storeOp = .STORE,
             clearValue = {
@@ -1208,10 +1211,10 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
 
     sbt_addr := u64(vku.get_buffer_device_address(device, sbt))
 
-    raygen_size    := align_up(rt_info.handle_size, rt_info.handle_align);
-    rayhit_size    := align_up(rt_info.handle_size, rt_info.handle_align);
-    raymiss_size   := align_up(rt_info.handle_size, rt_info.handle_align);
-    callable_size  := u32(0)
+    raygen_size   := align_up(rt_info.handle_size, rt_info.handle_align);
+    rayhit_size   := align_up(rt_info.handle_size, rt_info.handle_align);
+    raymiss_size  := align_up(rt_info.handle_size, rt_info.handle_align);
+    callable_size := u32(0)
     raygen_offset := u32(0)
     rayhit_offset := align_up(raygen_offset + raygen_size, rt_info.base_align)
     raymiss_offset := align_up(rayhit_offset + rayhit_size, rt_info.base_align)
@@ -1850,7 +1853,7 @@ update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas:
             pImageInfo = raw_data([]vk.DescriptorImageInfo {
                 {
                     imageView = lightmap.view,
-                    imageLayout = .GENERAL,
+                    imageLayout = lightmap.layout,
                 }
             })
         },
@@ -1863,7 +1866,7 @@ update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas:
             pImageInfo = raw_data([]vk.DescriptorImageInfo {
                 {
                     imageView = gbuffers.world_pos.view,
-                    imageLayout = .GENERAL,
+                    imageLayout = gbuffers.world_pos.layout,
                 }
             })
         },
@@ -1876,7 +1879,7 @@ update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas:
             pImageInfo = raw_data([]vk.DescriptorImageInfo {
                 {
                     imageView = gbuffers.world_normals.view,
-                    imageLayout = .GENERAL,
+                    imageLayout = gbuffers.world_normals.layout,
                 }
             })
         },
@@ -1910,7 +1913,7 @@ update_dilate_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, d
             pImageInfo = raw_data([]vk.DescriptorImageInfo {
                 {
                     imageView = src_image.view,
-                    imageLayout = .GENERAL,
+                    imageLayout = src_image.layout,
                     sampler = dummy_sampler,
                 }
             })
@@ -1924,7 +1927,7 @@ update_dilate_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, d
             pImageInfo = raw_data([]vk.DescriptorImageInfo {
                 {
                     imageView = dst_image.view,
-                    imageLayout = .GENERAL,
+                    imageLayout = dst_image.layout,
                 }
             })
         },
