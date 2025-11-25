@@ -63,7 +63,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPo
         for j in 0..<fbx_mesh.uv_sets.count
         {
             uv_set := fbx_mesh.uv_sets.data[j]
-            if uv_set.name.data == "LightMapUV" || uv_set.name.data == "UVMap_Lightmap" {
+            if uv_set.name.data == "LightMapUV" || uv_set.name.data == "UVMap_Lightmap" || uv_set.name.data == "UVSet1" {
                 lightmap_uv_idx = int(uv_set.index)
             }
         }

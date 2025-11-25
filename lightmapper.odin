@@ -374,8 +374,8 @@ init_vk_context :: proc(window: ^sdl.Window, debug_callback: vk.ProcDebugUtilsMe
         }
 
         validation_features := []vk.ValidationFeatureEnableEXT {
-            .GPU_ASSISTED,
-            .GPU_ASSISTED_RESERVE_BINDING_SLOT,
+            //.GPU_ASSISTED,
+            //.GPU_ASSISTED_RESERVE_BINDING_SLOT,
             .SYNCHRONIZATION_VALIDATION,
         }
 
@@ -2118,4 +2118,10 @@ align_up :: proc(x, align: u32) -> (aligned: u32)
 {
     assert(0 == (align & (align - 1)), "must align to a power of two")
     return (x + (align - 1)) &~ (align - 1)
+}
+
+// UV Seam blending
+smooth_seams :: proc(using bake: ^Bake)
+{
+    
 }

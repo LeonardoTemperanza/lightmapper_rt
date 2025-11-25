@@ -45,7 +45,7 @@ Filter_Mode :: enum
     Bicubic
 }
 
-FILTER_MODE :: Filter_Mode.Point
+FILTER_MODE :: Filter_Mode.Bicubic
 
 NUM_FRAMES_IN_FLIGHT :: 1
 NUM_SWAPCHAIN_IMAGES :: 2
@@ -126,8 +126,8 @@ main :: proc()
     vk_check(vk.CreateCommandPool(vk_ctx.device, &upload_cmd_pool_ci, nil, &upload_cmd_pool))
     defer vk.DestroyCommandPool(vk_ctx.device, upload_cmd_pool, nil)
 
-    //scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT.fbx")
-    scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", 10, 4096, 4096)
+    scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx")
+    // scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", 10, 4096, 4096)
     // defer destroy_scene(&vk_ctx, &scene)
 
     vk_frames := create_vk_frames(&vk_ctx)
