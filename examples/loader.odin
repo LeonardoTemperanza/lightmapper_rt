@@ -54,7 +54,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPo
         }
 
         idx_usage_flags := vk.BufferUsageFlags { .INDEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }
-        mesh.indices_gpu = vku.upload_buffer(device, phys_device, queue, cmd_pool, indices[:], idx_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+        mesh.indices = vku.upload_buffer(device, phys_device, queue, cmd_pool, indices[:], idx_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
         mesh.indices_cpu = indices
 
         // NOTE: uv_set[0] is the same as fbx_mesh.vertex_uv
@@ -103,8 +103,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPo
         }
 
         mesh.idx_count = u32(index_count)
-
-        mesh.blas = cast(lm.Accel_Structure) create_blas(ctx, cmd_pool, mesh.pos, mesh.indices_gpu, u32(len(pos_buf)), u32(len(indices)))
+        mesh.blas = cast(lm.Accel_Structure) create_blas(ctx, cmd_pool, mesh.pos, mesh.indices, u32(len(pos_buf)), u32(len(indices)))
 
         append(&res.meshes, mesh)
     }

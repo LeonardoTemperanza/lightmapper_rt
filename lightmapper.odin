@@ -42,15 +42,29 @@ import vk "vendor:vulkan"
 import vku "vk_utils"
 import oidn "oidn_odin_bindings"
 
+// For renderdoc debugging
+SYNCHRONOUS :: #config(LM_SYNCHRONOUS, false)
+
 Context :: struct
 {
     using vk_ctx: Lightmapper_Vulkan_Context,
     oidn_device: oidn.Device,
     shaders: Shaders,
+
+    meshes: [dynamic]Mesh,
+    meshes_free: [dynamic]u32,
+    textures: [dynamic]Texture,
+    textures_free: [dynamic]u32,
 }
 
 Buffer :: vku.Buffer
 Image :: vku.Image
+
+Texture :: struct
+{
+    gen: u32,
+    using image: Image,
+}
 
 // Initialization
 
@@ -62,7 +76,7 @@ init_from_scratch :: proc() -> Context
 }
 
 // Initializes this library with an already existing Vulkan context.
-// NOTE: This library is completely asynchronous, so use a separate queue here!
+// NOTE: This library is asynchronous by default, so use a separate queue here!
 // NOTE: This library needs the following extensions:
 // - VK_EXT_SHADER_OBJECT
 // - VK_KHR_ACCELERATION_STRUCTURE
@@ -98,6 +112,86 @@ init_test :: proc(vk_ctx: Lightmapper_Vulkan_Context) -> Context
 
 // Scene description
 
+Handle :: struct
+{
+    idx: u32,
+    gen: u32,
+}
+
+Mesh_Handle :: distinct Handle
+Texture_Handle :: distinct Handle
+
+create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, normals: [][3]f32, lm_uvs: [][2]f32, diffuse_uvs: [][2]f32) -> Mesh_Handle
+{
+    mesh: Mesh
+
+    free_slot := u32(0)
+    if len(meshes_free) > 0
+    {
+        free_slot = pop(&meshes_free)
+        old_gen := meshes[free_slot].gen
+        mesh.gen = old_gen + 1
+        meshes[free_slot] = mesh
+    }
+    else
+    {
+        append(&meshes, mesh)
+        free_slot = u32(len(meshes)) - 1
+    }
+    return Mesh_Handle { idx = free_slot, gen = mesh.gen }
+}
+
+/*
+register_mesh :: proc(indices: []u32, positions: [][3]f32, lm_uvs: [][2]f32, indices_buf: Buffer, positions_buf: Buffer, lm_uvs_buf: Buffer) -> Mesh_Handle
+{
+    return {}
+}
+*/
+
+get_mesh :: proc(using ctx: ^Context, handle: Mesh_Handle) -> ^Mesh
+{
+    if u32(len(meshes)) <= handle.idx do return nil
+    if meshes[handle.idx].gen != handle.gen do return nil
+    return &meshes[handle.idx]
+}
+
+release_mesh :: proc(using ctx: ^Context, handle: Mesh_Handle)
+{
+    mesh := get_mesh(ctx, handle)
+    if mesh == nil do return
+
+}
+
+create_texture :: proc(using ctx: ^Context) -> Texture_Handle
+{
+    return {}
+}
+
+register_texture :: proc(using ctx: ^Context, img: Image) -> Texture_Handle
+{
+    return {}
+}
+
+get_texture :: proc(using ctx: ^Context, handle: Texture_Handle) -> ^Image
+{
+    if u32(len(textures)) <= handle.idx do return nil
+    if textures[handle.idx].gen != handle.gen do return nil
+    return &textures[handle.idx]
+}
+
+release_texture :: proc(using ctx: ^Context, handle: Texture_Handle)
+{
+
+}
+
+// This procedure is immediate mode, and can be called
+// every frame with little performance impact if no changes
+// occur. (State is diffed across calls)
+update_scene :: proc(bake: ^Bake, instances: []Instance)
+{
+
+}
+
 Scene :: struct
 {
     instances: [dynamic]Instance,
@@ -116,13 +210,17 @@ Instance :: struct
 
 Mesh :: struct
 {
+    gen: u32,
+
     indices_cpu: [dynamic]u32,
     pos_cpu: [dynamic][3]f32,
+    normals_cpu: [dynamic][3]f32,
+    lm_uvs_cpu: [dynamic][2]f32,
 
+    indices: Buffer,
     pos: Buffer,
     normals: Buffer,
     lm_uvs: Buffer,
-    indices_gpu: Buffer,
     idx_count: u32,
 
     lm_uvs_present: bool,
@@ -146,11 +244,6 @@ Accel_Structure :: struct
 Scene_Structures :: struct
 {
 
-}
-
-build_scene_structures :: proc(scene: Scene) -> Scene_Structures
-{
-    return {}
 }
 
 // update_scene_structures
@@ -182,7 +275,7 @@ Bake :: struct
     lightmap_size: u32,
     scene: Scene,
 
-    // Debugging
+    // For renderdoc debugging
     debug_mutex0: ^sync.Mutex,
     debug_mutex1: ^sync.Mutex,
 }
@@ -682,7 +775,7 @@ bake_main :: proc(using bake: ^Bake)
         for &geom, i in geoms
         {
             geom.normals = vku.get_buffer_device_address(device, scene.meshes[i].normals)
-            geom.indices = vku.get_buffer_device_address(device, scene.meshes[i].indices_gpu)
+            geom.indices = vku.get_buffer_device_address(device, scene.meshes[i].indices)
         }
 
         usage := vk.BufferUsageFlags { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
@@ -735,7 +828,9 @@ bake_main :: proc(using bake: ^Bake)
     update_dilate_desc_set(device, dilate_desc_set[0], dummy_sampler, lightmap, lightmap_backbuffer)
     update_dilate_desc_set(device, dilate_desc_set[1], dummy_sampler, lightmap_backbuffer, lightmap)
 
-    sync.mutex_lock(debug_mutex0)
+    when SYNCHRONOUS {
+        sync.mutex_lock(debug_mutex0)
+    }
 
     render_gbuffers(bake, cmd_buf, &gbufs, push_samples_sbt, rt_desc_set)
 
@@ -768,8 +863,11 @@ bake_main :: proc(using bake: ^Bake)
     // Pathtrace loop
     for iter in 0..<num_accums
     {
-        if iter > 0 do sync.mutex_lock(debug_mutex0)
-        defer { sync.mutex_unlock(debug_mutex1) }
+        when SYNCHRONOUS
+        {
+            if iter > 0 do sync.mutex_lock(debug_mutex0)
+            defer { sync.mutex_unlock(debug_mutex1) }
+        }
 
         // fmt.println("pathtrace iter")
 
@@ -856,8 +954,11 @@ bake_main :: proc(using bake: ^Bake)
 
     // Denoise
     {
-        sync.mutex_lock(debug_mutex0)
-        defer sync.mutex_unlock(debug_mutex1)
+        when SYNCHRONOUS
+        {
+            sync.mutex_lock(debug_mutex0)
+            defer sync.mutex_unlock(debug_mutex1)
+        }
 
         vk_check(vk.BeginCommandBuffer(cmd_buf, &{
             sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -943,10 +1044,13 @@ bake_main :: proc(using bake: ^Bake)
         vk_check(vk.QueueWaitIdle(vk_ctx.queue))
     }
 
-    for
+    when SYNCHRONOUS
     {
-        sync.mutex_lock(debug_mutex0)
-        sync.mutex_unlock(debug_mutex1)
+        for
+        {
+            sync.mutex_lock(debug_mutex0)
+            sync.mutex_unlock(debug_mutex1)
+        }
     }
 }
 
@@ -1179,7 +1283,7 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
             if mesh.lm_uvs_present {
                 vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
             }
-            vk.CmdBindIndexBuffer(cmd_buf, mesh.indices_gpu.handle, 0, .UINT32)
+            vk.CmdBindIndexBuffer(cmd_buf, mesh.indices.handle, 0, .UINT32)
 
             Push :: struct {
                 model_to_world: matrix[4, 4]f32,
@@ -1451,9 +1555,9 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
     push_samples_raygen_code        := #load("shaders/push_samples.rgen.spv", []u32)
     push_samples_raymiss_code       := #load("shaders/push_samples.rmiss.spv", []u32)
     push_samples_rayhit_code        := #load("shaders/push_samples.rchit.spv", []u32)
-    raygen_code                     := #load("shaders/raygen.rgen.spv", []u32)
-    raymiss_code                    := #load("shaders/raymiss.rmiss.spv", []u32)
-    rayhit_code                     := #load("shaders/rayhit.rchit.spv", []u32)
+    raygen_code                     := #load("shaders/pathtrace.rgen.spv", []u32)
+    raymiss_code                    := #load("shaders/pathtrace.rmiss.spv", []u32)
+    rayhit_code                     := #load("shaders/pathtrace.rchit.spv", []u32)
     dilate_code                     := #load("shaders/dilate.comp.spv", []u32)
 
     // NOTE: #load(<string-path>, <type>) used to produce unaligned reads and writes (https://github.com/odin-lang/Odin/issues/5771)
@@ -2123,5 +2227,5 @@ align_up :: proc(x, align: u32) -> (aligned: u32)
 // UV Seam blending
 smooth_seams :: proc(using bake: ^Bake)
 {
-    
+
 }
