@@ -6,6 +6,7 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, rgba16f) uniform image2D lightmap;
 layout(set = 0, binding = 2, rgba32f) uniform image2D gbuf_worldpos;
 layout(set = 0, binding = 3, rgba8) uniform image2D gbuf_worldnormals;
+layout(set = 0, binding = 4, rgba8) uniform image2D gbuf_worldgeomnormals;
 
 layout(push_constant) uniform Push
 {

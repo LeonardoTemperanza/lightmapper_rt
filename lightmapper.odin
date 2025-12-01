@@ -140,6 +140,7 @@ create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, no
     mesh.indices_cpu = slice.clone_to_dynamic(indices)
     mesh.pos_cpu = slice.clone_to_dynamic(positions)
     mesh.normals_cpu = slice.clone_to_dynamic(normals)
+    mesh.geom_normals_cpu = compute_geom_normals(indices, positions)
     mesh.lm_uvs_cpu = slice.clone_to_dynamic(lm_uvs)
     // TODO diffuse uvs
 
@@ -148,8 +149,10 @@ create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, no
     v_usage_flags := vk.BufferUsageFlags { .VERTEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }
     mesh.pos = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, positions[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.normals = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, normals[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    mesh.geom_normals = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, mesh.geom_normals_cpu[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.lm_uvs = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, lm_uvs[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     // TODO diffuse uvs
+
 
     mesh.blas = vku.create_blas(device, phys_device, queue, upload_cmd_pool, mesh.pos, mesh.indices, u32(len(positions)), u32(len(indices)))
 
@@ -264,11 +267,13 @@ Mesh :: struct
     indices_cpu: [dynamic]u32,
     pos_cpu: [dynamic][3]f32,
     normals_cpu: [dynamic][3]f32,
+    geom_normals_cpu: [dynamic][3]f32,
     lm_uvs_cpu: [dynamic][2]f32,
 
     indices: Buffer,
     pos: Buffer,
     normals: Buffer,
+    geom_normals: Buffer,
     lm_uvs: Buffer,
     blas: vku.Accel_Structure,
 }
@@ -1191,6 +1196,41 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
     }
 
+    // World geometric normal
+    {
+        color_attachment := vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView = gbuffers.world_geom_normals.view,
+            imageLayout = gbuffers.world_geom_normals.layout,
+            loadOp = .CLEAR,
+            storeOp = .STORE,
+            clearValue = {
+                color = { float32 = { 0.0, 0.0, 0.0, 0.0 } }
+            }
+        }
+        rendering_info := vk.RenderingInfo {
+            sType = .RENDERING_INFO,
+            renderArea = {
+                offset = { 0, 0 },
+                extent = { gbuffers.world_geom_normals.width, gbuffers.world_geom_normals.height }
+            },
+            layerCount = 1,
+            colorAttachmentCount = 1,
+            pColorAttachments = &color_attachment,
+            pDepthAttachment = nil,
+        }
+
+        vk.CmdBeginRendering(cmd_buf, &rendering_info)
+        defer vk.CmdEndRendering(cmd_buf)
+
+        shader_stages := []vk.ShaderStageFlags { { .VERTEX }, { .GEOMETRY }, { .FRAGMENT } }
+        to_bind := []vk.ShaderEXT { shaders.uv_space, vk.ShaderEXT(0), shaders.gbuffer_world_normals }
+        assert(len(shader_stages) == len(to_bind))
+        vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
+
+        draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout, use_geom_normals = true)
+    }
+
     // Tri idx
     {
         color_attachment := vk.RenderingAttachmentInfo {
@@ -1226,14 +1266,12 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
     }
 
-    vku.image_barrier_safe_slow(&gbuffers.world_pos, cmd_buf, .GENERAL)
-    vku.image_barrier_safe_slow(&gbuffers.world_normals, cmd_buf, .GENERAL)
-    vku.image_barrier_safe_slow(&gbuffers.tri_idx, cmd_buf, .GENERAL)
+    gbuffers_barrier(gbuffers, cmd_buf)
 
     push_samples_outside_geometry(bake, cmd_buf, gbuffers, push_samples_sbt, rt_desc_set)
 }
 
-draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout)
+draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, use_geom_normals := false)
 {
     sample_mask := vk.SampleMask(1)
     vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
@@ -1294,7 +1332,11 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
 
             offset := vk.DeviceSize(0)
             vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
-            vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
+            if use_geom_normals {
+                vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.geom_normals.handle, &offset)
+            } else {
+                vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
+            }
             // if mesh.lm_uvs_present {
                 vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
             // }
@@ -1487,42 +1529,50 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
         }
         vk_check(vk.CreateDescriptorSetLayout(device, &dilate_desc_set_layout_ci, nil, &res.dilate_desc_set_layout))
 
+        rt_desc_set_layout_bindings := []vk.DescriptorSetLayoutBinding {
+            {
+                binding = 0,
+                descriptorType = .ACCELERATION_STRUCTURE_KHR,
+                descriptorCount = 1,
+                stageFlags = { .RAYGEN_KHR },
+            },
+            {
+                binding = 1,
+                descriptorType = .STORAGE_IMAGE,
+                descriptorCount = 1,
+                stageFlags = { .RAYGEN_KHR },
+            },
+            {
+                binding = 2,
+                descriptorType = .STORAGE_IMAGE,
+                descriptorCount = 1,
+                stageFlags = { .RAYGEN_KHR },
+            },
+            {
+                binding = 3,
+                descriptorType = .STORAGE_IMAGE,
+                descriptorCount = 1,
+                stageFlags = { .RAYGEN_KHR },
+            },
+            {
+                binding = 4,
+                descriptorType = .STORAGE_IMAGE,
+                descriptorCount = 1,
+                stageFlags = { .RAYGEN_KHR },
+            },
+            {
+                binding = 5,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags = { .CLOSEST_HIT_KHR },
+            }
+        }
+
         rt_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             flags = {},
-            bindingCount = 5,
-            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
-                {
-                    binding = 0,
-                    descriptorType = .ACCELERATION_STRUCTURE_KHR,
-                    descriptorCount = 1,
-                    stageFlags = { .RAYGEN_KHR },
-                },
-                {
-                    binding = 1,
-                    descriptorType = .STORAGE_IMAGE,
-                    descriptorCount = 1,
-                    stageFlags = { .RAYGEN_KHR },
-                },
-                {
-                    binding = 2,
-                    descriptorType = .STORAGE_IMAGE,
-                    descriptorCount = 1,
-                    stageFlags = { .RAYGEN_KHR },
-                },
-                {
-                    binding = 3,
-                    descriptorType = .STORAGE_IMAGE,
-                    descriptorCount = 1,
-                    stageFlags = { .RAYGEN_KHR },
-                },
-                {
-                    binding = 4,
-                    descriptorType = .STORAGE_BUFFER,
-                    descriptorCount = 1,
-                    stageFlags = { .CLOSEST_HIT_KHR },
-                }
-            })
+            bindingCount = u32(len(rt_desc_set_layout_bindings)),
+            pBindings = raw_data(rt_desc_set_layout_bindings)
         }
         vk_check(vk.CreateDescriptorSetLayout(device, &rt_desc_set_layout_ci, nil, &res.rt_desc_set_layout))
     }
@@ -1874,6 +1924,7 @@ GBuffers :: struct
 {
     world_pos: Image,
     world_normals: Image,
+    world_geom_normals: Image,
     tri_idx: Image,
 }
 
@@ -1919,6 +1970,26 @@ create_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer) -> GBuffer
         initialLayout = .UNDEFINED,
     })
 
+    world_geom_normals := vku.create_image(device, phys_device, cmd_buf, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R8G8B8A8_UNORM,
+        extent = {
+            width = lightmap_size,
+            height = lightmap_size,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .COLOR_ATTACHMENT, .STORAGE },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &queue_family_idx,
+        initialLayout = .UNDEFINED,
+    })
+
     tri_idx := vku.create_image(device, phys_device, cmd_buf, {
         sType = .IMAGE_CREATE_INFO,
         flags = {},
@@ -1942,8 +2013,23 @@ create_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer) -> GBuffer
     return {
         world_pos,
         world_normals,
+        world_geom_normals,
         tri_idx,
     }
+}
+
+gbuffers_barrier :: proc(gbufs: ^GBuffers, cmd_buf: vk.CommandBuffer)
+{
+    vku.image_barrier_safe_slow(&gbufs.world_pos, cmd_buf, .GENERAL)
+    vku.image_barrier_safe_slow(&gbufs.world_normals, cmd_buf, .GENERAL)
+    vku.image_barrier_safe_slow(&gbufs.world_geom_normals, cmd_buf, .GENERAL)
+    vku.image_barrier_safe_slow(&gbufs.tri_idx, cmd_buf, .GENERAL)
+}
+
+// TODO
+gbuffers_destroy :: proc(gbufs: ^GBuffers)
+{
+
 }
 
 update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas: vk.AccelerationStructureKHR, lightmap: Image, gbuffers: GBuffers, geometries: Buffer)
@@ -2006,6 +2092,19 @@ update_rt_desc_set :: proc(device: vk.Device, to_update: vk.DescriptorSet, tlas:
             sType = .WRITE_DESCRIPTOR_SET,
             dstSet = to_update,
             dstBinding = 4,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_IMAGE,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = gbuffers.world_geom_normals.view,
+                    imageLayout = gbuffers.world_geom_normals.layout,
+                }
+            })
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = to_update,
+            dstBinding = 5,
             descriptorCount = 1,
             descriptorType = .STORAGE_BUFFER,
             pBufferInfo = raw_data([]vk.DescriptorBufferInfo {
@@ -2356,4 +2455,26 @@ create_tlas :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk
         as = as,
         instances_buf = instances_buf
     }
+}
+
+compute_geom_normals :: proc(indices: []u32, positions: [][3]f32) -> [dynamic][3]f32
+{
+    res := make_dynamic_array_len_cap([dynamic][3]f32, 0, len(indices))
+    for i := 0; i < len(indices); i += 3
+    {
+        idx0 := indices[i + 0]
+        idx1 := indices[i + 1]
+        idx2 := indices[i + 2]
+        pos0 := positions[idx0]
+        pos1 := positions[idx1]
+        pos2 := positions[idx2]
+
+        geom_normal := linalg.cross(pos1 - pos0, pos2 - pos0)
+
+        append(&res, geom_normal)
+        append(&res, geom_normal)
+        append(&res, geom_normal)
+    }
+
+    return res
 }

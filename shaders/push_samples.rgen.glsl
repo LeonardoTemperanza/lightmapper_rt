@@ -6,7 +6,7 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, rgba16f) uniform image2D lightmap;
 layout(set = 0, binding = 2, rgba32f) uniform image2D gbuf_worldpos;
 layout(set = 0, binding = 3, rgba8) uniform image2D gbuf_worldnormals;
-//layout(set = 0, binding = 4, r32ui) uniform uimage2D gbuf_tri_idx;
+layout(set = 0, binding = 4, rgba8) uniform image2D gbuf_worldgeomnormals;
 
 struct Payload
 {
@@ -56,14 +56,17 @@ void main()
     float validity = gbuf_worldnormals_sample.a;
     if(validity == 0.0f) return;
 
+    vec4 gbuf_worldgeomnormals_sample = imageLoad(gbuf_worldgeomnormals, pixel);
+    vec3 world_geom_normal = normalize(gbuf_worldgeomnormals_sample.xyz * 2.0f - 1.0f);
+
     vec4 gbuf_worldpos_sample = imageLoad(gbuf_worldpos, pixel);
     vec3 world_pos = gbuf_worldpos_sample.xyz;
     float texel_size = gbuf_worldpos_sample.w;
 
     //uint tri_idx = imageLoad(gbuf_tri_idx, pixel).x;
 
-    vec3 right = normalize(cross(world_normal, vec3(0.0f, 1.0f, 0.0f)));
-    vec3 up = normalize(cross(right, world_normal));
+    vec3 right = normalize(cross(world_geom_normal, vec3(0.0f, 1.0f, 0.0f)));
+    vec3 up = normalize(cross(right, world_geom_normal));
     float ray_length = texel_size * 0.5f * OVERSHOOT_FACTOR;
 
     const uint NUM_RAYS = 8;

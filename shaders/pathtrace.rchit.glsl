@@ -19,7 +19,7 @@ struct Geometry
     Indices indices;
 };
 
-layout(set = 0, binding = 4) readonly buffer Geometries
+layout(set = 0, binding = 5) readonly buffer Geometries
 {
     Geometry geometries[];
 };

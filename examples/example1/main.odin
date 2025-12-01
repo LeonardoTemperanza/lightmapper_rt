@@ -137,9 +137,8 @@ main :: proc()
     }
     lm_ctx := lm.init_test(lm_vk_ctx)
 
-    instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx", LIGHTMAP_SIZE)
-    // instances := load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", 10, 4096, 4096, LIGHTMAP_SIZE)
-    // defer destroy_scene(&vk_ctx, &scene)
+    // instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx", LIGHTMAP_SIZE)
+    instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", LIGHTMAP_SIZE, 10, 4096, 4096)
 
     vk_frames := create_vk_frames(&vk_ctx)
     frame_idx := u32(0)
