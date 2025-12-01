@@ -127,8 +127,17 @@ main :: proc()
     vk_check(vk.CreateCommandPool(vk_ctx.device, &upload_cmd_pool_ci, nil, &upload_cmd_pool))
     defer vk.DestroyCommandPool(vk_ctx.device, upload_cmd_pool, nil)
 
-    // scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx")
-    scene := load_scene_fbx(&vk_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", 10, 4096, 4096)
+    lm_vk_ctx := lm.Lightmapper_Vulkan_Context {
+        phys_device = vk_ctx.phys_device,
+        device = vk_ctx.device,
+        queue = vk_ctx.lm_queue,
+        //queue = vk_ctx.queue,
+        queue_family_idx = vk_ctx.queue_family_idx,
+    }
+    lm_ctx := lm.init_test(lm_vk_ctx)
+
+    instances := load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx")
+    // instances := load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", 10, 4096, 4096)
     // defer destroy_scene(&vk_ctx, &scene)
 
     vk_frames := create_vk_frames(&vk_ctx)
@@ -182,21 +191,7 @@ main :: proc()
     lightmap_sampler: vk.Sampler
     vk_check(vk.CreateSampler(vk_ctx.device, &lightmap_sampler_ci, nil, &lightmap_sampler))
 
-    lm_vk_ctx := lm.Lightmapper_Vulkan_Context {
-        phys_device = vk_ctx.phys_device,
-        device = vk_ctx.device,
-        queue = vk_ctx.lm_queue,
-        //queue = vk_ctx.queue,
-        queue_family_idx = vk_ctx.queue_family_idx,
-    }
-    lm_ctx := lm.init_test(lm_vk_ctx)
-
-    lm_scene := lm.Scene {
-        instances = scene.instances,
-        meshes = scene.meshes,
-        tlas = scene.tlas,
-    }
-    bake := lm.start_bake(&lm_ctx, lm_scene, {}, 4096, 2000, 1)
+    bake := lm.start_bake(&lm_ctx, instances[:], 4096, 2000, 1)
 
     // Create main render target
     render_target: Image
@@ -334,7 +329,7 @@ main :: proc()
             pImageMemoryBarriers = &transition_to_color_attachment_barrier,
         })
 
-        render_scene(&vk_ctx, cmd_buf, depth_image_view, render_target.view, lm_desc_set, shaders, swapchain, scene, auto_cast width, auto_cast height)
+        render_scene(&vk_ctx, cmd_buf, depth_image_view, render_target.view, lm_desc_set, shaders, swapchain, &lm_ctx, instances[:], auto_cast width, auto_cast height)
         vku.image_barrier_safe_slow(&render_target, cmd_buf, .GENERAL)
         tonemap_image(&vk_ctx, cmd_buf, shaders, tonemap_desc_set, render_target, swapchain.image_views[image_idx])
 
@@ -730,7 +725,7 @@ destroy_shaders :: proc(using ctx: ^lm.App_Vulkan_Context, shaders: Shaders)
     vk.DestroyShaderEXT(device, shaders.tonemap_frag, nil)
 }
 
-render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, scene: lm.Scene, width: u32, height: u32)
+render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, lm_ctx: ^lm.Context, instances: []lm.Instance, width: u32, height: u32)
 {
     depth_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO,
@@ -869,18 +864,18 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
     world_to_view := compute_world_to_view()
     view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, render_viewport_aspect_ratio, 0.1, 1000.0, false)
 
-    for instance in scene.instances
+    for instance in instances
     {
-        mesh := scene.meshes[instance.mesh_idx]
+        mesh := lm.get_mesh(lm_ctx, instance.mesh)
 
-        if !mesh.lm_uvs_present { continue }
+        // if !mesh.lm_uvs_present { continue }
 
         offset := vk.DeviceSize(0)
         vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
         vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
-        if mesh.lm_uvs_present {
+        // if mesh.lm_uvs_present {
             vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
-        }
+        // }
         vk.CmdBindIndexBuffer(cmd_buf, mesh.indices.handle, 0, .UINT32)
 
         Push :: struct {
@@ -901,7 +896,7 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
         }
         vk.CmdPushConstants(cmd_buf, shaders.pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
 
-        vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
+        vk.CmdDrawIndexed(cmd_buf, u32(len(mesh.indices_cpu)), 1, 0, 0, 0)
     }
 
     vk.CmdEndRendering(cmd_buf)
@@ -1327,214 +1322,6 @@ first_person_camera_view :: proc() -> matrix[4, 4]f32
         if dist <= delta do return target
         return cur + diff / dist * delta
     }
-}
-
-create_blas :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPool, positions: Buffer, indices: Buffer, verts_count: u32, idx_count: u32) -> Accel_Structure
-{
-    blas: Accel_Structure
-
-    tri_data := vk.AccelerationStructureGeometryTrianglesDataKHR {
-        sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
-        vertexFormat = .R32G32B32_SFLOAT,
-        vertexData = {
-            deviceAddress = vku.get_buffer_device_address(device, positions)
-        },
-        vertexStride = size_of([3]f32),
-        maxVertex = verts_count,
-        indexType = .UINT32,
-        indexData = {
-            deviceAddress = vku.get_buffer_device_address(device, indices)
-        },
-    }
-
-    blas_geometry := vk.AccelerationStructureGeometryKHR {
-        sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
-        geometryType = .TRIANGLES,
-        flags = { .OPAQUE },
-        geometry = {
-            triangles = tri_data
-        }
-    }
-
-    primitive_count := idx_count / 3
-
-    range_info := vk.AccelerationStructureBuildRangeInfoKHR {
-        primitiveCount = primitive_count,
-        primitiveOffset = 0,
-        firstVertex = 0,
-        transformOffset = 0,
-    }
-
-    range_info_ptrs := []^vk.AccelerationStructureBuildRangeInfoKHR {
-        &range_info,
-    }
-
-    build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-        flags = { .PREFER_FAST_TRACE },
-        geometryCount = 1,
-        pGeometries = &blas_geometry,
-        type = .BOTTOM_LEVEL,
-    }
-
-    size_info := vk.AccelerationStructureBuildSizesInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
-    }
-    vk.GetAccelerationStructureBuildSizesKHR(device, .DEVICE, &build_info, &primitive_count, &size_info)
-
-    blas_usages := vk.BufferUsageFlags { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS }
-    blas.buf = vku.create_buffer(device, phys_device, auto_cast size_info.accelerationStructureSize, blas_usages, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-
-    // Create the scratch buffer for blas building
-    scratch_usages := vk.BufferUsageFlags { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
-    scratch_buf := vku.create_buffer(device, phys_device, auto_cast size_info.buildScratchSize, scratch_usages, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-
-    // Build acceleration structure
-    blas_ci := vk.AccelerationStructureCreateInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        buffer = blas.buf.handle,
-        size = size_info.accelerationStructureSize,
-        type = .BOTTOM_LEVEL,
-    }
-    vk_check(vk.CreateAccelerationStructureKHR(device, &blas_ci, nil, &blas.handle))
-
-    {
-        cmd_buf := vku.begin_tmp_cmd_buf(device, cmd_pool)
-        defer vku.end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
-        build_info.dstAccelerationStructure = blas.handle
-        build_info.scratchData.deviceAddress = vku.get_buffer_device_address(device, scratch_buf)
-
-        vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
-    }
-
-    // Get device address
-    addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-        accelerationStructure = blas.handle,
-    }
-    blas.addr = vk.GetAccelerationStructureDeviceAddressKHR(device, &addr_info)
-
-    return blas
-}
-
-create_tlas :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_pool: vk.CommandPool, instances: []lm.Instance, meshes: []lm.Mesh) -> Tlas
-{
-    as: Accel_Structure
-
-    vk_instances := make([]vk.AccelerationStructureInstanceKHR, len(instances), allocator = context.temp_allocator)
-    for &vk_instance, i in vk_instances
-    {
-        instance := instances[i]
-        transform := instance.transform
-
-        vk_transform := vk.TransformMatrixKHR {
-            mat = {
-                { transform[0, 0], transform[0, 1], transform[0, 2], transform[0, 3] },
-                { transform[1, 0], transform[1, 1], transform[1, 2], transform[1, 3] },
-                { transform[2, 0], transform[2, 1], transform[2, 2], transform[2, 3] },
-            }
-        }
-
-        vk_instance = {
-            transform = vk_transform,
-            instanceCustomIndex = u32(instance.mesh_idx),
-            mask = 0xFF,
-            instanceShaderBindingTableRecordOffset = 0,
-            // NOTE: Unintuitive bindings! This cast is necessary!
-            flags = auto_cast(vk.GeometryInstanceFlagsKHR { .TRIANGLE_FACING_CULL_DISABLE }),
-            accelerationStructureReference = u64(meshes[instance.mesh_idx].blas.addr)
-        }
-    }
-
-    instances_buf := vku.upload_buffer(device, phys_device, queue, cmd_pool, vk_instances, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .TRANSFER_DST }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-
-    instances_data := vk.AccelerationStructureGeometryInstancesDataKHR {
-        sType = .ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
-        arrayOfPointers = false,
-        data = {
-            deviceAddress = vku.get_buffer_device_address(device, instances_buf)
-        }
-    }
-
-    geometry := vk.AccelerationStructureGeometryKHR {
-        sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
-        geometryType = .INSTANCES,
-        geometry = {
-            instances = instances_data
-        }
-    }
-
-    build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-        flags = { .PREFER_FAST_TRACE },
-        geometryCount = 1,
-        pGeometries = &geometry,
-        type = .TOP_LEVEL,
-    }
-
-    primitive_count := u32(len(vk_instances))
-    size_info := vk.AccelerationStructureBuildSizesInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
-    }
-    vk.GetAccelerationStructureBuildSizesKHR(device, .DEVICE, &build_info, &primitive_count, &size_info)
-
-    as.buf = vku.create_buffer(device, phys_device, auto_cast size_info.accelerationStructureSize, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-
-    // Create the scratch buffer for tlas building
-    scratch_buf := vku.create_buffer(device, phys_device, auto_cast size_info.buildScratchSize, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-
-    // Build acceleration structure
-    blas_ci := vk.AccelerationStructureCreateInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        buffer = as.buf.handle,
-        size = size_info.accelerationStructureSize,
-        type = .TOP_LEVEL,
-    }
-    vk_check(vk.CreateAccelerationStructureKHR(device, &blas_ci, nil, &as.handle))
-
-    {
-        cmd_buf := vku.begin_tmp_cmd_buf(device, cmd_pool)
-        defer vku.end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
-
-        range_info := vk.AccelerationStructureBuildRangeInfoKHR {
-            primitiveCount = u32(len(instances)),
-            primitiveOffset = 0,
-            firstVertex = 0,
-            transformOffset = 0,
-        }
-        range_info_ptrs := []^vk.AccelerationStructureBuildRangeInfoKHR {
-            &range_info
-        }
-
-        build_info.dstAccelerationStructure = as.handle
-        build_info.scratchData.deviceAddress = vku.get_buffer_device_address(device, scratch_buf)
-        vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
-    }
-
-    // Get device address
-    addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-        accelerationStructure = as.handle,
-    }
-    as.addr = vk.GetAccelerationStructureDeviceAddressKHR(device, &addr_info)
-
-    return {
-        as = as,
-        instances_buf = instances_buf
-    }
-}
-
-Accel_Structure :: struct
-{
-    handle: vk.AccelerationStructureKHR,
-    buf: Buffer,
-    addr: vk.DeviceAddress
-}
-
-Tlas :: struct
-{
-    as: Accel_Structure,
-    instances_buf: Buffer,
 }
 
 v3_to_v4 :: proc(v: [3]f32, w: Maybe(f32) = nil) -> (res: [4]f32)

@@ -51,6 +51,8 @@ Context :: struct
     oidn_device: oidn.Device,
     shaders: Shaders,
 
+    upload_cmd_pool: vk.CommandPool,
+
     meshes: [dynamic]Mesh,
     meshes_free: [dynamic]u32,
     textures: [dynamic]Texture,
@@ -107,6 +109,14 @@ init_test :: proc(vk_ctx: Lightmapper_Vulkan_Context) -> Context
     res.shaders = create_shaders(&res.vk_ctx)
     res.oidn_device = create_oidn_context(vk_ctx.phys_device)
 
+    upload_cmd_pool_ci := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        queueFamilyIndex = res.queue_family_idx,
+        flags = { .TRANSIENT }
+    }
+    upload_cmd_pool: vk.CommandPool
+    vk_check(vk.CreateCommandPool(res.device, &upload_cmd_pool_ci, nil, &res.upload_cmd_pool))
+
     return res
 }
 
@@ -121,20 +131,38 @@ Handle :: struct
 Mesh_Handle :: distinct Handle
 Texture_Handle :: distinct Handle
 
-create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, normals: [][3]f32, lm_uvs: [][2]f32, diffuse_uvs: [][2]f32) -> Mesh_Handle
+create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, normals: [][3]f32, lm_uvs: [][2]f32 /*, diffuse_uvs: [][2]f32 */) -> Mesh_Handle
 {
+    assert(len(indices) > 0 && len(positions) > 0 && len(normals) > 0 && len(lm_uvs) > 0 /*&& len(diffuse_uvs) > 0*/)
+
     mesh: Mesh
+
+    mesh.indices_cpu = slice.clone_to_dynamic(indices)
+    mesh.pos_cpu = slice.clone_to_dynamic(positions)
+    mesh.normals_cpu = slice.clone_to_dynamic(normals)
+    mesh.lm_uvs_cpu = slice.clone_to_dynamic(lm_uvs)
+    // TODO diffuse uvs
+
+    idx_usage_flags := vk.BufferUsageFlags { .INDEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }
+    mesh.indices = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, indices[:], idx_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    v_usage_flags := vk.BufferUsageFlags { .VERTEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }
+    mesh.pos = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, positions[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    mesh.normals = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, normals[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    mesh.lm_uvs = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, lm_uvs[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    // TODO diffuse uvs
+
+    mesh.blas = vku.create_blas(device, phys_device, queue, upload_cmd_pool, mesh.pos, mesh.indices, u32(len(positions)), u32(len(indices)))
 
     free_slot := u32(0)
     if len(meshes_free) > 0
     {
         free_slot = pop(&meshes_free)
-        old_gen := meshes[free_slot].gen
-        mesh.gen = old_gen + 1
+        mesh.gen = meshes[free_slot].gen
         meshes[free_slot] = mesh
     }
     else
     {
+        mesh.gen = 0
         append(&meshes, mesh)
         free_slot = u32(len(meshes)) - 1
     }
@@ -157,22 +185,42 @@ get_mesh :: proc(using ctx: ^Context, handle: Mesh_Handle) -> ^Mesh
 
 release_mesh :: proc(using ctx: ^Context, handle: Mesh_Handle)
 {
-    mesh := get_mesh(ctx, handle)
-    if mesh == nil do return
-
+    if u32(len(meshes)) <= handle.idx do return
+    if meshes[handle.idx].gen != handle.gen do return
+    meshes[handle.idx].gen += 1
+    if u32(len(meshes)) - 1 == handle.idx {
+        pop(&meshes)
+    } else {
+        append(&meshes_free, handle.idx)
+    }
 }
 
 create_texture :: proc(using ctx: ^Context) -> Texture_Handle
 {
-    return {}
+    texture: Texture
+
+    free_slot := u32(0)
+    if len(textures_free) > 0
+    {
+        free_slot = pop(&textures_free)
+        texture.gen = textures[free_slot].gen
+        textures[free_slot] = texture
+    }
+    else
+    {
+        texture.gen = 0
+        append(&textures, texture)
+        free_slot = u32(len(textures)) - 1
+    }
+    return Texture_Handle { idx = free_slot, gen = texture.gen }
 }
 
-register_texture :: proc(using ctx: ^Context, img: Image) -> Texture_Handle
+register_texture :: proc(using ctx: ^Context, img: Texture) -> Texture_Handle
 {
     return {}
 }
 
-get_texture :: proc(using ctx: ^Context, handle: Texture_Handle) -> ^Image
+get_texture :: proc(using ctx: ^Context, handle: Texture_Handle) -> ^Texture
 {
     if u32(len(textures)) <= handle.idx do return nil
     if textures[handle.idx].gen != handle.gen do return nil
@@ -181,28 +229,29 @@ get_texture :: proc(using ctx: ^Context, handle: Texture_Handle) -> ^Image
 
 release_texture :: proc(using ctx: ^Context, handle: Texture_Handle)
 {
-
+    if u32(len(textures)) <= handle.idx do return
+    if textures[handle.idx].gen != handle.gen do return
+    textures[handle.idx].gen += 1
+    if u32(len(textures)) - 1 == handle.idx {
+        pop(&textures)
+    } else {
+        append(&textures_free, handle.idx)
+    }
 }
 
 // This procedure is immediate mode, and can be called
 // every frame with little performance impact if no changes
-// occur. (State is diffed across calls)
+// occur. (State is diffed across calls). Will update the TLAS
+// if things change across calls
 update_scene :: proc(bake: ^Bake, instances: []Instance)
 {
 
 }
 
-Scene :: struct
-{
-    instances: [dynamic]Instance,
-    meshes: [dynamic]Mesh,
-    tlas: Tlas,
-}
-
 Instance :: struct
 {
     transform: matrix[4, 4]f32,
-    mesh_idx: u32,
+    mesh: Mesh_Handle,
     lm_idx: u32,
     lm_offset: [2]f32,
     lm_scale: f32,
@@ -221,29 +270,7 @@ Mesh :: struct
     pos: Buffer,
     normals: Buffer,
     lm_uvs: Buffer,
-    idx_count: u32,
-
-    lm_uvs_present: bool,
-
-    blas: Accel_Structure,
-}
-
-Tlas :: struct
-{
-    as: Accel_Structure,
-    instances_buf: Buffer,
-}
-
-Accel_Structure :: struct
-{
-    handle: vk.AccelerationStructureKHR,
-    buf: Buffer,
-    addr: vk.DeviceAddress
-}
-
-Scene_Structures :: struct
-{
-
+    blas: vku.Accel_Structure,
 }
 
 // update_scene_structures
@@ -260,6 +287,9 @@ Bake :: struct
     sem: vk.Semaphore,
     lightmap_backbuffer: Image,
 
+    instances: [dynamic]Instance,
+    tlas: Tlas,
+
     // OIDN Resources
     oidn_buf: oidn.Buffer,
     vk_external_buf: External_Buf,
@@ -273,7 +303,6 @@ Bake :: struct
     // Settings
     num_accums: u32,
     lightmap_size: u32,
-    scene: Scene,
 
     // For renderdoc debugging
     debug_mutex0: ^sync.Mutex,
@@ -286,7 +315,7 @@ Bake :: struct
 // - lightmap_size: Size in pixels of the lightmap to be built.
 // - num_accums: Number of accumulations for pathtracing.
 // - num_samples_per_pixel: Number of pathtrace samples per pixel done on each accumulation.
-start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_Structures,
+start_bake :: proc(using ctx: ^Context, instances: []Instance,
                    lightmap_size: u32 = 4096, num_accums: u32 = 400, num_samples_per_pixel: u32 = 1,
                    ) -> ^Bake
 {
@@ -300,7 +329,7 @@ start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_St
     bake.thread.init_context = context
     bake.thread.user_index = 0
     bake.thread.data = bake
-    bake.scene = scene
+    bake.instances = slice.clone_to_dynamic(instances)
 
     bake.mutex = new(sync.Mutex)
     bake.debug_mutex0 = new(sync.Mutex)
@@ -320,16 +349,10 @@ start_bake :: proc(using ctx: ^Context, scene: Scene, scene_structures: Scene_St
     }
     vk_check(vk.CreateSemaphore(device, &sem_ci, nil, &bake.sem))
 
-    // Lightmap backbuffer
-    upload_cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    upload_cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &upload_cmd_pool_ci, nil, &upload_cmd_pool))
-    defer vk.DestroyCommandPool(device, upload_cmd_pool, nil)
+    // Tlas
+    bake.tlas = create_tlas(device, phys_device, queue, upload_cmd_pool, instances[:], meshes[:])
 
+    // Lightmap backbuffer
     cmd_buf := vku.begin_tmp_cmd_buf(device, upload_cmd_pool)
 
     bake.lightmap_backbuffer = vku.create_image(device, phys_device, cmd_buf, {
@@ -678,16 +701,6 @@ bake_main :: proc(using bake: ^Bake)
     vk_check(vk.CreateCommandPool(device, &cmd_pool_ci, nil, &cmd_pool))
     defer vk.DestroyCommandPool(device, cmd_pool, nil)
 
-    // GPU Upload command pool
-    upload_cmd_pool_ci := vk.CommandPoolCreateInfo {
-        sType = .COMMAND_POOL_CREATE_INFO,
-        queueFamilyIndex = queue_family_idx,
-        flags = { .TRANSIENT }
-    }
-    upload_cmd_pool: vk.CommandPool
-    vk_check(vk.CreateCommandPool(device, &upload_cmd_pool_ci, nil, &upload_cmd_pool))
-    defer vk.DestroyCommandPool(device, upload_cmd_pool, nil)
-
     fence_ci := vk.FenceCreateInfo {
         sType = .FENCE_CREATE_INFO,
         flags = { .SIGNALED },
@@ -769,13 +782,15 @@ bake_main :: proc(using bake: ^Bake)
     geoms_buf: Buffer
     defer vku.destroy_buffer(device, &geoms_buf)
     {
-        geoms := make([]Geometry, len(scene.meshes))
+        geoms := make([]Geometry, len(meshes))
         defer delete(geoms)
 
         for &geom, i in geoms
         {
-            geom.normals = vku.get_buffer_device_address(device, scene.meshes[i].normals)
-            geom.indices = vku.get_buffer_device_address(device, scene.meshes[i].indices)
+            if meshes[i].pos.handle == vk.Buffer(0) do continue  // Guard for invalid/released meshes
+
+            geom.normals = vku.get_buffer_device_address(device, meshes[i].normals)
+            geom.indices = vku.get_buffer_device_address(device, meshes[i].indices)
         }
 
         usage := vk.BufferUsageFlags { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
@@ -799,7 +814,7 @@ bake_main :: proc(using bake: ^Bake)
     rt_desc_set: vk.DescriptorSet
     vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &rt_desc_set))
     //defer vk.FreeDescriptorSets(device, 1, &rt_desc_set, nil)
-    update_rt_desc_set(device, rt_desc_set, scene.tlas.as.handle, lightmap, gbufs, geoms_buf)
+    update_rt_desc_set(device, rt_desc_set, tlas.as.handle, lightmap, gbufs, geoms_buf)
 
     // Dummy sampler
     dummy_sampler_ci := vk.SamplerCreateInfo {
@@ -1249,11 +1264,11 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
         vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE if use_conservative_rasterization else nil)
         vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
 
-        for instance in scene.instances
+        for instance in instances
         {
-            mesh := scene.meshes[instance.mesh_idx]
+            mesh := get_mesh(ctx, instance.mesh)
 
-            if !mesh.lm_uvs_present { continue }
+            // if !mesh.lm_uvs_present { continue }
 
             viewport := vk.Viewport {
                 x = f32(lightmap_size) * instance.lm_offset.x,
@@ -1280,9 +1295,9 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
             offset := vk.DeviceSize(0)
             vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
             vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
-            if mesh.lm_uvs_present {
+            // if mesh.lm_uvs_present {
                 vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
-            }
+            // }
             vk.CmdBindIndexBuffer(cmd_buf, mesh.indices.handle, 0, .UINT32)
 
             Push :: struct {
@@ -1299,7 +1314,7 @@ draw_gbuffer :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
             }
             vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
 
-            vk.CmdDrawIndexed(cmd_buf, mesh.idx_count, 1, 0, 0, 0)
+            vk.CmdDrawIndexed(cmd_buf, u32(len(mesh.indices_cpu)), 1, 0, 0, 0)
         }
     }
 }
@@ -2228,4 +2243,117 @@ align_up :: proc(x, align: u32) -> (aligned: u32)
 smooth_seams :: proc(using bake: ^Bake)
 {
 
+}
+
+Tlas :: struct
+{
+    as: vku.Accel_Structure,
+    instances_buf: Buffer,
+}
+
+create_tlas :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, instances: []Instance, meshes: []Mesh) -> Tlas
+{
+    as: vku.Accel_Structure
+
+    vk_instances := make([]vk.AccelerationStructureInstanceKHR, len(instances), allocator = context.temp_allocator)
+    for &vk_instance, i in vk_instances
+    {
+        instance := instances[i]
+        transform := instance.transform
+
+        vk_transform := vk.TransformMatrixKHR {
+            mat = {
+                { transform[0, 0], transform[0, 1], transform[0, 2], transform[0, 3] },
+                { transform[1, 0], transform[1, 1], transform[1, 2], transform[1, 3] },
+                { transform[2, 0], transform[2, 1], transform[2, 2], transform[2, 3] },
+            }
+        }
+
+        vk_instance = {
+            transform = vk_transform,
+            instanceCustomIndex = u32(instance.mesh.idx),
+            mask = 0xFF,
+            instanceShaderBindingTableRecordOffset = 0,
+            // NOTE: Unintuitive bindings! This cast is necessary!
+            flags = auto_cast(vk.GeometryInstanceFlagsKHR { .TRIANGLE_FACING_CULL_DISABLE }),
+            accelerationStructureReference = u64(meshes[instance.mesh.idx].blas.addr)
+        }
+    }
+
+    instances_buf := vku.upload_buffer(device, phys_device, queue, cmd_pool, vk_instances, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .TRANSFER_DST }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+
+    instances_data := vk.AccelerationStructureGeometryInstancesDataKHR {
+        sType = .ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+        arrayOfPointers = false,
+        data = {
+            deviceAddress = vku.get_buffer_device_address(device, instances_buf)
+        }
+    }
+
+    geometry := vk.AccelerationStructureGeometryKHR {
+        sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        geometryType = .INSTANCES,
+        geometry = {
+            instances = instances_data
+        }
+    }
+
+    build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        flags = { .PREFER_FAST_TRACE },
+        geometryCount = 1,
+        pGeometries = &geometry,
+        type = .TOP_LEVEL,
+    }
+
+    primitive_count := u32(len(vk_instances))
+    size_info := vk.AccelerationStructureBuildSizesInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
+    }
+    vk.GetAccelerationStructureBuildSizesKHR(device, .DEVICE, &build_info, &primitive_count, &size_info)
+
+    as.buf = vku.create_buffer(device, phys_device, auto_cast size_info.accelerationStructureSize, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+
+    // Create the scratch buffer for tlas building
+    scratch_buf := vku.create_buffer(device, phys_device, auto_cast size_info.buildScratchSize, { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+
+    // Build acceleration structure
+    blas_ci := vk.AccelerationStructureCreateInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        buffer = as.buf.handle,
+        size = size_info.accelerationStructureSize,
+        type = .TOP_LEVEL,
+    }
+    vk_check(vk.CreateAccelerationStructureKHR(device, &blas_ci, nil, &as.handle))
+
+    {
+        cmd_buf := vku.begin_tmp_cmd_buf(device, cmd_pool)
+        defer vku.end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
+
+        range_info := vk.AccelerationStructureBuildRangeInfoKHR {
+            primitiveCount = u32(len(instances)),
+            primitiveOffset = 0,
+            firstVertex = 0,
+            transformOffset = 0,
+        }
+        range_info_ptrs := []^vk.AccelerationStructureBuildRangeInfoKHR {
+            &range_info
+        }
+
+        build_info.dstAccelerationStructure = as.handle
+        build_info.scratchData.deviceAddress = vku.get_buffer_device_address(device, scratch_buf)
+        vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
+    }
+
+    // Get device address
+    addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        accelerationStructure = as.handle,
+    }
+    as.addr = vk.GetAccelerationStructureDeviceAddressKHR(device, &addr_info)
+
+    return {
+        as = as,
+        instances_buf = instances_buf
+    }
 }

@@ -342,6 +342,8 @@ get_buffer_device_address :: proc(device: vk.Device, buffer: Buffer) -> vk.Devic
     return vk.GetBufferDeviceAddress(device, &info)
 }
 
+// Raytracing
+
 RT_Info :: struct
 {
     handle_align: u32,
@@ -366,4 +368,99 @@ get_rt_info :: proc(phys_device: vk.PhysicalDevice) -> RT_Info
     res.base_align   = rt_properties.shaderGroupBaseAlignment
     res.handle_size  = rt_properties.shaderGroupHandleSize
     return res
+}
+
+Accel_Structure :: struct
+{
+    handle: vk.AccelerationStructureKHR,
+    buf: Buffer,
+    addr: vk.DeviceAddress
+}
+
+create_blas :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, positions: Buffer, indices: Buffer, verts_count: u32, idx_count: u32) -> Accel_Structure
+{
+    blas: Accel_Structure
+
+    tri_data := vk.AccelerationStructureGeometryTrianglesDataKHR {
+        sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+        vertexFormat = .R32G32B32_SFLOAT,
+        vertexData = {
+            deviceAddress = get_buffer_device_address(device, positions)
+        },
+        vertexStride = size_of([3]f32),
+        maxVertex = verts_count,
+        indexType = .UINT32,
+        indexData = {
+            deviceAddress = get_buffer_device_address(device, indices)
+        },
+    }
+
+    blas_geometry := vk.AccelerationStructureGeometryKHR {
+        sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        geometryType = .TRIANGLES,
+        flags = { .OPAQUE },
+        geometry = {
+            triangles = tri_data
+        }
+    }
+
+    primitive_count := idx_count / 3
+
+    range_info := vk.AccelerationStructureBuildRangeInfoKHR {
+        primitiveCount = primitive_count,
+        primitiveOffset = 0,
+        firstVertex = 0,
+        transformOffset = 0,
+    }
+
+    range_info_ptrs := []^vk.AccelerationStructureBuildRangeInfoKHR {
+        &range_info,
+    }
+
+    build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        flags = { .PREFER_FAST_TRACE },
+        geometryCount = 1,
+        pGeometries = &blas_geometry,
+        type = .BOTTOM_LEVEL,
+    }
+
+    size_info := vk.AccelerationStructureBuildSizesInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
+    }
+    vk.GetAccelerationStructureBuildSizesKHR(device, .DEVICE, &build_info, &primitive_count, &size_info)
+
+    blas_usages := vk.BufferUsageFlags { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS }
+    blas.buf = create_buffer(device, phys_device, auto_cast size_info.accelerationStructureSize, blas_usages, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+
+    // Create the scratch buffer for blas building
+    scratch_usages := vk.BufferUsageFlags { .ACCELERATION_STRUCTURE_STORAGE_KHR, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
+    scratch_buf := create_buffer(device, phys_device, auto_cast size_info.buildScratchSize, scratch_usages, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+
+    // Build acceleration structure
+    blas_ci := vk.AccelerationStructureCreateInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        buffer = blas.buf.handle,
+        size = size_info.accelerationStructureSize,
+        type = .BOTTOM_LEVEL,
+    }
+    vk_check(vk.CreateAccelerationStructureKHR(device, &blas_ci, nil, &blas.handle))
+
+    {
+        cmd_buf := begin_tmp_cmd_buf(device, cmd_pool)
+        defer end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
+        build_info.dstAccelerationStructure = blas.handle
+        build_info.scratchData.deviceAddress = get_buffer_device_address(device, scratch_buf)
+
+        vk.CmdBuildAccelerationStructuresKHR(cmd_buf, 1, &build_info, auto_cast raw_data(range_info_ptrs))
+    }
+
+    // Get device address
+    addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        accelerationStructure = blas.handle,
+    }
+    blas.addr = vk.GetAccelerationStructureDeviceAddressKHR(device, &addr_info)
+
+    return blas
 }
