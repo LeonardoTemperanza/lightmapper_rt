@@ -35,8 +35,9 @@ import os "core:os"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
-import vku "../vk_utils"
-import lm "../"
+import vku "../../vk_utils"
+import lm "../../"
+import loader "../loader"
 
 Filter_Mode :: enum
 {
@@ -136,8 +137,8 @@ main :: proc()
     }
     lm_ctx := lm.init_test(lm_vk_ctx)
 
-    instances := load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx")
-    // instances := load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", 10, 4096, 4096)
+    instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx", LIGHTMAP_SIZE)
+    // instances := load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", 10, 4096, 4096, LIGHTMAP_SIZE)
     // defer destroy_scene(&vk_ctx, &scene)
 
     vk_frames := create_vk_frames(&vk_ctx)

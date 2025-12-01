@@ -1,19 +1,19 @@
 
-package main
+package loader
 
 import "core:fmt"
 import "core:math/linalg"
 import "core:math"
 import "core:c"
 import stbrp "vendor:stb/rect_pack"
-import lm "../"
+import lm "../.."
 
-import vku "../vk_utils"
+import vku "../../vk_utils"
 import vk "vendor:vulkan"
-import "ufbx"
+import "../ufbx"
 
 load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, cmd_pool: vk.CommandPool, path: cstring,
-                       texels_per_world_unit := 100, min_instance_texels := 64, max_instance_texels := 1024) -> [dynamic]lm.Instance
+                       lightmap_size: i32, texels_per_world_unit := 100, min_instance_texels := 64, max_instance_texels := 1024) -> [dynamic]lm.Instance
 {
     // Load the .fbx file
     opts := ufbx.Load_Opts {
@@ -84,6 +84,13 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
         lm.create_mesh(lm_ctx, indices[:], pos_buf[:], normals_buf[:], lm_uvs_buf[:], /*diffuse_uvs_buf[:]*/)
     }
 
+    for i in 0..<scene.textures.count
+    {
+        a := 2
+        a += 1
+        fmt.println(a)
+    }
+
     // Loop through instances.
     instances: [dynamic]lm.Instance
     instance_loop: for i in 0..<scene.nodes.count
@@ -103,10 +110,10 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
         fmt.println("Packing uvs...")
         defer fmt.println("Done packing uvs.")
 
-        num_nodes := LIGHTMAP_SIZE
+        num_nodes := lightmap_size
         tmp_nodes := make([]stbrp.Node, num_nodes, allocator = context.temp_allocator)
         stbrp_ctx: stbrp.Context
-        stbrp.init_target(&stbrp_ctx, LIGHTMAP_SIZE, LIGHTMAP_SIZE, raw_data(tmp_nodes), i32(len(tmp_nodes)))
+        stbrp.init_target(&stbrp_ctx, lightmap_size, lightmap_size, raw_data(tmp_nodes), i32(len(tmp_nodes)))
 
         rects := make([dynamic]stbrp.Rect, len(instances))
         defer delete(rects)
@@ -132,8 +139,8 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
                 assert(rect.w == rect.h)
 
                 instances[rect.id].lm_idx = lm_idx
-                instances[rect.id].lm_offset = { f32(rect.x) / f32(LIGHTMAP_SIZE), f32(rect.y) / f32(LIGHTMAP_SIZE) }
-                instances[rect.id].lm_scale = f32(rect.w) / f32(LIGHTMAP_SIZE)
+                instances[rect.id].lm_offset = { f32(rect.x) / f32(lightmap_size), f32(rect.y) / f32(lightmap_size) }
+                instances[rect.id].lm_scale = f32(rect.w) / f32(lightmap_size)
             }
 
             if all_fit { break }
@@ -191,4 +198,20 @@ get_node_world_transform :: proc(node: ^ufbx.Node) -> matrix[4, 4]f32
     if node.is_root { return local }
 
     return get_node_world_transform(node.parent) * local
+}
+
+v3_to_v4 :: proc(v: [3]f32, w: Maybe(f32) = nil) -> (res: [4]f32)
+{
+    res.xyz = v.xyz
+    if num, ok := w.?; ok {
+        res.w = num
+    }
+    return
+}
+
+xform_to_mat :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4, 4]f32
+{
+    return cast(matrix[4, 4]f32) (#force_inline linalg.matrix4_translate(pos) *
+           #force_inline linalg.matrix4_from_quaternion(rot) *
+           #force_inline linalg.matrix4_scale(scale))
 }
