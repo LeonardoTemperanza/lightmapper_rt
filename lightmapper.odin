@@ -1095,6 +1095,28 @@ bake_main :: proc(using bake: ^Bake)
         vk_check(vk.QueueWaitIdle(vk_ctx.queue))
     }
 
+    // Smooth seams
+    {
+        vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            flags = { .ONE_TIME_SUBMIT },
+        }))
+
+        smooth_seams(bake, cmd_buf, shaders.seams_pipeline_layout, &lightmap, &lightmap_backbuffer)
+
+        vk_check(vk.EndCommandBuffer(cmd_buf))
+
+        wait_stage_flags := vk.PipelineStageFlags { .ALL_COMMANDS }
+        submit_info := vk.SubmitInfo {
+            sType = .SUBMIT_INFO,
+            pWaitDstStageMask = &wait_stage_flags,
+            commandBufferCount = 1,
+            pCommandBuffers = &cmd_buf,
+        }
+        vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
+        vk_check(vk.QueueWaitIdle(vk_ctx.queue))
+    }
+
     when SYNCHRONOUS
     {
         for
@@ -1487,10 +1509,10 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
 }
 
-smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, lm: vku.Image, lm_backbuffer: vku.Image)
+smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, lm: ^vku.Image, lm_backbuffer: ^vku.Image)
 {
     // src = images[0], dst = images[1]
-    images := [2]vku.Image { lm_backbuffer, lm }
+    images := [2]^vku.Image { lm_backbuffer, lm }
 
     NUM_SEAMS_ACCUMULATION :: 50
     for iter in 0..<NUM_SEAMS_ACCUMULATION
@@ -1525,7 +1547,9 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
         assert(len(shader_stages) == len(to_bind))
         vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
-        draw_seams(bake, cmd_buf, pipeline_layout, iter, images[0], images[1])
+        draw_seams(bake, cmd_buf, pipeline_layout, iter, images[0]^, images[1]^)
+
+        vku.image_barrier_safe_slow(images[1], cmd_buf, .GENERAL)
         images[0], images[1] = images[1], images[0]
     }
 }
@@ -1585,18 +1609,14 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
         offset := vk.DeviceSize(0)
 
         Push :: struct {
-            model_to_world: matrix[4, 4]f32,
-            normal_mat: matrix[4, 4]f32,
-            lm_uv_offset: [2]f32,
-            lm_uv_scale: f32
+            render_to_line0: b32,
+            target_size: f32,
         }
         push := Push {
-            model_to_world = instance.transform,
-            normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
-            lm_uv_offset = instance.lm_offset,
-            lm_uv_scale = instance.lm_scale,
+            render_to_line0 = iter % 2 == 0,
+            target_size = f32(lightmap_size)
         }
-        vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
+        vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX }, 0, size_of(push), &push)
 
         vk.CmdDrawIndexed(cmd_buf, mesh.num_seams, 1, 0, 0, 0)
     }
@@ -1621,6 +1641,8 @@ Shaders :: struct
     push_samples_pipeline: vk.Pipeline,
 
     // Seam smoothing
+    seams_desc_set_layout: vk.DescriptorSetLayout,
+    seams_pipeline_layout: vk.PipelineLayout,
     seams_vert: vk.ShaderEXT,
     seams_frag: vk.ShaderEXT,
 
@@ -1725,6 +1747,21 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
             pBindings = raw_data(rt_desc_set_layout_bindings)
         }
         vk_check(vk.CreateDescriptorSetLayout(device, &rt_desc_set_layout_ci, nil, &res.rt_desc_set_layout))
+
+        seams_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = {},
+            bindingCount = 1,
+            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .STORAGE_BUFFER,
+                    descriptorCount = 1,
+                    stageFlags = { .VERTEX },
+                }
+            })
+        }
+        vk_check(vk.CreateDescriptorSetLayout(device, &seams_desc_set_layout_ci, nil, &res.seams_desc_set_layout))
     }
 
     // Pipeline layouts
@@ -1761,6 +1798,21 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
             pSetLayouts = &res.rt_desc_set_layout
         }
         vk_check(vk.CreatePipelineLayout(device, &rt_pipeline_layout_ci, nil, &res.rt_pipeline_layout))
+
+        seams_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            flags = {},
+            pushConstantRangeCount = u32(1),
+            pPushConstantRanges = raw_data([]vk.PushConstantRange {
+                {
+                    stageFlags = { .VERTEX },
+                    size = 256,
+                }
+            }),
+            setLayoutCount = 1,
+            pSetLayouts = &res.seams_desc_set_layout,
+        }
+        vk_check(vk.CreatePipelineLayout(device, &seams_pipeline_layout_ci, nil, &res.seams_pipeline_layout))
     }
 
     uv_space_vert_code              := #load("shaders/uv_space.vert.spv", []u32)
@@ -1774,6 +1826,8 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
     raymiss_code                    := #load("shaders/pathtrace.rmiss.spv", []u32)
     rayhit_code                     := #load("shaders/pathtrace.rchit.spv", []u32)
     dilate_code                     := #load("shaders/dilate.comp.spv", []u32)
+    seams_vert_code                 := #load("shaders/seams.vert.spv", []u32)
+    seams_frag_code                 := #load("shaders/seams.frag.spv", []u32)
 
     // NOTE: #load(<string-path>, <type>) used to produce unaligned reads and writes (https://github.com/odin-lang/Odin/issues/5771)
     ensure(uintptr(raw_data(uv_space_vert_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
@@ -1787,6 +1841,8 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
     ensure(uintptr(raw_data(raymiss_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
     ensure(uintptr(raw_data(rayhit_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
     ensure(uintptr(raw_data(dilate_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(seams_vert_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(seams_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
 
     // Create shader objects.
     {
@@ -1849,6 +1905,31 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                 setLayoutCount = 1,
                 pSetLayouts = &res.dilate_desc_set_layout,
             },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(seams_vert_code) * size_of(seams_vert_code[0]),
+                pCode = raw_data(seams_vert_code),
+                pName = "main",
+                stage = { .VERTEX },
+                nextStage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 1,
+                pSetLayouts = &res.seams_desc_set_layout,
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(seams_frag_code) * size_of(seams_frag_code[0]),
+                pCode = raw_data(seams_frag_code),
+                pName = "main",
+                stage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+            },
         }
         shaders: [len(shader_cis)]vk.ShaderEXT
         vk_check(vk.CreateShadersEXT(device, len(shaders), raw_data(&shader_cis), nil, raw_data(&shaders)))
@@ -1857,6 +1938,8 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
         res.gbuffer_world_normals = shaders[2]
         res.gbuffer_tri_idx = shaders[3]
         res.dilate_shader = shaders[4]
+        res.seams_vert = shaders[5]
+        res.seams_frag = shaders[6]
     }
 
     // RT
