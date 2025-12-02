@@ -86,9 +86,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
 
     for i in 0..<scene.textures.count
     {
-        a := 2
-        a += 1
-        fmt.println(a)
+        fmt.println("texture found")
     }
 
     // Loop through instances.

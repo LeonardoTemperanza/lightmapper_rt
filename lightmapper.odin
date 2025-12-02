@@ -35,6 +35,7 @@ import "base:runtime"
 import "core:c"
 import thr "core:thread"
 import "core:time"
+import "core:sort"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -43,7 +44,7 @@ import vku "vk_utils"
 import oidn "oidn_odin_bindings"
 
 // For renderdoc debugging
-SYNCHRONOUS :: #config(LM_SYNCHRONOUS, false)
+SYNCHRONOUS :: #config(LM_SYNCHRONOUS, true)
 
 Context :: struct
 {
@@ -144,15 +145,32 @@ create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, no
     mesh.lm_uvs_cpu = slice.clone_to_dynamic(lm_uvs)
     // TODO diffuse uvs
 
+    seams := find_seams(indices, positions, normals, lm_uvs)
+    defer delete(seams)
+    seams_gpu := make([dynamic]Seam_GPU, len(seams), len(seams))
+    defer delete(seams_gpu)
+    for seam, i in seams
+    {
+        seams_gpu[i] = {
+            lines = {
+                Line_GPU { { lm_uvs[seam.edge_a[0]], lm_uvs[seam.edge_a[1]] } },
+                Line_GPU { { lm_uvs[seam.edge_b[0]], lm_uvs[seam.edge_b[1]] } },
+            }
+        }
+    }
+
     idx_usage_flags := vk.BufferUsageFlags { .INDEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }
-    mesh.indices = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, indices[:], idx_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     v_usage_flags := vk.BufferUsageFlags { .VERTEX_BUFFER, .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .STORAGE_BUFFER }
+    seams_usage_flags := vk.BufferUsageFlags { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
+
+    mesh.indices = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, indices[:], idx_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.pos = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, positions[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.normals = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, normals[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.geom_normals = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, mesh.geom_normals_cpu[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.lm_uvs = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, lm_uvs[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     // TODO diffuse uvs
-
+    mesh.seams = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, seams_gpu[:], seams_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
+    mesh.num_seams = u32(len(seams))
 
     mesh.blas = vku.create_blas(device, phys_device, queue, upload_cmd_pool, mesh.pos, mesh.indices, u32(len(positions)), u32(len(indices)))
 
@@ -270,12 +288,25 @@ Mesh :: struct
     geom_normals_cpu: [dynamic][3]f32,
     lm_uvs_cpu: [dynamic][2]f32,
 
+    seams: Buffer,
+    num_seams: u32,
+
     indices: Buffer,
     pos: Buffer,
     normals: Buffer,
     geom_normals: Buffer,
     lm_uvs: Buffer,
     blas: vku.Accel_Structure,
+}
+
+Seam_GPU :: struct
+{
+    lines: [2]Line_GPU
+}
+
+Line_GPU :: struct
+{
+    p: [2][2]f32,
 }
 
 // update_scene_structures
@@ -868,7 +899,7 @@ bake_main :: proc(using bake: ^Bake)
         vk_check(vk.QueueWaitIdle(vk_ctx.queue))
     }
 
-    vk_external_buf = create_vk_external_buffer_for_oidn(&vk_ctx, lightmap_size * lightmap_size * 2 * 4)  // TODO: Replace 4 with channels size?
+    vk_external_buf = create_vk_external_buffer_for_oidn(&vk_ctx, lightmap_size * lightmap_size * 2 * 4)
     oidn_buf = oidn_shared_buffer_from_vk_buffer(oidn_device, vk_external_buf)
     filter = oidn.NewFilter(oidn_device, "RTLightmap")
     oidn.SetFilterImage(filter, "color", oidn_buf, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
@@ -1456,6 +1487,121 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
 }
 
+smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, lm: vku.Image, lm_backbuffer: vku.Image)
+{
+    // src = images[0], dst = images[1]
+    images := [2]vku.Image { lm_backbuffer, lm }
+
+    NUM_SEAMS_ACCUMULATION :: 50
+    for iter in 0..<NUM_SEAMS_ACCUMULATION
+    {
+        color_attachment := vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView = images[1].view,
+            imageLayout = images[1].layout,
+            loadOp = .CLEAR,
+            storeOp = .STORE,
+            clearValue = {
+                color = { float32 = { 0.0, 0.0, 0.0, 0.0 } }
+            }
+        }
+        rendering_info := vk.RenderingInfo {
+            sType = .RENDERING_INFO,
+            renderArea = {
+                offset = { 0, 0 },
+                extent = { images[1].width, images[1].height }
+            },
+            layerCount = 1,
+            colorAttachmentCount = 1,
+            pColorAttachments = &color_attachment,
+            pDepthAttachment = nil,
+        }
+
+        vk.CmdBeginRendering(cmd_buf, &rendering_info)
+        defer vk.CmdEndRendering(cmd_buf)
+
+        shader_stages := []vk.ShaderStageFlags { { .VERTEX }, { .GEOMETRY }, { .FRAGMENT } }
+        to_bind := []vk.ShaderEXT { shaders.seams_vert, vk.ShaderEXT(0), shaders.seams_frag }
+        assert(len(shader_stages) == len(to_bind))
+        vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
+
+        draw_seams(bake, cmd_buf, pipeline_layout, iter, images[0], images[1])
+        images[0], images[1] = images[1], images[0]
+    }
+}
+
+draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, iter: int, src, dst: vku.Image)
+{
+    sample_mask := vk.SampleMask(1)
+    vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
+    vk.CmdSetAlphaToCoverageEnableEXT(cmd_buf, false)
+
+    vk.CmdSetPolygonModeEXT(cmd_buf, .FILL)
+    vk.CmdSetCullMode(cmd_buf, {})
+    vk.CmdSetFrontFace(cmd_buf, .COUNTER_CLOCKWISE)
+
+    vk.CmdSetDepthCompareOp(cmd_buf, .LESS)
+    vk.CmdSetDepthTestEnable(cmd_buf, false)
+    vk.CmdSetDepthWriteEnable(cmd_buf, false)
+    vk.CmdSetDepthBiasEnable(cmd_buf, false)
+    vk.CmdSetDepthClipEnableEXT(cmd_buf, true)
+
+    vk.CmdSetStencilTestEnable(cmd_buf, false)
+    b32_false := b32(false)
+    vk.CmdSetColorBlendEnableEXT(cmd_buf, 0, 1, &b32_false)
+
+    color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
+    vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
+
+    vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
+    vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
+    vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
+    for instance in instances
+    {
+        mesh := get_mesh(ctx, instance.mesh)
+
+        viewport := vk.Viewport {
+            x = f32(lightmap_size) * instance.lm_offset.x,
+            y = f32(lightmap_size) * instance.lm_offset.y,
+            width = f32(lightmap_size) * instance.lm_scale,
+            height = f32(lightmap_size) * instance.lm_scale,
+            minDepth = 0.0,
+            maxDepth = 1.0,
+        }
+        vk.CmdSetViewportWithCount(cmd_buf, 1, &viewport)
+        scissor := vk.Rect2D {
+            offset = {
+                x = i32(f32(lightmap_size) * instance.lm_offset.x),
+                y = i32(f32(lightmap_size) * instance.lm_offset.y),
+            },
+            extent = {
+                width = u32(f32(lightmap_size) * instance.lm_scale),
+                height = u32(f32(lightmap_size) * instance.lm_scale),
+            }
+        }
+        vk.CmdSetScissorWithCount(cmd_buf, 1, &scissor)
+        vk.CmdSetRasterizerDiscardEnable(cmd_buf, false)
+
+        offset := vk.DeviceSize(0)
+
+        Push :: struct {
+            model_to_world: matrix[4, 4]f32,
+            normal_mat: matrix[4, 4]f32,
+            lm_uv_offset: [2]f32,
+            lm_uv_scale: f32
+        }
+        push := Push {
+            model_to_world = instance.transform,
+            normal_mat = linalg.transpose(linalg.inverse(instance.transform)),
+            lm_uv_offset = instance.lm_offset,
+            lm_uv_scale = instance.lm_scale,
+        }
+        vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
+
+        vk.CmdDrawIndexed(cmd_buf, mesh.num_seams, 1, 0, 0, 0)
+    }
+}
+
 Shaders :: struct
 {
     // GBuffer generation
@@ -1473,6 +1619,10 @@ Shaders :: struct
 
     // Sample pushing
     push_samples_pipeline: vk.Pipeline,
+
+    // Seam smoothing
+    seams_vert: vk.ShaderEXT,
+    seams_frag: vk.ShaderEXT,
 
     // RT
     rt_desc_set_layout: vk.DescriptorSetLayout,
@@ -2178,8 +2328,6 @@ create_oidn_context :: proc(phys_device: vk.PhysicalDevice) -> oidn.Device
 
     vk.GetPhysicalDeviceProperties2(phys_device, &props)
 
-    fmt.println(id_props)
-
     device: oidn.Device
     if device == nil && id_props.deviceLUIDValid {
         device = oidn.NewDeviceByLUID(&id_props.deviceLUID[0])
@@ -2338,12 +2486,6 @@ align_up :: proc(x, align: u32) -> (aligned: u32)
     return (x + (align - 1)) &~ (align - 1)
 }
 
-// UV Seam blending
-smooth_seams :: proc(using bake: ^Bake)
-{
-
-}
-
 Tlas :: struct
 {
     as: vku.Accel_Structure,
@@ -2477,4 +2619,138 @@ compute_geom_normals :: proc(indices: []u32, positions: [][3]f32) -> [dynamic][3
     }
 
     return res
+}
+
+Seam :: struct
+{
+    edge_a: [2]u32,
+    edge_b: [2]u32,
+}
+
+find_seams :: proc(indices: []u32, positions: [][3]f32, normals: [][3]f32, uvs: [][2]f32) -> [dynamic]Seam
+{
+    // Collect edges
+    Edge :: [2]u32
+    edges: [dynamic]Edge
+    defer delete(edges)
+
+    for i := 0; i < len(indices); i += 3
+    {
+        append(&edges, Edge { indices[i + 0], indices[i + 1] })
+        append(&edges, Edge { indices[i + 1], indices[i + 2] })
+        append(&edges, Edge { indices[i + 2], indices[i + 0] })
+    }
+
+    // Sort edges (for faster comparisons)
+    for &edge in edges
+    {
+        if edge[0] > edge[1] {
+            edge[0], edge[1] = edge[1], edge[0]
+        }
+    }
+
+    // Build acceleration struture for nearest neighbor searches
+    {
+        Collection :: struct
+        {
+            edges: []Edge,
+            positions: [][3]f32,
+        }
+
+        collection := Collection { edges[:], positions }
+
+        interface := sort.Interface {
+            collection = rawptr(&collection),
+            len = proc(it: sort.Interface) -> int {
+                c := (^Collection)(it.collection)
+                return len(c.edges)
+            },
+            less = proc(it: sort.Interface, i, j: int) -> bool {
+                c := (^Collection)(it.collection)
+                pos0_x := min(c.positions[c.edges[i][0]].x, c.positions[c.edges[i][1]].x)
+                pos1_x := min(c.positions[c.edges[j][0]].x, c.positions[c.edges[j][1]].x)
+                return pos0_x < pos1_x
+            },
+            swap = proc(it: sort.Interface, i, j: int) {
+                c := (^Collection)(it.collection)
+                c.edges[i], c.edges[j] = c.edges[j], c.edges[i]
+            },
+        }
+
+        sort.sort(interface)
+    }
+
+    EPSILON :: 0.00001
+    res: [dynamic]Seam
+    for i in 0..<len(edges)
+    {
+        pos0_x := min(positions[edges[i][0]].x, positions[edges[i][1]].x)
+
+        for j in i+1..<len(edges)
+        {
+            pos1_x := min(positions[edges[j][0]].x, positions[edges[j][1]].x)
+            if abs(pos1_x - pos0_x) > EPSILON do break
+
+            // Check first vertex
+            same_pos := linalg.length(positions[edges[i][0]] - positions[edges[j][0]]) < EPSILON
+            if !same_pos do continue
+            same_normal := linalg.length(normals[edges[i][0]] - normals[edges[j][0]]) < EPSILON
+            if !same_normal do continue
+            same_uv := linalg.length(uvs[edges[i][0]] - uvs[edges[j][0]]) < EPSILON
+            if same_uv do continue
+
+            // Check second vertex
+            same_pos = linalg.length(positions[edges[i][1]] - positions[edges[j][1]]) < EPSILON
+            if !same_pos do continue
+            same_normal = linalg.length(normals[edges[i][1]] - normals[edges[j][1]]) < EPSILON
+            if !same_normal do continue
+            same_uv = linalg.length(uvs[edges[i][1]] - uvs[edges[j][1]]) < EPSILON
+            if same_uv do continue
+
+            // Edges could be aligned and share a segment even though uv verts are not the same
+            if edges_share_segment(uvs, edges[i], edges[j], EPSILON) do continue
+
+            // Found a seam
+            append(&res, Seam { edges[i], edges[j] })
+            fmt.println("Found a seam")
+        }
+    }
+
+    return res
+
+    edges_share_segment :: proc(uvs: [][2]f32, edge0: Edge, edge1: Edge, eps: f32) -> bool
+    {
+        a := uvs[edge0[0]]
+        b := uvs[edge0[1]]
+        c := uvs[edge1[0]]
+        d := uvs[edge1[1]]
+
+        ab_dir := linalg.normalize(b - a)
+        ac_dir := linalg.normalize(c - a)
+        ad_dir := linalg.normalize(d - a)
+
+        // Check if aligned
+        if abs(linalg.dot(ab_dir, ac_dir) - 1) > eps ||
+           abs(linalg.dot(ab_dir, ad_dir) - 1) > eps {
+            return false
+        }
+
+        // Project verts to ab_dir
+        a_p := linalg.dot(ab_dir, a)
+        b_p := linalg.dot(ab_dir, b)
+        c_p := linalg.dot(ab_dir, c)
+        d_p := linalg.dot(ab_dir, d)
+
+        // Sort verts
+        if a_p > b_p do a_p, b_p = b_p, a_p
+        if c_p > d_p do c_p, d_p = d_p, c_p
+
+        // Check interval overlap
+        if c_p > a_p && d_p < b_p do return true
+        if a_p > c_p && b_p < d_p do return true
+        if c_p > a_p && c_p < b_p do return true
+        if d_p > a_p && d_p < b_p do return true
+
+        return false
+    }
 }

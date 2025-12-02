@@ -47,7 +47,7 @@ Filter_Mode :: enum
 }
 
 FILTER_MODE :: Filter_Mode.Bicubic
-SYNCHRONOUS :: false
+SYNCHRONOUS :: true
 
 NUM_FRAMES_IN_FLIGHT :: 1
 NUM_SWAPCHAIN_IMAGES :: 2
