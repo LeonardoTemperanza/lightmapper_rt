@@ -5,7 +5,7 @@ layout(location = 0) in vec2 in_uv;
 
 layout(location = 0) out vec4 out_color;
 
-layout(set = 0, binding = 0) uniform sampler2D src_image;
+layout(set = 0, binding = 1) uniform sampler2D src_image;
 
 void main()
 {

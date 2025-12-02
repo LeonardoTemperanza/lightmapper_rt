@@ -404,7 +404,7 @@ start_bake :: proc(using ctx: ^Context, instances: []Instance,
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
-        usage = { .STORAGE, .SAMPLED, .TRANSFER_DST, .TRANSFER_SRC },
+        usage = { .STORAGE, .SAMPLED, .TRANSFER_DST, .TRANSFER_SRC, .COLOR_ATTACHMENT },
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &vk_ctx.queue_family_idx,
@@ -774,7 +774,7 @@ bake_main :: proc(using bake: ^Bake)
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
-        usage = { .STORAGE, .SAMPLED, .TRANSFER_SRC },
+        usage = { .STORAGE, .SAMPLED, .TRANSFER_SRC, .COLOR_ATTACHMENT },
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &vk_ctx.queue_family_idx,
@@ -1102,7 +1102,7 @@ bake_main :: proc(using bake: ^Bake)
             flags = { .ONE_TIME_SUBMIT },
         }))
 
-        smooth_seams(bake, cmd_buf, shaders.seams_pipeline_layout, &lightmap, &lightmap_backbuffer)
+        smooth_seams(bake, cmd_buf, shaders.seams_pipeline_layout, desc_pool, &lightmap, &lightmap_backbuffer)
 
         vk_check(vk.EndCommandBuffer(cmd_buf))
 
@@ -1509,8 +1509,31 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
 }
 
-smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, lm: ^vku.Image, lm_backbuffer: ^vku.Image)
+smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, desc_pool: vk.DescriptorPool, lm: ^vku.Image, lm_backbuffer: ^vku.Image)
 {
+    desc_set_ai := vk.DescriptorSetAllocateInfo {
+        sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+        descriptorPool = desc_pool,
+        descriptorSetCount = 1,
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.seams_desc_set_layout })
+    }
+    seams_desc_set: vk.DescriptorSet
+    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &seams_desc_set))
+    defer vk_check(vk.FreeDescriptorSets(device, desc_pool, 1, &seams_desc_set))
+
+    linear_sampler_ci := vk.SamplerCreateInfo {
+        sType = .SAMPLER_CREATE_INFO,
+        magFilter = .LINEAR,
+        minFilter = .LINEAR,
+        mipmapMode = .LINEAR,
+        addressModeU = .REPEAT,
+        addressModeV = .REPEAT,
+        addressModeW = .REPEAT,
+    }
+    linear_sampler: vk.Sampler
+    vk_check(vk.CreateSampler(vk_ctx.device, &linear_sampler_ci, nil, &linear_sampler))
+    defer vk.DestroySampler(device, linear_sampler, nil)
+
     // src = images[0], dst = images[1]
     images := [2]^vku.Image { lm_backbuffer, lm }
 
@@ -1521,11 +1544,8 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
             sType = .RENDERING_ATTACHMENT_INFO,
             imageView = images[1].view,
             imageLayout = images[1].layout,
-            loadOp = .CLEAR,
+            loadOp = .LOAD,
             storeOp = .STORE,
-            clearValue = {
-                color = { float32 = { 0.0, 0.0, 0.0, 0.0 } }
-            }
         }
         rendering_info := vk.RenderingInfo {
             sType = .RENDERING_INFO,
@@ -1547,14 +1567,15 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
         assert(len(shader_stages) == len(to_bind))
         vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
-        draw_seams(bake, cmd_buf, pipeline_layout, iter, images[0]^, images[1]^)
+        draw_seams(bake, cmd_buf, pipeline_layout, seams_desc_set, linear_sampler, iter, images[0]^, images[1]^)
 
-        vku.image_barrier_safe_slow(images[1], cmd_buf, .GENERAL)
         images[0], images[1] = images[1], images[0]
     }
+
+    vku.image_barrier_safe_slow(images[1], cmd_buf, .GENERAL)
 }
 
-draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, iter: int, src, dst: vku.Image)
+draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, desc_set: vk.DescriptorSet, sampler: vk.Sampler, iter: int, src, dst: vku.Image)
 {
     sample_mask := vk.SampleMask(1)
     vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
@@ -1577,12 +1598,102 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
     color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
     vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
 
+    vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_STRIP)
+
+    vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
+
+    vert_input_bindings := []vk.VertexInputBindingDescription2EXT {
+        {  // Positions
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 0,
+            stride = size_of([3]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        },
+        {  // Normals
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 1,
+            stride = size_of([3]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        },
+        {  // Lightmap UVs
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 2,
+            stride = size_of([2]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        },
+    }
+    vert_attributes := []vk.VertexInputAttributeDescription2EXT {
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 0,
+            binding = 0,
+            format = .R32G32B32_SFLOAT,
+            offset = 0
+        },
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 1,
+            binding = 1,
+            format = .R32G32B32_SFLOAT,
+            offset = 0
+        },
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 2,
+            binding = 2,
+            format = .R32G32_SFLOAT,
+            offset = 0
+        },
+    }
+    vk.CmdSetVertexInputEXT(cmd_buf, u32(len(vert_input_bindings)), raw_data(vert_input_bindings), u32(len(vert_attributes)), raw_data(vert_attributes))
+
     vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
     vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
     vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
     for instance in instances
     {
         mesh := get_mesh(ctx, instance.mesh)
+
+        writes := []vk.WriteDescriptorSet {
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = desc_set,
+                dstBinding = 0,
+                descriptorCount = 1,
+                descriptorType = .STORAGE_BUFFER,
+                pBufferInfo = raw_data([]vk.DescriptorBufferInfo {
+                    {
+                        buffer = mesh.seams.handle,
+                        offset = vk.DeviceSize(0),
+                        range = vk.DeviceSize(vk.WHOLE_SIZE),
+                    }
+                })
+            },
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = desc_set,
+                dstBinding = 1,
+                descriptorCount = 1,
+                descriptorType = .COMBINED_IMAGE_SAMPLER,
+                pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                    {
+                        imageView = src.view,
+                        imageLayout = src.layout,
+                        sampler = sampler,
+                    }
+                })
+            },
+        }
+        vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
+
+        tmp := desc_set
+        vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.seams_pipeline_layout, 0, 1, &tmp, 0, nil)
+
+        // Useless here, keeps vulkan validation at bay.
+        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices.handle, 0, .UINT32)
 
         viewport := vk.Viewport {
             x = f32(lightmap_size) * instance.lm_offset.x,
@@ -1616,9 +1727,9 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
             render_to_line0 = iter % 2 == 0,
             target_size = f32(lightmap_size)
         }
-        vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX }, 0, size_of(push), &push)
+        vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
 
-        vk.CmdDrawIndexed(cmd_buf, mesh.num_seams, 1, 0, 0, 0)
+        vk.CmdDrawIndexed(cmd_buf, mesh.num_seams * 8, 1, 0, 0, 0)
     }
 }
 
@@ -1751,13 +1862,19 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
         seams_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             flags = {},
-            bindingCount = 1,
+            bindingCount = 2,
             pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
                 {
                     binding = 0,
                     descriptorType = .STORAGE_BUFFER,
                     descriptorCount = 1,
                     stageFlags = { .VERTEX },
+                },
+                {
+                    binding = 1,
+                    descriptorType = .COMBINED_IMAGE_SAMPLER,
+                    descriptorCount = 1,
+                    stageFlags = { .FRAGMENT },
                 }
             })
         }
@@ -1805,7 +1922,7 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
             pushConstantRangeCount = u32(1),
             pPushConstantRanges = raw_data([]vk.PushConstantRange {
                 {
-                    stageFlags = { .VERTEX },
+                    stageFlags = { .VERTEX, .FRAGMENT },
                     size = 256,
                 }
             }),
@@ -1929,6 +2046,8 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                 flags = { },
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 1,
+                pSetLayouts = &res.seams_desc_set_layout,
             },
         }
         shaders: [len(shader_cis)]vk.ShaderEXT
@@ -1944,7 +2063,7 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
 
     // RT
     // NOTE: The constant is wrong, this is now fixed but not in the latest release.
-    SHADER_UNUSED :: ~u32(0)
+    #assert(vk.SHADER_UNUSED_KHR == ~u32(0), "Some vk constants are wrong! Are you on an old Odin version? Update to >= dev-2025-11!")
 
     push_samples_raygen_shader: vk.ShaderModule
     push_samples_raymiss_shader: vk.ShaderModule
@@ -2043,25 +2162,25 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                 sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
                 type = .GENERAL,
                 generalShader = 0,
-                closestHitShader = SHADER_UNUSED,
-                anyHitShader = SHADER_UNUSED,
-                intersectionShader = SHADER_UNUSED,
+                closestHitShader = vk.SHADER_UNUSED_KHR,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
             },
             {  // Miss group
                 sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
                 type = .GENERAL,
                 generalShader = 1,
-                closestHitShader = SHADER_UNUSED,
-                anyHitShader = SHADER_UNUSED,
-                intersectionShader = SHADER_UNUSED,
+                closestHitShader = vk.SHADER_UNUSED_KHR,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
             },
             {  // Triangles hit group
                 sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
                 type = .TRIANGLES_HIT_GROUP,
-                generalShader = SHADER_UNUSED,
+                generalShader = vk.SHADER_UNUSED_KHR,
                 closestHitShader = 2,
-                anyHitShader = SHADER_UNUSED,
-                intersectionShader = SHADER_UNUSED,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
             }
         }),
         maxPipelineRayRecursionDepth = 1,
@@ -2107,25 +2226,25 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                 sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
                 type = .GENERAL,
                 generalShader = 0,
-                closestHitShader = SHADER_UNUSED,
-                anyHitShader = SHADER_UNUSED,
-                intersectionShader = SHADER_UNUSED,
+                closestHitShader = vk.SHADER_UNUSED_KHR,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
             },
             {  // Miss group
                 sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
                 type = .GENERAL,
                 generalShader = 1,
-                closestHitShader = SHADER_UNUSED,
-                anyHitShader = SHADER_UNUSED,
-                intersectionShader = SHADER_UNUSED,
+                closestHitShader = vk.SHADER_UNUSED_KHR,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
             },
             {  // Triangles hit group
                 sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
                 type = .TRIANGLES_HIT_GROUP,
-                generalShader = SHADER_UNUSED,
+                generalShader = vk.SHADER_UNUSED_KHR,
                 closestHitShader = 2,
-                anyHitShader = SHADER_UNUSED,
-                intersectionShader = SHADER_UNUSED,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
             }
         }),
         maxPipelineRayRecursionDepth = 1,
@@ -2795,7 +2914,7 @@ find_seams :: proc(indices: []u32, positions: [][3]f32, normals: [][3]f32, uvs: 
 
             // Found a seam
             append(&res, Seam { edges[i], edges[j] })
-            fmt.println("Found a seam")
+            //fmt.println("Found a seam")
         }
     }
 
