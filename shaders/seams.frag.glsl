@@ -9,6 +9,6 @@ layout(set = 0, binding = 1) uniform sampler2D src_image;
 
 void main()
 {
-    //out_color = vec4(texture(src_image, in_uv).rbg, 0.5f);
-    out_color = vec4(1, 0, 0, 0.5f);
+    out_color = vec4(texture(src_image, in_uv).rbg, 0.1f);
+    //out_color = vec4(0.0f, 1.0f, 0, 0.5f);
 }

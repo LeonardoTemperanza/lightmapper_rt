@@ -27,24 +27,17 @@ layout(push_constant) uniform Push
 
 void main()
 {
-    uint line_id = gl_VertexIndex / 8;
+    uint line_id = gl_VertexIndex / 3;
 
     float texel_scale = 1.0f / target_size;
 
     Line target_line = render_to_line0 != 0 ? seams[line_id].lines[0] : seams[line_id].lines[1];
     Line other_line  = render_to_line0 != 0 ? seams[line_id].lines[1] : seams[line_id].lines[0];
 
-    vec2 offsets[4] = {
-        vec2(-0.5, -0.5),
-        vec2(+0.5, -0.5),
-        vec2(+0.5, +0.5),
-        vec2(-0.5, +0.5),
-    };
-
     vec2 v =       (gl_VertexIndex % 2) == 0 ? target_line.p[0] : target_line.p[1];
     vec2 other_v = (gl_VertexIndex % 2) == 0 ? other_line.p[0] : other_line.p[1];
-    vec2 offset = offsets[(gl_VertexIndex / 2) % 4] * texel_scale;
 
-    gl_Position = vec4(v, 0.0f, 1.0f);
-    out_uv = other_v;
+    vec2 final_v = v * 2.0f - 1.0f;
+    gl_Position = vec4(final_v, 0.0f, 1.0f);
+    out_uv = vec2(other_v.x, 1.0f - other_v.y);
 }

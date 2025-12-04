@@ -625,6 +625,13 @@ init_vk_context :: proc(window: ^sdl.Window, debug_callback: vk.ProcDebugUtilsMe
     }
 
     next: rawptr
+    /*
+    next = &vk.PhysicalDeviceMaintenance6Features {
+        sType = .PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES,
+        pNext = next,
+        maintenance6 = true,
+    }
+    */
     next = &vk.PhysicalDeviceVulkan13Features {
         sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
         pNext = next,
@@ -1537,7 +1544,7 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
     // src = images[0], dst = images[1]
     images := [2]^vku.Image { lm_backbuffer, lm }
 
-    NUM_SEAMS_ACCUMULATION :: 50
+    NUM_SEAMS_ACCUMULATION :: 51
     for iter in 0..<NUM_SEAMS_ACCUMULATION
     {
         color_attachment := vk.RenderingAttachmentInfo {
@@ -1559,20 +1566,22 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
             pDepthAttachment = nil,
         }
 
-        vk.CmdBeginRendering(cmd_buf, &rendering_info)
-        defer vk.CmdEndRendering(cmd_buf)
+        {
+            vk.CmdBeginRendering(cmd_buf, &rendering_info)
+            defer vk.CmdEndRendering(cmd_buf)
 
-        shader_stages := []vk.ShaderStageFlags { { .VERTEX }, { .GEOMETRY }, { .FRAGMENT } }
-        to_bind := []vk.ShaderEXT { shaders.seams_vert, vk.ShaderEXT(0), shaders.seams_frag }
-        assert(len(shader_stages) == len(to_bind))
-        vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
+            shader_stages := []vk.ShaderStageFlags { { .VERTEX }, { .GEOMETRY }, { .FRAGMENT } }
+            to_bind := []vk.ShaderEXT { shaders.seams_vert, vk.ShaderEXT(0), shaders.seams_frag }
+            assert(len(shader_stages) == len(to_bind))
+            vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
-        draw_seams(bake, cmd_buf, pipeline_layout, seams_desc_set, linear_sampler, iter, images[0]^, images[1]^)
+            draw_seams(bake, cmd_buf, pipeline_layout, seams_desc_set, linear_sampler, iter, images[0]^, images[1]^)
+        }
 
+        vku.image_barrier_safe_slow(images[0], cmd_buf, .GENERAL)
+        vku.image_barrier_safe_slow(images[1], cmd_buf, .GENERAL)
         images[0], images[1] = images[1], images[0]
     }
-
-    vku.image_barrier_safe_slow(images[1], cmd_buf, .GENERAL)
 }
 
 draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, desc_set: vk.DescriptorSet, sampler: vk.Sampler, iter: int, src, dst: vku.Image)
@@ -1592,13 +1601,22 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
     vk.CmdSetDepthClipEnableEXT(cmd_buf, true)
 
     vk.CmdSetStencilTestEnable(cmd_buf, false)
-    b32_false := b32(false)
-    vk.CmdSetColorBlendEnableEXT(cmd_buf, 0, 1, &b32_false)
+    b32_true := b32(true)
+    vk.CmdSetColorBlendEnableEXT(cmd_buf, 0, 1, &b32_true)
+    blend_equation := vk.ColorBlendEquationEXT {
+        srcColorBlendFactor = .SRC_ALPHA,
+        dstColorBlendFactor = .ONE_MINUS_SRC_ALPHA,
+        colorBlendOp = .ADD,
+        srcAlphaBlendFactor = .ONE,
+        dstAlphaBlendFactor = .ONE_MINUS_SRC_ALPHA,
+        alphaBlendOp = .ADD,
+    }
+    vk.CmdSetColorBlendEquationEXT(cmd_buf, 0, 1, &blend_equation)
 
     color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
     vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
 
-    vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_STRIP)
+    vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_LIST)
 
     vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
 
@@ -1692,9 +1710,6 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
         tmp := desc_set
         vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.seams_pipeline_layout, 0, 1, &tmp, 0, nil)
 
-        // Useless here, keeps vulkan validation at bay.
-        vk.CmdBindIndexBuffer(cmd_buf, mesh.indices.handle, 0, .UINT32)
-
         viewport := vk.Viewport {
             x = f32(lightmap_size) * instance.lm_offset.x,
             y = f32(lightmap_size) * instance.lm_offset.y,
@@ -1729,7 +1744,7 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
         }
         vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
 
-        vk.CmdDrawIndexed(cmd_buf, mesh.num_seams * 8, 1, 0, 0, 0)
+        vk.CmdDraw(cmd_buf, mesh.num_seams * 3, 1, 0, 0)
     }
 }
 
@@ -2882,11 +2897,39 @@ find_seams :: proc(indices: []u32, positions: [][3]f32, normals: [][3]f32, uvs: 
         sort.sort(interface)
     }
 
-    EPSILON :: 0.00001
     res: [dynamic]Seam
+    EPSILON :: 0.00001
     for i in 0..<len(edges)
     {
         pos0_x := min(positions[edges[i][0]].x, positions[edges[i][1]].x)
+
+        for j := i-1; j >= 0; j -= 1
+        {
+            pos1_x := min(positions[edges[j][0]].x, positions[edges[j][1]].x)
+            if abs(pos1_x - pos0_x) > EPSILON do break
+
+            // Check first vertex
+            same_pos := linalg.length(positions[edges[i][0]] - positions[edges[j][0]]) < EPSILON
+            if !same_pos do continue
+            same_normal := linalg.length(normals[edges[i][0]] - normals[edges[j][0]]) < EPSILON
+            if !same_normal do continue
+            same_uv := linalg.length(uvs[edges[i][0]] - uvs[edges[j][0]]) < EPSILON
+            if same_uv do continue
+
+            // Check second vertex
+            same_pos = linalg.length(positions[edges[i][1]] - positions[edges[j][1]]) < EPSILON
+            if !same_pos do continue
+            same_normal = linalg.length(normals[edges[i][1]] - normals[edges[j][1]]) < EPSILON
+            if !same_normal do continue
+            same_uv = linalg.length(uvs[edges[i][1]] - uvs[edges[j][1]]) < EPSILON
+            if same_uv do continue
+
+            // Edges could be aligned and share a segment even though uv verts are not the same
+            if edges_share_segment(uvs, edges[i], edges[j], EPSILON) do continue
+
+            // Found a seam
+            append(&res, Seam { edges[i], edges[j] })
+        }
 
         for j in i+1..<len(edges)
         {
