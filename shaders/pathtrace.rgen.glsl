@@ -12,6 +12,10 @@ layout(push_constant) uniform Push
 {
     uint accum_counter;
     uint seed;
+    uint use_dir_light;
+    vec3 dir_light;
+    vec3 dir_light_emission;
+    vec3 dir_light_solid_angle;
 } push;
 
 struct HitInfo
@@ -33,6 +37,15 @@ const float T_MIN = 0.01;
 const float T_MAX = 1000000.0f;
 
 uint RNG_STATE = 0;
+
+vec3 dir_light = normalize(vec3(0.2f, -1.0f, -0.1f));
+vec3 dir_light_emission = vec3(1000.0f, 920.0f, 820.0f);
+float dir_light_angle = 0.2 * (PI/180);
+
+bool vec3f_is_finite(vec3 v)
+{
+    return all(notEqual(uvec3(floatBitsToInt(v)) & uvec3(0x7F800000), uvec3(0x7F800000)));
+}
 
 struct Ray
 {
@@ -86,6 +99,21 @@ vec2 random_vec2()
     return vec2(rnd0, rnd1);
 }
 
+float random_f32_normal_dist()
+{
+    float theta = 2.0f * PI * random_f32();
+    float rho   = sqrt(-2.0f * log(random_f32()));
+    return rho * cos(theta);
+}
+
+vec3 random_dir()
+{
+    float x = random_f32_normal_dist();
+    float y = random_f32_normal_dist();
+    float z = random_f32_normal_dist();
+    return normalize(vec3(x, y, z));
+}
+
 float copysignf(float mag, float sgn) { return sgn < 0.0f ? -mag : mag; }
 
 mat3 basis_fromz(vec3 v)
@@ -98,6 +126,15 @@ mat3 basis_fromz(vec3 v)
     vec3 x     = vec3(1.0f + sign * z.x * z.x * a, sign * b, -sign * z.x);
     vec3 y     = vec3(b, sign + z.y * z.y * a, -z.y);
     return mat3(x, y, z);
+}
+
+float sun_disk_falloff(vec3 ray_dir, vec3 sun_dir, float angular_radius)
+{
+    float cos_theta = dot(ray_dir, sun_dir);
+    float cos_inner = cos(angular_radius);
+    float cos_outer = cos(angular_radius * 1.5);
+
+    return smoothstep(cos_outer, cos_inner, cos_theta);
 }
 
 vec3 sample_hemisphere_cos(vec3 normal, vec2 ruv)
@@ -134,6 +171,46 @@ float sample_matte_pdf(vec3 color, vec3 normal, vec3 outgoing, vec3 incoming)
     return sample_hemisphere_cos_pdf(up_normal, incoming);
 }
 
+float eval_sun_pdf(vec3 dir, vec3 sun_dir, float angular_radius)
+{
+    float cos_theta = dot(dir, sun_dir);
+    float cos_max   = cos(angular_radius);
+
+    // If the direction falls outside the sun cone, the light
+    // would never have sampled it → PDF = 0.
+    if (cos_theta < cos_max)
+        return 0.0;
+
+    // Otherwise constant over the disk.
+    float solid_angle = 2.0 * PI * (1.0 - cos_max);
+    return 1.0 / solid_angle;
+}
+
+void make_basis(vec3 n, out vec3 t, out vec3 b)
+{
+    if (abs(n.z) < 0.999)
+        t = normalize(cross(n, vec3(0.0, 0.0, 1.0)));
+    else
+        t = normalize(cross(n, vec3(0.0, 1.0, 0.0)));
+
+    b = cross(n, t);
+}
+
+vec3 sample_sun_direction(vec3 sun_dir, float angular_radius, vec2 u)
+{
+    float cos_theta_max = cos(angular_radius);
+    float cos_theta = mix(1.0, cos_theta_max, u.x);
+    float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+    float phi = 2.0 * PI * u.y;
+
+    vec3 t, b;
+    make_basis(sun_dir, t, b);
+
+    return t * (cos(phi) * sin_theta) +
+           b * (sin(phi) * sin_theta) +
+           sun_dir * cos_theta;
+}
+
 // Stores result in payload.
 void ray_scene_intersection(Ray ray)
 {
@@ -150,15 +227,25 @@ void ray_scene_intersection(Ray ray)
     traceRayEXT(tlas, ray_flags, cull_mask, sbt_record_offset, sbt_record_stride, miss_index, origin, t_min, direction, t_max, payload_loc);
 }
 
+vec3 sample_lights(vec3 pos, vec3 normal, vec3 outgoing)
+{
+    return sample_sun_direction(-dir_light, dir_light_angle, random_vec2());
+}
+
+float sample_lights_pdf(vec3 pos, vec3 incoming)
+{
+    return eval_sun_pdf(incoming, -dir_light, dir_light_angle);
+}
+
 // Alpha stores the validity of this sample, in [0, 1].
-vec4 pathtrace(vec3 start_pos, vec3 world_normal)
+vec3 pathtrace(vec3 start_pos, vec3 world_normal)
 {
     vec3 radiance = vec3(0.0f);
     vec3 weight = vec3(1.0f);
     Ray ray = Ray(start_pos, world_normal);
     vec3 outgoing = world_normal;
 
-    // Initialize the first hit to be
+    // Initialize the first hit to be.
     hit_info.hit = true;
     hit_info.albedo = vec3(0.7f);
     hit_info.emission = vec3(0.0f);
@@ -187,23 +274,62 @@ vec4 pathtrace(vec3 start_pos, vec3 world_normal)
             outgoing = -ray.dir;
         }
 
-        // Accumulate emission
+        // Accumulate emission.
         radiance += weight * hit_info.emission;
 
-        vec3 incoming = sample_matte(hit_info.albedo, hit_info.world_normal, outgoing, random_vec2());
-        if(incoming == vec3(0.0f)) break;
-        weight *= eval_matte(hit_info.albedo, hit_info.world_normal, outgoing, incoming) /
-                  sample_matte_pdf(hit_info.albedo, hit_info.world_normal, outgoing, incoming);
+        // Compute next direction.
+        vec3 incoming = vec3(0.0f);
+        {
+            const float light_prob = 0.5f;
+            const float bsdf_prob = 1.0f - light_prob;
+            if(random_f32() < bsdf_prob)
+            {
+                float rnd0 = random_f32();
+                vec2  rnd1 = random_vec2();
+                incoming = sample_matte(hit_info.albedo, hit_info.world_normal, outgoing, rnd1);
+            }
+            else
+            {
+                incoming = sample_lights(hit_pos, hit_info.world_normal, outgoing);
+            }
 
-        // Update ray
+            if(all(equal(incoming, vec3(0.0f)))) break;
+
+            float prob = bsdf_prob * sample_matte_pdf(hit_info.albedo, hit_info.world_normal, outgoing, incoming) +
+                         light_prob * sample_lights_pdf(hit_pos, incoming);
+            weight *= eval_matte(hit_info.albedo, hit_info.world_normal, outgoing, incoming) / prob;
+        }
+
+        // Update ray.
         ray.ori = hit_pos;
         ray.dir = incoming;
+
+        // Check weight.
+        if(all(equal(weight, vec3(0.0f))) || !vec3f_is_finite(weight)) break;
+
+        // Russian roulette.
+        if(bounce > 3)
+        {
+            float survive_prob = min(0.99f, max(weight.x, max(weight.y, weight.z)));
+            if(random_f32() >= survive_prob) break;
+            weight *= 1.0f / survive_prob;
+        }
     }
 
-    //float validity = 1.0f - (float(backface_hits_count) / float(MAX_BOUNCES - 1));
-    //float validity = backface_hits_count > 0 ? 0.0f : 1.0f;
-    float validity = 1.0f;
-    return vec4(radiance, validity);
+    return radiance;
+}
+
+// Hack to guard from floating point imprecision. Kind of necessary
+// when doing any form of MIS.
+vec3 clamp_radiance(vec3 radiance)
+{
+    vec3 res = radiance;
+    if(!vec3f_is_finite(res)) res = vec3(0.0f);
+
+    const float MAX_RADIANCE = 15.0;
+    if(any(greaterThan(res, vec3(MAX_RADIANCE))))
+        res *= MAX_RADIANCE / max(res.x, max(res.y, res.z));
+    return res;
 }
 
 void main()
@@ -227,19 +353,20 @@ void main()
     init_rng(pixel.y * size.x + pixel.x);
 
     uint NUM_SAMPLES = 1;
-    vec4 color = vec4(0.0f);
+    float MAX_RADIANCE = 15.0f;
+    vec3 color = vec3(0.0f);
     for(int i = 0; i < NUM_SAMPLES; ++i)
-        color += pathtrace(world_pos, world_normal);
+        color += clamp_radiance(pathtrace(world_pos, world_normal));
     color /= NUM_SAMPLES;
 
     // Progressive pathtracing.
     if(push.accum_counter != 0)
     {
         float weight = 1.0f / float(push.accum_counter);
-        vec4 prev_color = imageLoad(lightmap, pixel);
+        vec3 prev_color = imageLoad(lightmap, pixel).rgb;
         color = prev_color * (1.0f - weight) + color * weight;
-        color = max(color, vec4(0.0f));
+        color = max(color, vec3(0.0f));
     }
 
-    imageStore(lightmap, pixel, color);
+    imageStore(lightmap, pixel, vec4(color, 1.0f));
 }

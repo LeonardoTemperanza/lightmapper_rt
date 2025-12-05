@@ -84,10 +84,12 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
         lm.create_mesh(lm_ctx, indices[:], pos_buf[:], normals_buf[:], lm_uvs_buf[:], /*diffuse_uvs_buf[:]*/)
     }
 
+    /*
     for i in 0..<scene.textures.count
     {
         fmt.println("texture found")
     }
+    */
 
     // Loop through instances.
     instances: [dynamic]lm.Instance

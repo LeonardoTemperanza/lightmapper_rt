@@ -191,7 +191,7 @@ main :: proc()
     lightmap_sampler: vk.Sampler
     vk_check(vk.CreateSampler(vk_ctx.device, &lightmap_sampler_ci, nil, &lightmap_sampler))
 
-    bake := lm.start_bake(&lm_ctx, instances[:], 4096, 20, 1)
+    bake := lm.start_bake(&lm_ctx, instances[:], 4096, 1000, 1)
 
     // Create main render target
     render_target: Image

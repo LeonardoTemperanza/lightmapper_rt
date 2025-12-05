@@ -53,6 +53,7 @@ Context :: struct
     shaders: Shaders,
 
     upload_cmd_pool: vk.CommandPool,
+    desc_pool: vk.DescriptorPool,
 
     meshes: [dynamic]Mesh,
     meshes_free: [dynamic]u32,
@@ -118,6 +119,36 @@ init_test :: proc(vk_ctx: Lightmapper_Vulkan_Context) -> Context
     upload_cmd_pool: vk.CommandPool
     vk_check(vk.CreateCommandPool(res.device, &upload_cmd_pool_ci, nil, &res.upload_cmd_pool))
 
+    desc_pool_ci := vk.DescriptorPoolCreateInfo {
+        sType = .DESCRIPTOR_POOL_CREATE_INFO,
+        flags = { .FREE_DESCRIPTOR_SET },
+        maxSets = 100000,
+        poolSizeCount = 5,
+        pPoolSizes = raw_data([]vk.DescriptorPoolSize {
+            {
+                type = .ACCELERATION_STRUCTURE_KHR,
+                descriptorCount = 5,
+            },
+            {
+                type = .STORAGE_IMAGE,
+                descriptorCount = 10,
+            },
+            {
+                type = .SAMPLED_IMAGE,
+                descriptorCount = 10,
+            },
+            {
+                type = .COMBINED_IMAGE_SAMPLER,
+                descriptorCount = 10,
+            },
+            {
+                type = .STORAGE_BUFFER,
+                descriptorCount = 100000,
+            },
+        })
+    }
+    vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &res.desc_pool))
+
     return res
 }
 
@@ -171,6 +202,30 @@ create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, no
     // TODO diffuse uvs
     mesh.seams = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, seams_gpu[:], seams_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.num_seams = u32(len(seams))
+    desc_set_ai := vk.DescriptorSetAllocateInfo {
+        sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+        descriptorPool = desc_pool,
+        descriptorSetCount = 1,
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.seams_desc_set_layout })
+    }
+    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &mesh.seams_desc_set))
+    writes := []vk.WriteDescriptorSet {
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = mesh.seams_desc_set,
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_BUFFER,
+            pBufferInfo = raw_data([]vk.DescriptorBufferInfo {
+                {
+                    buffer = mesh.seams.handle,
+                    offset = vk.DeviceSize(0),
+                    range = vk.DeviceSize(vk.WHOLE_SIZE),
+                }
+            })
+        }
+    }
+    vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
 
     mesh.blas = vku.create_blas(device, phys_device, queue, upload_cmd_pool, mesh.pos, mesh.indices, u32(len(positions)), u32(len(indices)))
 
@@ -289,6 +344,7 @@ Mesh :: struct
     lm_uvs_cpu: [dynamic][2]f32,
 
     seams: Buffer,
+    seams_desc_set: vk.DescriptorSet,
     num_seams: u32,
 
     indices: Buffer,
@@ -781,45 +837,12 @@ bake_main :: proc(using bake: ^Bake)
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
-        usage = { .STORAGE, .SAMPLED, .TRANSFER_SRC, .COLOR_ATTACHMENT },
+        usage = { .STORAGE, .SAMPLED, .TRANSFER_SRC, .COLOR_ATTACHMENT, .TRANSFER_DST },
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = &vk_ctx.queue_family_idx,
         initialLayout = .UNDEFINED,
     })
-
-    // RT Descriptor set.
-    desc_pool_ci := vk.DescriptorPoolCreateInfo {
-        sType = .DESCRIPTOR_POOL_CREATE_INFO,
-        flags = { .FREE_DESCRIPTOR_SET },
-        maxSets = 50,
-        poolSizeCount = 5,
-        pPoolSizes = raw_data([]vk.DescriptorPoolSize {
-            {
-                type = .ACCELERATION_STRUCTURE_KHR,
-                descriptorCount = 5,
-            },
-            {
-                type = .STORAGE_IMAGE,
-                descriptorCount = 10,
-            },
-            {
-                type = .SAMPLED_IMAGE,
-                descriptorCount = 10,
-            },
-            {
-                type = .COMBINED_IMAGE_SAMPLER,
-                descriptorCount = 10,
-            },
-            {
-                type = .STORAGE_BUFFER,
-                descriptorCount = 10,
-            },
-        })
-    }
-    desc_pool: vk.DescriptorPool
-    vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &desc_pool))
-    defer vk.DestroyDescriptorPool(device, desc_pool, nil)
 
     // Create geometries buffer
     geoms_buf: Buffer
@@ -1104,24 +1127,7 @@ bake_main :: proc(using bake: ^Bake)
 
     // Smooth seams
     {
-        vk_check(vk.BeginCommandBuffer(cmd_buf, &{
-            sType = .COMMAND_BUFFER_BEGIN_INFO,
-            flags = { .ONE_TIME_SUBMIT },
-        }))
-
-        smooth_seams(bake, cmd_buf, shaders.seams_pipeline_layout, desc_pool, &lightmap, &lightmap_backbuffer)
-
-        vk_check(vk.EndCommandBuffer(cmd_buf))
-
-        wait_stage_flags := vk.PipelineStageFlags { .ALL_COMMANDS }
-        submit_info := vk.SubmitInfo {
-            sType = .SUBMIT_INFO,
-            pWaitDstStageMask = &wait_stage_flags,
-            commandBufferCount = 1,
-            pCommandBuffers = &cmd_buf,
-        }
-        vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
-        vk_check(vk.QueueWaitIdle(vk_ctx.queue))
+        smooth_seams(bake, cmd_buf, shaders.seams_pipeline_layout, &lightmap, &lightmap_backbuffer)
     }
 
     when SYNCHRONOUS
@@ -1516,23 +1522,50 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
 }
 
-smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, desc_pool: vk.DescriptorPool, lm: ^vku.Image, lm_backbuffer: ^vku.Image)
+smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, lm: ^vku.Image, lm_backbuffer: ^vku.Image)
 {
-    desc_set_ai := vk.DescriptorSetAllocateInfo {
+    vk_check(vk.BeginCommandBuffer(cmd_buf, &{
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = { .ONE_TIME_SUBMIT },
+    }))
+
+    blit := vk.ImageBlit {
+        srcSubresource = {
+            aspectMask = { .COLOR },
+            mipLevel = 0,
+            baseArrayLayer = 0,
+            layerCount = 1,
+        },
+        srcOffsets = { { 0, 0, 0 }, { i32(lm_backbuffer.width), i32(lm_backbuffer.height), 1 } },
+        dstSubresource = {
+            aspectMask = { .COLOR },
+            mipLevel = 0,
+            baseArrayLayer = 0,
+            layerCount = 1,
+        },
+        dstOffsets = { { 0, 0, 0 }, { i32(lm.width), i32(lm.height), 1 } },
+    }
+    vk.CmdBlitImage(cmd_buf, lm_backbuffer.img, lm_backbuffer.layout, lm.img, lm.layout, 1, &blit, .NEAREST)
+
+    src_desc_set_ai := vk.DescriptorSetAllocateInfo {
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
         descriptorPool = desc_pool,
-        descriptorSetCount = 1,
-        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.seams_desc_set_layout })
+        descriptorSetCount = 2,
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout {
+            shaders.seams_src_desc_set_layout,
+            shaders.seams_src_desc_set_layout,
+        })
     }
-    seams_desc_set: vk.DescriptorSet
-    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &seams_desc_set))
-    defer vk_check(vk.FreeDescriptorSets(device, desc_pool, 1, &seams_desc_set))
+    src_desc_sets: [2]vk.DescriptorSet
+    vk_check(vk.AllocateDescriptorSets(device, &src_desc_set_ai, &src_desc_sets[0]))
+    defer vk_check(vk.FreeDescriptorSets(device, desc_pool, 1, &src_desc_sets[0]))
+    defer vk_check(vk.FreeDescriptorSets(device, desc_pool, 1, &src_desc_sets[1]))
 
     linear_sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
-        magFilter = .LINEAR,
-        minFilter = .LINEAR,
-        mipmapMode = .LINEAR,
+        magFilter = .NEAREST,
+        minFilter = .NEAREST,
+        mipmapMode = .NEAREST,
         addressModeU = .REPEAT,
         addressModeV = .REPEAT,
         addressModeW = .REPEAT,
@@ -1541,10 +1574,45 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
     vk_check(vk.CreateSampler(vk_ctx.device, &linear_sampler_ci, nil, &linear_sampler))
     defer vk.DestroySampler(device, linear_sampler, nil)
 
+    writes := []vk.WriteDescriptorSet {
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = src_desc_sets[0],
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = .COMBINED_IMAGE_SAMPLER,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = lm_backbuffer.view,
+                    imageLayout = .READ_ONLY_OPTIMAL,
+                    sampler = linear_sampler,
+                }
+            })
+        },
+        {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstSet = src_desc_sets[1],
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = .COMBINED_IMAGE_SAMPLER,
+            pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                {
+                    imageView = lm.view,
+                    imageLayout = .READ_ONLY_OPTIMAL,
+                    sampler = linear_sampler,
+                }
+            })
+        },
+    }
+    vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
+
     // src = images[0], dst = images[1]
     images := [2]^vku.Image { lm_backbuffer, lm }
 
-    NUM_SEAMS_ACCUMULATION :: 51
+    vku.image_barrier_safe_slow(images[0], cmd_buf, .READ_ONLY_OPTIMAL)
+    vku.image_barrier_safe_slow(images[1], cmd_buf, .COLOR_ATTACHMENT_OPTIMAL)
+
+    NUM_SEAMS_ACCUMULATION :: 10000
     for iter in 0..<NUM_SEAMS_ACCUMULATION
     {
         color_attachment := vk.RenderingAttachmentInfo {
@@ -1575,16 +1643,33 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
             assert(len(shader_stages) == len(to_bind))
             vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
-            draw_seams(bake, cmd_buf, pipeline_layout, seams_desc_set, linear_sampler, iter, images[0]^, images[1]^)
+            src_desc_set := src_desc_sets[iter % 2]
+            draw_seams(bake, cmd_buf, pipeline_layout, src_desc_set, linear_sampler, iter, images[0]^, images[1]^)
         }
 
-        vku.image_barrier_safe_slow(images[0], cmd_buf, .GENERAL)
-        vku.image_barrier_safe_slow(images[1], cmd_buf, .GENERAL)
         images[0], images[1] = images[1], images[0]
+        vku.image_barrier_safe_slow(images[0], cmd_buf, .READ_ONLY_OPTIMAL)
+        vku.image_barrier_safe_slow(images[1], cmd_buf, .COLOR_ATTACHMENT_OPTIMAL)
     }
+
+    vku.image_barrier_safe_slow(lm, cmd_buf, .GENERAL)
+    vku.image_barrier_safe_slow(lm_backbuffer, cmd_buf, .GENERAL)
+
+    vk_check(vk.EndCommandBuffer(cmd_buf))
+
+    wait_stage_flags := vk.PipelineStageFlags { .ALL_COMMANDS }
+    cmd_bufs := []vk.CommandBuffer { cmd_buf }
+    submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        pWaitDstStageMask = &wait_stage_flags,
+        commandBufferCount = u32(len(cmd_bufs)),
+        pCommandBuffers = raw_data(cmd_bufs),
+    }
+    vk_check(vk.QueueSubmit(vk_ctx.queue, 1, &submit_info, {}))
+    vk_check(vk.QueueWaitIdle(vk_ctx.queue))
 }
 
-draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, desc_set: vk.DescriptorSet, sampler: vk.Sampler, iter: int, src, dst: vku.Image)
+draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, src_desc_set: vk.DescriptorSet, sampler: vk.Sampler, iter: int, src, dst: vku.Image)
 {
     sample_mask := vk.SampleMask(1)
     vk.CmdSetSampleMaskEXT(cmd_buf, { ._1 }, &sample_mask)
@@ -1616,7 +1701,8 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
     color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
     vk.CmdSetColorWriteMaskEXT(cmd_buf, 0, 1, &color_mask)
 
-    vk.CmdSetPrimitiveTopology(cmd_buf, .TRIANGLE_LIST)
+    vk.CmdSetPrimitiveTopology(cmd_buf, .LINE_LIST)
+    vk.CmdSetLineWidth(cmd_buf, 1.0)
 
     vk.CmdSetPrimitiveRestartEnable(cmd_buf, false)
 
@@ -1669,46 +1755,16 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
     vk.CmdSetVertexInputEXT(cmd_buf, u32(len(vert_input_bindings)), raw_data(vert_input_bindings), u32(len(vert_attributes)), raw_data(vert_attributes))
 
     vk.CmdSetExtraPrimitiveOverestimationSizeEXT(cmd_buf, 0.0)
-    vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
+    //vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, .OVERESTIMATE)
+    vk.CmdSetConservativeRasterizationModeEXT(cmd_buf, nil)
     vk.CmdSetRasterizationSamplesEXT(cmd_buf, { ._1 })
-    for instance in instances
+    for instance, i in instances
     {
         mesh := get_mesh(ctx, instance.mesh)
 
-        writes := []vk.WriteDescriptorSet {
-            {
-                sType = .WRITE_DESCRIPTOR_SET,
-                dstSet = desc_set,
-                dstBinding = 0,
-                descriptorCount = 1,
-                descriptorType = .STORAGE_BUFFER,
-                pBufferInfo = raw_data([]vk.DescriptorBufferInfo {
-                    {
-                        buffer = mesh.seams.handle,
-                        offset = vk.DeviceSize(0),
-                        range = vk.DeviceSize(vk.WHOLE_SIZE),
-                    }
-                })
-            },
-            {
-                sType = .WRITE_DESCRIPTOR_SET,
-                dstSet = desc_set,
-                dstBinding = 1,
-                descriptorCount = 1,
-                descriptorType = .COMBINED_IMAGE_SAMPLER,
-                pImageInfo = raw_data([]vk.DescriptorImageInfo {
-                    {
-                        imageView = src.view,
-                        imageLayout = src.layout,
-                        sampler = sampler,
-                    }
-                })
-            },
-        }
-        vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
-
-        tmp := desc_set
-        vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.seams_pipeline_layout, 0, 1, &tmp, 0, nil)
+        vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.seams_pipeline_layout, 0, 1, &mesh.seams_desc_set, 0, nil)
+        tmp := src_desc_set
+        vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.seams_pipeline_layout, 1, 1, &tmp, 0, nil)
 
         viewport := vk.Viewport {
             x = f32(lightmap_size) * instance.lm_offset.x,
@@ -1744,7 +1800,7 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
         }
         vk.CmdPushConstants(cmd_buf, pipeline_layout, { .VERTEX, .FRAGMENT }, 0, size_of(push), &push)
 
-        vk.CmdDraw(cmd_buf, mesh.num_seams * 3, 1, 0, 0)
+        vk.CmdDraw(cmd_buf, mesh.num_seams * 2, 1, 0, 0)
     }
 }
 
@@ -1767,6 +1823,7 @@ Shaders :: struct
     push_samples_pipeline: vk.Pipeline,
 
     // Seam smoothing
+    seams_src_desc_set_layout: vk.DescriptorSetLayout,
     seams_desc_set_layout: vk.DescriptorSetLayout,
     seams_pipeline_layout: vk.PipelineLayout,
     seams_vert: vk.ShaderEXT,
@@ -1877,7 +1934,7 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
         seams_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             flags = {},
-            bindingCount = 2,
+            bindingCount = 1,
             pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
                 {
                     binding = 0,
@@ -1885,8 +1942,15 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                     descriptorCount = 1,
                     stageFlags = { .VERTEX },
                 },
+            })
+        }
+        seams_src_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = {},
+            bindingCount = 1,
+            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
                 {
-                    binding = 1,
+                    binding = 0,
                     descriptorType = .COMBINED_IMAGE_SAMPLER,
                     descriptorCount = 1,
                     stageFlags = { .FRAGMENT },
@@ -1894,6 +1958,7 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
             })
         }
         vk_check(vk.CreateDescriptorSetLayout(device, &seams_desc_set_layout_ci, nil, &res.seams_desc_set_layout))
+        vk_check(vk.CreateDescriptorSetLayout(device, &seams_src_desc_set_layout_ci, nil, &res.seams_src_desc_set_layout))
     }
 
     // Pipeline layouts
@@ -1941,8 +2006,11 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                     size = 256,
                 }
             }),
-            setLayoutCount = 1,
-            pSetLayouts = &res.seams_desc_set_layout,
+            setLayoutCount = 2,
+            pSetLayouts = raw_data([]vk.DescriptorSetLayout {
+                res.seams_desc_set_layout,
+                res.seams_src_desc_set_layout,
+            })
         }
         vk_check(vk.CreatePipelineLayout(device, &seams_pipeline_layout_ci, nil, &res.seams_pipeline_layout))
     }
@@ -2048,8 +2116,11 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                 flags = { },
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = 1,
-                pSetLayouts = &res.seams_desc_set_layout,
+                setLayoutCount = 2,
+                pSetLayouts = raw_data([]vk.DescriptorSetLayout {
+                    res.seams_desc_set_layout,
+                    res.seams_src_desc_set_layout,
+                })
             },
             {
                 sType = .SHADER_CREATE_INFO_EXT,
@@ -2061,8 +2132,11 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                 flags = { },
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = 1,
-                pSetLayouts = &res.seams_desc_set_layout,
+                setLayoutCount = 2,
+                pSetLayouts = raw_data([]vk.DescriptorSetLayout {
+                    res.seams_desc_set_layout,
+                    res.seams_src_desc_set_layout,
+                })
             },
         }
         shaders: [len(shader_cis)]vk.ShaderEXT
@@ -2957,7 +3031,6 @@ find_seams :: proc(indices: []u32, positions: [][3]f32, normals: [][3]f32, uvs: 
 
             // Found a seam
             append(&res, Seam { edges[i], edges[j] })
-            //fmt.println("Found a seam")
         }
     }
 

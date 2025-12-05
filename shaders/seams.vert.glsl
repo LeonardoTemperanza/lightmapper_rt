@@ -1,7 +1,9 @@
 
 #version 450
 
-layout(location = 0) out vec2 out_uv;
+layout(location = 0) out flat vec2 out_uv_0;
+layout(location = 1) out flat vec2 out_uv_1;
+layout(location = 2) out float out_t;
 
 struct Line
 {
@@ -27,7 +29,7 @@ layout(push_constant) uniform Push
 
 void main()
 {
-    uint line_id = gl_VertexIndex / 3;
+    uint line_id = gl_VertexIndex / 2;
 
     float texel_scale = 1.0f / target_size;
 
@@ -39,5 +41,7 @@ void main()
 
     vec2 final_v = v * 2.0f - 1.0f;
     gl_Position = vec4(final_v, 0.0f, 1.0f);
-    out_uv = vec2(other_v.x, 1.0f - other_v.y);
+    out_uv_0 = (gl_VertexIndex % 2) == 0 ? other_line.p[0] : other_line.p[1];
+    out_uv_1 = (gl_VertexIndex % 2) == 0 ? other_line.p[1] : other_line.p[0];
+    out_t = float(gl_VertexIndex % 2);
 }
