@@ -191,7 +191,12 @@ main :: proc()
     lightmap_sampler: vk.Sampler
     vk_check(vk.CreateSampler(vk_ctx.device, &lightmap_sampler_ci, nil, &lightmap_sampler))
 
-    bake := lm.start_bake(&lm_ctx, instances[:], 4096, 1000, 1)
+    dir_light := lm.Dir_Light {
+        angle = math.RAD_PER_DEG * 0.2,
+        dir = linalg.normalize([3]f32 { 0.2, -1.0, -0.1 }),
+        emission = [3]f32 { 200000.0, 184000.0, 164000.0 },
+    }
+    bake := lm.start_bake(&lm_ctx, instances[:], true, dir_light, 4096, 1000, 1)
 
     // Create main render target
     render_target: Image

@@ -14,6 +14,17 @@ struct HitInfo
     vec3 emission;
 };
 
+layout(push_constant, std140) uniform Push
+{
+    uint accum_counter;
+    uint seed;
+    uint use_dir_light;
+    float dir_light_angle;
+    vec3 dir_light;
+    uint padding;
+    vec3 dir_light_emission;
+} push;
+
 layout(location = 0) rayPayloadInEXT HitInfo hit_info;
 
 float sun_disk_falloff(vec3 ray_dir, vec3 sun_dir, float angular_radius)
@@ -25,9 +36,9 @@ float sun_disk_falloff(vec3 ray_dir, vec3 sun_dir, float angular_radius)
     return smoothstep(cos_outer, cos_inner, cos_theta);
 }
 
-vec3 dir_light = normalize(vec3(0.2f, -1.0f, -0.1f));
-vec3 dir_light_emission = vec3(1000.0f, 920.0f, 820.0f);
-float dir_light_angle = 0.2 * (PI/180);
+//vec3 dir_light = normalize(vec3(0.2f, -1.0f, -0.1f));
+//vec3 dir_light_emission = vec3(200000.0f, 184000.0f, 164000.0f);
+//float dir_light_angle = 0.2 * (PI/180);
 
 void main()
 {
@@ -35,7 +46,7 @@ void main()
     vec2 coords = vec2(atan(dir.x, dir.z) / (2.0f * 3.1415f), acos(clamp(dir.y, -1.0f, 1.0f)) / 3.1415f);
     vec3 emission = vec3(0.57, 0.79, 1.09);
 
-    emission += sun_disk_falloff(dir, -dir_light, dir_light_angle) * dir_light_emission;
+    emission += sun_disk_falloff(dir, -push.dir_light, push.dir_light_angle) * push.dir_light_emission;
 
     hit_info = HitInfo(false, false, vec3(0.0f), vec3(0.0f), vec3(0.0f), emission);
 }

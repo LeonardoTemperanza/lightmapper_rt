@@ -8,14 +8,15 @@ layout(set = 0, binding = 2, rgba32f) uniform image2D gbuf_worldpos;
 layout(set = 0, binding = 3, rgba8) uniform image2D gbuf_worldnormals;
 layout(set = 0, binding = 4, rgba8) uniform image2D gbuf_worldgeomnormals;
 
-layout(push_constant) uniform Push
+layout(push_constant, std140) uniform Push
 {
     uint accum_counter;
     uint seed;
     uint use_dir_light;
+    float dir_light_angle;
     vec3 dir_light;
+    uint padding;
     vec3 dir_light_emission;
-    vec3 dir_light_solid_angle;
 } push;
 
 struct HitInfo
@@ -38,9 +39,9 @@ const float T_MAX = 1000000.0f;
 
 uint RNG_STATE = 0;
 
-vec3 dir_light = normalize(vec3(0.2f, -1.0f, -0.1f));
-vec3 dir_light_emission = vec3(1000.0f, 920.0f, 820.0f);
-float dir_light_angle = 0.2 * (PI/180);
+//vec3 dir_light = normalize(vec3(0.2f, -1.0f, -0.1f));
+//vec3 dir_light_emission = vec3(10000.0f, 9200.0f, 8200.0f);
+//float dir_light_angle = 0.2 * (PI/180);
 
 bool vec3f_is_finite(vec3 v)
 {
@@ -229,12 +230,12 @@ void ray_scene_intersection(Ray ray)
 
 vec3 sample_lights(vec3 pos, vec3 normal, vec3 outgoing)
 {
-    return sample_sun_direction(-dir_light, dir_light_angle, random_vec2());
+    return sample_sun_direction(-push.dir_light, push.dir_light_angle, random_vec2());
 }
 
 float sample_lights_pdf(vec3 pos, vec3 incoming)
 {
-    return eval_sun_pdf(incoming, -dir_light, dir_light_angle);
+    return eval_sun_pdf(incoming, -push.dir_light, push.dir_light_angle);
 }
 
 // Alpha stores the validity of this sample, in [0, 1].

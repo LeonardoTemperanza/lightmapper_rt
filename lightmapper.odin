@@ -36,6 +36,7 @@ import "core:c"
 import thr "core:thread"
 import "core:time"
 import "core:sort"
+import "core:math"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -153,6 +154,13 @@ init_test :: proc(vk_ctx: Lightmapper_Vulkan_Context) -> Context
 }
 
 // Scene description
+
+Dir_Light :: struct
+{
+    dir: [3]f32,
+    emission: [3]f32,
+    angle: f32,
+}
 
 Handle :: struct
 {
@@ -395,6 +403,8 @@ Bake :: struct
     // Settings
     num_accums: u32,
     lightmap_size: u32,
+    use_dir_light: bool,
+    dir_light: Dir_Light,
 
     // For renderdoc debugging
     debug_mutex0: ^sync.Mutex,
@@ -407,7 +417,7 @@ Bake :: struct
 // - lightmap_size: Size in pixels of the lightmap to be built.
 // - num_accums: Number of accumulations for pathtracing.
 // - num_samples_per_pixel: Number of pathtrace samples per pixel done on each accumulation.
-start_bake :: proc(using ctx: ^Context, instances: []Instance,
+start_bake :: proc(using ctx: ^Context, instances: []Instance, use_dir_light: bool, dir_light: Dir_Light,
                    lightmap_size: u32 = 4096, num_accums: u32 = 400, num_samples_per_pixel: u32 = 1,
                    ) -> ^Bake
 {
@@ -416,6 +426,8 @@ start_bake :: proc(using ctx: ^Context, instances: []Instance,
 
     bake.num_accums = num_accums
     bake.lightmap_size = lightmap_size
+    bake.use_dir_light = true
+    bake.dir_light = dir_light
 
     bake.thread = thr.create(bake_thread)
     bake.thread.init_context = context
@@ -1512,12 +1524,21 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
     Push :: struct {
         accum_counter: u32,
         seed: u32,
+        use_dir_light: b32,
+        dir_light_angle: f32,
+        dir_light: [3]f32,
+        padding: u32,
+        dir_light_emission: [3]f32,
     }
     push := Push {
         accum_counter = accum_counter,
         seed = 0,
+        use_dir_light = b32(use_dir_light),
+        dir_light_angle = dir_light.angle,
+        dir_light = dir_light.dir,
+        dir_light_emission = dir_light.emission,
     }
-    vk.CmdPushConstants(cmd_buf, shaders.rt_pipeline_layout, { .RAYGEN_KHR }, 0, size_of(push), &push)
+    vk.CmdPushConstants(cmd_buf, shaders.rt_pipeline_layout, { .RAYGEN_KHR, .MISS_KHR }, 0, size_of(push), &push)
 
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
 }
@@ -1987,7 +2008,7 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
             pushConstantRangeCount = u32(1),
             pPushConstantRanges = raw_data([]vk.PushConstantRange {
                 {
-                    stageFlags = { .RAYGEN_KHR },
+                    stageFlags = { .RAYGEN_KHR, .MISS_KHR },
                     size = 256,
                 }
             }),
