@@ -138,7 +138,8 @@ main :: proc()
     lm_ctx := lm.init_test(lm_vk_ctx)
 
     // instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx", LIGHTMAP_SIZE)
-    instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", LIGHTMAP_SIZE, 10, 4096, 4096)
+    // instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", LIGHTMAP_SIZE, 10, 4096, 4096)
+    instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza_2.fbx", LIGHTMAP_SIZE, texels_per_world_unit = 55, min_instance_texels = 128, max_instance_texels = 2048)
 
     vk_frames := create_vk_frames(&vk_ctx)
     frame_idx := u32(0)
@@ -196,7 +197,7 @@ main :: proc()
         dir = linalg.normalize([3]f32 { 0.2, -1.0, -0.1 }),
         emission = [3]f32 { 200000.0, 184000.0, 164000.0 },
     }
-    bake := lm.start_bake(&lm_ctx, instances[:], true, dir_light, 4096, 1000, 1)
+    bake := lm.start_bake(&lm_ctx, instances[:], true, dir_light, 4096, 4000, 1)
 
     // Create main render target
     render_target: Image

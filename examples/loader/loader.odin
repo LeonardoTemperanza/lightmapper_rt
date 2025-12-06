@@ -7,10 +7,18 @@ import "core:math"
 import "core:c"
 import stbrp "vendor:stb/rect_pack"
 import lm "../.."
+import "core:strings"
+import "core:image"
+import "core:image/png"
+import "core:image/jpeg"
+import "base:runtime"
+import "core:os"
+import "core:log"
 
 import vku "../../vk_utils"
 import vk "vendor:vulkan"
 import "../ufbx"
+
 
 load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, cmd_pool: vk.CommandPool, path: cstring,
                        lightmap_size: i32, texels_per_world_unit := 100, min_instance_texels := 64, max_instance_texels := 1024) -> [dynamic]lm.Instance
@@ -84,12 +92,17 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
         lm.create_mesh(lm_ctx, indices[:], pos_buf[:], normals_buf[:], lm_uvs_buf[:], /*diffuse_uvs_buf[:]*/)
     }
 
-    /*
+    textures: [dynamic]lm.Texture_Handle
     for i in 0..<scene.textures.count
     {
-        fmt.println("texture found")
+        texture := scene.textures.data[i]
+        texture_path := strings.string_from_ptr(transmute(^u8) texture.absolute_filename.data,
+                                                auto_cast texture.absolute_filename.length)
+
+        loaded, ok := load_texture(texture_path)
+        if !ok do return {}
+        append(&textures, loaded)
     }
-    */
 
     // Loop through instances.
     instances: [dynamic]lm.Instance
@@ -107,11 +120,13 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
 
     // Pack lightmap uvs.
     {
-        fmt.println("Packing uvs...")
-        defer fmt.println("Done packing uvs.")
+        //fmt.println("Packing uvs...")
+        //defer fmt.println("Done packing uvs.")
 
         num_nodes := lightmap_size
-        tmp_nodes := make([]stbrp.Node, num_nodes, allocator = context.temp_allocator)
+        tmp_nodes := make([]stbrp.Node, num_nodes, allocator = context.allocator)
+        defer delete(tmp_nodes)
+
         stbrp_ctx: stbrp.Context
         stbrp.init_target(&stbrp_ctx, lightmap_size, lightmap_size, raw_data(tmp_nodes), i32(len(tmp_nodes)))
 
@@ -165,6 +180,35 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
     }
 
     return instances
+}
+
+load_texture :: proc(path: string) -> (res: lm.Texture_Handle, ok: bool)
+{
+    file := load_file(path, allocator = context.allocator) or_return
+    defer delete(file)
+
+    options := image.Options {
+        .alpha_add_if_missing,
+    }
+    tex, err := image.load_from_bytes(file, options, allocator = context.allocator)
+    defer image.destroy(tex)
+    if err != nil do return {}, false
+
+    // vku.upload_texture()
+
+    return {}, true
+}
+
+load_file :: proc(path: string, allocator: runtime.Allocator) -> (data: []byte, ok: bool)
+{
+    content, ok_r := os.read_entire_file_from_filename(path, allocator)
+    if !ok_r
+    {
+        log.errorf("Failed to read file '%v'.", path)
+        return {}, false
+    }
+
+    return content, true
 }
 
 get_instance_lm_size :: proc(instance: lm.Instance, mesh: lm.Mesh, texels_per_world_unit: int, min_instance_texels: int, max_instance_texels: int) -> stbrp.Coord

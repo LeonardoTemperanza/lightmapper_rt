@@ -24,6 +24,8 @@ create_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, byte_si
     res: Buffer
     res.size = vk.DeviceSize(byte_size)
 
+    if byte_size <= 0 do return res
+
     buf_ci := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
         size = cast(vk.DeviceSize) (byte_size),
@@ -124,6 +126,8 @@ upload_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: 
 
 upload_buffer_raw :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, buf: []byte, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Buffer
 {
+    if len(buf) <= 0 do return {}
+
     staging_buf_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
     staging_buf_properties := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
     staging_buf := create_buffer(device, phys_device, auto_cast len(buf), staging_buf_usage, staging_buf_properties, {})
@@ -201,6 +205,69 @@ create_image :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf:
 
     res.width = ci.extent.width
     res.height = ci.extent.height
+    return res
+}
+
+upload_image_rgba8 :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, queue_family_idx: u32, image_cpu: [][4]u8, width: u32, height: u32, usage: vk.BufferUsageFlags, srgb: bool) -> Image
+{
+    staging_buf_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
+    staging_buf_properties := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
+    staging_buf := create_buffer(device, phys_device, auto_cast len(image_cpu) * size_of(image_cpu[0]), staging_buf_usage, staging_buf_properties, {})
+    defer destroy_buffer(device, &staging_buf)
+
+    data: rawptr
+    vk.MapMemory(device, staging_buf.mem, 0, vk.DeviceSize(len(image_cpu) * size_of(image_cpu[0])), {}, &data)
+    mem.copy(data, raw_data(image_cpu), len(image_cpu) * size_of(image_cpu[0]))
+    vk.UnmapMemory(device, staging_buf.mem)
+
+    dst_usage := usage | { .TRANSFER_DST }
+
+    cmd_buf := begin_tmp_cmd_buf(device, cmd_pool)
+
+    res := create_image(device, phys_device, cmd_buf, {
+        sType = .IMAGE_CREATE_INFO,
+        flags = {},
+        imageType = .D2,
+        format = .R16G16B16A16_SFLOAT,
+        extent = {
+            width = width,
+            height = height,
+            depth = 1,
+        },
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = { ._1 },
+        usage = { .STORAGE, .SAMPLED, .TRANSFER_DST, .TRANSFER_SRC, .COLOR_ATTACHMENT },
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = raw_data([]u32 { queue_family_idx }),
+        initialLayout = .UNDEFINED,
+    })
+    vk.CmdCopyBufferToImage2(cmd_buf, &vk.CopyBufferToImageInfo2 {
+        sType = .COPY_BUFFER_TO_IMAGE_INFO_2,
+        pNext = nil,
+        srcBuffer = staging_buf.handle,
+        dstImage = res.img,
+        dstImageLayout = .GENERAL,
+        regionCount = 1,
+        pRegions = &vk.BufferImageCopy2 {
+            sType = .BUFFER_IMAGE_COPY_2,
+            bufferRowLength = 0,
+            bufferImageHeight = 0,
+            imageSubresource = vk.ImageSubresourceLayers {
+                aspectMask = { .COLOR },
+                layerCount = 1,
+            },
+            imageExtent = vk.Extent3D {
+                width = width,
+                height = height,
+                depth = 1,
+            },
+        },
+    })
+
+    end_tmp_cmd_buf(device, cmd_pool, queue, cmd_buf)
+
     return res
 }
 

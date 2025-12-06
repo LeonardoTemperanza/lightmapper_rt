@@ -56,6 +56,8 @@ Context :: struct
     upload_cmd_pool: vk.CommandPool,
     desc_pool: vk.DescriptorPool,
 
+    textures_desc: vk.DescriptorSet,
+
     meshes: [dynamic]Mesh,
     meshes_free: [dynamic]u32,
     textures: [dynamic]Texture,
@@ -210,30 +212,33 @@ create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, no
     // TODO diffuse uvs
     mesh.seams = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, seams_gpu[:], seams_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.num_seams = u32(len(seams))
-    desc_set_ai := vk.DescriptorSetAllocateInfo {
-        sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
-        descriptorPool = desc_pool,
-        descriptorSetCount = 1,
-        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.seams_desc_set_layout })
-    }
-    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &mesh.seams_desc_set))
-    writes := []vk.WriteDescriptorSet {
-        {
-            sType = .WRITE_DESCRIPTOR_SET,
-            dstSet = mesh.seams_desc_set,
-            dstBinding = 0,
-            descriptorCount = 1,
-            descriptorType = .STORAGE_BUFFER,
-            pBufferInfo = raw_data([]vk.DescriptorBufferInfo {
-                {
-                    buffer = mesh.seams.handle,
-                    offset = vk.DeviceSize(0),
-                    range = vk.DeviceSize(vk.WHOLE_SIZE),
-                }
-            })
+    if mesh.num_seams > 0
+    {
+        desc_set_ai := vk.DescriptorSetAllocateInfo {
+            sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptorPool = desc_pool,
+            descriptorSetCount = 1,
+            pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.seams_desc_set_layout })
         }
+        vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &mesh.seams_desc_set))
+        writes := []vk.WriteDescriptorSet {
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = mesh.seams_desc_set,
+                dstBinding = 0,
+                descriptorCount = 1,
+                descriptorType = .STORAGE_BUFFER,
+                pBufferInfo = raw_data([]vk.DescriptorBufferInfo {
+                    {
+                        buffer = mesh.seams.handle,
+                        offset = vk.DeviceSize(0),
+                        range = vk.DeviceSize(vk.WHOLE_SIZE),
+                    }
+                })
+            }
+        }
+        vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
     }
-    vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
 
     mesh.blas = vku.create_blas(device, phys_device, queue, upload_cmd_pool, mesh.pos, mesh.indices, u32(len(positions)), u32(len(indices)))
 
@@ -279,9 +284,16 @@ release_mesh :: proc(using ctx: ^Context, handle: Mesh_Handle)
     }
 }
 
-create_texture :: proc(using ctx: ^Context) -> Texture_Handle
+create_texture :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo) -> Texture_Handle
 {
     texture: Texture
+
+    {
+        cmd_buf := vku.begin_tmp_cmd_buf(device, upload_cmd_pool)
+        defer vku.end_tmp_cmd_buf(device, upload_cmd_pool, queue, cmd_buf)
+
+        texture.image = vku.create_image(device, phys_device, cmd_buf, ci)
+    }
 
     free_slot := u32(0)
     if len(textures_free) > 0
@@ -296,6 +308,29 @@ create_texture :: proc(using ctx: ^Context) -> Texture_Handle
         append(&textures, texture)
         free_slot = u32(len(textures)) - 1
     }
+
+    // Update descriptor set
+    {
+        writes := []vk.WriteDescriptorSet {
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = textures_desc,
+                dstBinding = 0,
+                descriptorCount = 1,
+                dstArrayElement = free_slot,
+                descriptorType = .SAMPLED_IMAGE,
+                pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                    {
+                        sampler = vk.Sampler(0),
+                        imageView = texture.view,
+                        imageLayout = texture.layout,
+                    }
+                })
+            }
+        }
+        vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
+    }
+
     return Texture_Handle { idx = free_slot, gen = texture.gen }
 }
 
@@ -1139,7 +1174,7 @@ bake_main :: proc(using bake: ^Bake)
 
     // Smooth seams
     {
-        smooth_seams(bake, cmd_buf, shaders.seams_pipeline_layout, &lightmap, &lightmap_backbuffer)
+        // smooth_seams(bake, cmd_buf, shaders.seams_pipeline_layout, &lightmap, &lightmap_backbuffer)
     }
 
     when SYNCHRONOUS
@@ -1633,7 +1668,7 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
     vku.image_barrier_safe_slow(images[0], cmd_buf, .READ_ONLY_OPTIMAL)
     vku.image_barrier_safe_slow(images[1], cmd_buf, .COLOR_ATTACHMENT_OPTIMAL)
 
-    NUM_SEAMS_ACCUMULATION :: 10000
+    NUM_SEAMS_ACCUMULATION :: 50
     for iter in 0..<NUM_SEAMS_ACCUMULATION
     {
         color_attachment := vk.RenderingAttachmentInfo {
@@ -1782,6 +1817,8 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
     for instance, i in instances
     {
         mesh := get_mesh(ctx, instance.mesh)
+
+        if mesh.seams.handle == vk.Buffer(0) do continue
 
         vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.seams_pipeline_layout, 0, 1, &mesh.seams_desc_set, 0, nil)
         tmp := src_desc_set
