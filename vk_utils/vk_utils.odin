@@ -208,7 +208,7 @@ create_image :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf:
     return res
 }
 
-upload_image_rgba8 :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, queue_family_idx: u32, image_cpu: [][4]u8, width: u32, height: u32, usage: vk.BufferUsageFlags, srgb: bool) -> Image
+upload_image_rgba8_srgb :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, queue_family_idx: u32, image_cpu: [][4]u8, width: u32, height: u32, usage: vk.ImageUsageFlags, srgb: bool) -> Image
 {
     staging_buf_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
     staging_buf_properties := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
@@ -228,7 +228,7 @@ upload_image_rgba8 :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, qu
         sType = .IMAGE_CREATE_INFO,
         flags = {},
         imageType = .D2,
-        format = .R16G16B16A16_SFLOAT,
+        format = .R8G8B8A8_SRGB,
         extent = {
             width = width,
             height = height,
@@ -237,7 +237,7 @@ upload_image_rgba8 :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, qu
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
-        usage = { .STORAGE, .SAMPLED, .TRANSFER_DST, .TRANSFER_SRC, .COLOR_ATTACHMENT },
+        usage = dst_usage,
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
         pQueueFamilyIndices = raw_data([]u32 { queue_family_idx }),

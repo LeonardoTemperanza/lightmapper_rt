@@ -78,6 +78,14 @@ LIGHTMAP_SIZE :: 4096
 
 main :: proc()
 {
+    if len(os.args) != 2
+    {
+        log.error("Incorrect args. Usage: example.exe <GLTF scene path>.")
+        return
+    }
+
+    scene_path := os.args[1]
+
     ok_i := sdl.Init({ .VIDEO })
     assert(ok_i)
 
@@ -139,7 +147,9 @@ main :: proc()
 
     // instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx", LIGHTMAP_SIZE)
     // instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", LIGHTMAP_SIZE, 10, 4096, 4096)
-    instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza_2.fbx", LIGHTMAP_SIZE, texels_per_world_unit = 55, min_instance_texels = 128, max_instance_texels = 2048)
+    //instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza_2.fbx", LIGHTMAP_SIZE, texels_per_world_unit = 55, min_instance_texels = 128, max_instance_texels = 2048)
+    instances, ok_l := loader.load_scene_gltf(&vk_ctx, &lm_ctx, upload_cmd_pool, scene_path, LIGHTMAP_SIZE, texels_per_world_unit = 55, min_instance_texels = 128, max_instance_texels = 2048)
+    if !ok_l do log.error("Failed to load scene %v", scene_path)
 
     vk_frames := create_vk_frames(&vk_ctx)
     frame_idx := u32(0)
@@ -194,7 +204,7 @@ main :: proc()
 
     dir_light := lm.Dir_Light {
         angle = math.RAD_PER_DEG * 0.2,
-        dir = linalg.normalize([3]f32 { 0.2, -1.0, -0.1 }),
+        dir = linalg.normalize([3]f32 { 0.2, -1.0, -0.2 }),
         emission = [3]f32 { 200000.0, 184000.0, 164000.0 },
     }
     bake := lm.start_bake(&lm_ctx, instances[:], true, dir_light, 4096, 4000, 1)
@@ -874,15 +884,18 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
     {
         mesh := lm.get_mesh(lm_ctx, instance.mesh)
 
-        // if !mesh.lm_uvs_present { continue }
-
         offset := vk.DeviceSize(0)
         vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
         vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
-        // if mesh.lm_uvs_present {
-            vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
-        // }
+        vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
         vk.CmdBindIndexBuffer(cmd_buf, mesh.indices.handle, 0, .UINT32)
+
+        /*
+        tex := lm.get_texture(lm_ctx, instance.diffuse_tex)
+        if tex != nil {
+            vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.pipeline_layout, 0, 1, &tex.desc_set, 0, nil)
+        }
+        */
 
         Push :: struct {
             model_to_world: matrix[4, 4]f32,

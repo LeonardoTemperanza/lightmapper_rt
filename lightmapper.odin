@@ -71,6 +71,7 @@ Texture :: struct
 {
     gen: u32,
     using image: Image,
+    desc_set: vk.DescriptorSet,
 }
 
 // Initialization
@@ -329,6 +330,24 @@ create_texture :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo) -> Texture_H
             }
         }
         vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
+
+        writes = []vk.WriteDescriptorSet {
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = texture.desc_set,
+                dstBinding = 0,
+                descriptorCount = 1,
+                descriptorType = .SAMPLED_IMAGE,
+                pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                    {
+                        sampler = vk.Sampler(0),
+                        imageView = texture.view,
+                        imageLayout = texture.layout,
+                    }
+                })
+            }
+        }
+        vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
     }
 
     return Texture_Handle { idx = free_slot, gen = texture.gen }
@@ -374,6 +393,8 @@ Instance :: struct
     lm_idx: u32,
     lm_offset: [2]f32,
     lm_scale: f32,
+
+    diffuse_tex: Texture_Handle,
 }
 
 Mesh :: struct
@@ -705,13 +726,13 @@ init_vk_context :: proc(window: ^sdl.Window, debug_callback: vk.ProcDebugUtilsMe
 
     res.phys_device = chosen_phys_device
 
-    queue_priority := f32(1)
+    queue_priorities := []f32 { 0.0, 1.0 }
     queue_create_infos := []vk.DeviceQueueCreateInfo {
         {
             sType = .DEVICE_QUEUE_CREATE_INFO,
             queueFamilyIndex = queue_family_idx,
-            queueCount = 2,
-            pQueuePriorities = &queue_priority,
+            queueCount = u32(len(queue_priorities)),
+            pQueuePriorities = raw_data(queue_priorities),
         },
     }
 
