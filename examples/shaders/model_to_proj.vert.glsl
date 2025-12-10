@@ -14,11 +14,12 @@ layout(push_constant) uniform PerObj
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec2 in_lm_uv;
+layout(location = 3) in vec2 in_uv;
 
 layout(location = 0) out vec3 out_world_pos;
 layout(location = 1) out vec3 out_world_normal;
 layout(location = 2) out vec2 out_lm_uv;
-layout(location = 3) out vec2 out_local_lm_uv;
+layout(location = 3) out vec2 out_uv;
 
 void main()
 {
@@ -29,7 +30,7 @@ void main()
     out_world_pos = in_pos;
     out_world_normal = mat3(per_obj.normal_mat) * in_normal;
     out_lm_uv = per_obj.lm_uv_scale * in_lm_uv + per_obj.lm_uv_offset;
-    out_local_lm_uv = in_lm_uv;
+    out_uv = in_uv;
 
     gl_Position = proj_pos;
 }

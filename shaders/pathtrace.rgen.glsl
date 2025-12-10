@@ -1,6 +1,7 @@
 
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, rgba16f) uniform image2D lightmap;
@@ -22,6 +23,7 @@ layout(push_constant, std140) uniform Push
 struct HitInfo
 {
     bool hit;
+    bool first_bounce;
     bool hit_backface;
     vec3 world_pos;
     vec3 world_normal;
@@ -248,12 +250,15 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
 
     // Initialize the first hit to be.
     hit_info.hit = true;
+    hit_info.first_bounce = true;
     hit_info.albedo = vec3(0.7f);
     hit_info.emission = vec3(0.0f);
     hit_info.world_normal = world_normal;
     hit_info.world_pos = start_pos;
 
     vec3 hit_pos = start_pos;
+
+    const bool indirect_only = true;
 
     const uint MAX_BOUNCES = 5;
     uint backface_hits_count = 0;
@@ -281,7 +286,7 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
         // Compute next direction.
         vec3 incoming = vec3(0.0f);
         {
-            const float light_prob = 0.5f;
+            const float light_prob = hit_info.first_bounce && indirect_only ? 0.0f : 0.5f;
             const float bsdf_prob = 1.0f - light_prob;
             if(random_f32() < bsdf_prob)
             {
@@ -302,6 +307,7 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal)
         }
 
         // Update ray.
+        hit_info.first_bounce = false;
         ray.ori = hit_pos;
         ray.dir = incoming;
 

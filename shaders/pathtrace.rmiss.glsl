@@ -7,6 +7,7 @@
 struct HitInfo
 {
     bool hit;
+    bool first_bounce;
     bool hit_backface;
     vec3 world_pos;
     vec3 world_normal;
@@ -42,11 +43,16 @@ float sun_disk_falloff(vec3 ray_dir, vec3 sun_dir, float angular_radius)
 
 void main()
 {
+    const bool indirect_only = true;
+
     vec3 dir = gl_WorldRayDirectionEXT;
     vec2 coords = vec2(atan(dir.x, dir.z) / (2.0f * 3.1415f), acos(clamp(dir.y, -1.0f, 1.0f)) / 3.1415f);
     vec3 emission = vec3(0.57, 0.79, 1.09);
 
     emission += sun_disk_falloff(dir, -push.dir_light, push.dir_light_angle) * push.dir_light_emission;
 
-    hit_info = HitInfo(false, false, vec3(0.0f), vec3(0.0f), vec3(0.0f), emission);
+    if(hit_info.first_bounce && indirect_only)
+        emission = vec3(0.0f);
+
+    hit_info = HitInfo(false, hit_info.first_bounce, false, vec3(0.0f), vec3(0.0f), vec3(0.0f), emission);
 }

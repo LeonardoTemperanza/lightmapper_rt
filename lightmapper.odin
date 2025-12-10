@@ -57,6 +57,7 @@ Context :: struct
     desc_pool: vk.DescriptorPool,
 
     textures_desc: vk.DescriptorSet,
+    textures_desc_layout: vk.DescriptorSet,
 
     meshes: [dynamic]Mesh,
     meshes_free: [dynamic]u32,
@@ -66,12 +67,16 @@ Context :: struct
 
 Buffer :: vku.Buffer
 Image :: vku.Image
+Metadata :: struct
+{
+    external: bool,  // a.k.a. not owned.
+    gen: u32,
+}
 
 Texture :: struct
 {
-    gen: u32,
+    using meta: Metadata,
     using image: Image,
-    desc_set: vk.DescriptorSet,
 }
 
 // Initialization
@@ -153,6 +158,16 @@ init_test :: proc(vk_ctx: Lightmapper_Vulkan_Context) -> Context
     }
     vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &res.desc_pool))
 
+    /*
+    desc_set_ai := vk.DescriptorSetAllocateInfo {
+        sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+        descriptorPool = desc_pool,
+        descriptorSetCount = 1,
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.seams_desc_set_layout })
+    }
+    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &res.textures_desc))
+    */
+
     return res
 }
 
@@ -174,7 +189,10 @@ Handle :: struct
 Mesh_Handle :: distinct Handle
 Texture_Handle :: distinct Handle
 
-create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, normals: [][3]f32, lm_uvs: [][2]f32 /*, diffuse_uvs: [][2]f32 */) -> Mesh_Handle
+SENTINEL_MESH_HANDLE :: Mesh_Handle { max(u32), max(u32) }
+SENTINEL_TEXTURE_HANDLE :: Texture_Handle { max(u32), max(u32) }
+
+create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, normals: [][3]f32, lm_uvs: [][2]f32, uvs: [][2]f32) -> Mesh_Handle
 {
     assert(len(indices) > 0 && len(positions) > 0 && len(normals) > 0 && len(lm_uvs) > 0 /*&& len(diffuse_uvs) > 0*/)
 
@@ -210,7 +228,7 @@ create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, no
     mesh.normals = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, normals[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.geom_normals = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, mesh.geom_normals_cpu[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.lm_uvs = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, lm_uvs[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
-    // TODO diffuse uvs
+    mesh.uvs = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, uvs[:], v_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.seams = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, seams_gpu[:], seams_usage_flags, { .DEVICE_LOCAL }, { .DEVICE_ADDRESS })
     mesh.num_seams = u32(len(seams))
     if mesh.num_seams > 0
@@ -285,6 +303,7 @@ release_mesh :: proc(using ctx: ^Context, handle: Mesh_Handle)
     }
 }
 
+/*
 create_texture :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo) -> Texture_Handle
 {
     texture: Texture
@@ -352,10 +371,52 @@ create_texture :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo) -> Texture_H
 
     return Texture_Handle { idx = free_slot, gen = texture.gen }
 }
+*/
 
-register_texture :: proc(using ctx: ^Context, img: Texture) -> Texture_Handle
+register_texture :: proc(using ctx: ^Context, img: vku.Image) -> Texture_Handle
 {
-    return {}
+    texture: Texture
+    texture.external = true
+    texture.image = img
+
+    free_slot := u32(0)
+    if len(textures_free) > 0
+    {
+        free_slot = pop(&textures_free)
+        texture.gen = textures[free_slot].gen
+        textures[free_slot] = texture
+    }
+    else
+    {
+        texture.gen = 0
+        append(&textures, texture)
+        free_slot = u32(len(textures)) - 1
+    }
+
+    // Update descriptor set
+    when false
+    {
+        writes := []vk.WriteDescriptorSet {
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = textures_desc,
+                dstBinding = 0,
+                descriptorCount = 1,
+                dstArrayElement = free_slot,
+                descriptorType = .SAMPLED_IMAGE,
+                pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                    {
+                        sampler = vk.Sampler(0),
+                        imageView = texture.view,
+                        imageLayout = texture.layout,
+                    }
+                })
+            }
+        }
+        vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
+    }
+
+    return Texture_Handle { idx = free_slot, gen = texture.gen }
 }
 
 get_texture :: proc(using ctx: ^Context, handle: Texture_Handle) -> ^Texture
@@ -399,7 +460,7 @@ Instance :: struct
 
 Mesh :: struct
 {
-    gen: u32,
+    using meta: Metadata,
 
     indices_cpu: [dynamic]u32,
     pos_cpu: [dynamic][3]f32,
@@ -416,6 +477,7 @@ Mesh :: struct
     normals: Buffer,
     geom_normals: Buffer,
     lm_uvs: Buffer,
+    uvs: Buffer,
     blas: vku.Accel_Structure,
 }
 
@@ -1117,7 +1179,7 @@ bake_main :: proc(using bake: ^Bake)
         vk.CmdCopyImageToBuffer2(cmd_buf, &vk.CopyImageToBufferInfo2 {
             sType = .COPY_IMAGE_TO_BUFFER_INFO_2,
             pNext = nil,
-            srcImage = lightmap_backbuffer.img,
+            srcImage = lightmap_backbuffer.handle,
             srcImageLayout = .GENERAL,
             dstBuffer = vk_external_buf.buf.handle,
             regionCount = 1,
@@ -1161,7 +1223,7 @@ bake_main :: proc(using bake: ^Bake)
             sType = .COPY_BUFFER_TO_IMAGE_INFO_2,
             pNext = nil,
             srcBuffer = vk_external_buf.buf.handle,
-            dstImage = lightmap_backbuffer.img,
+            dstImage = lightmap_backbuffer.handle,
             dstImageLayout = .GENERAL,
             regionCount = 1,
             pRegions = &vk.BufferImageCopy2 {
@@ -1622,7 +1684,7 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
         },
         dstOffsets = { { 0, 0, 0 }, { i32(lm.width), i32(lm.height), 1 } },
     }
-    vk.CmdBlitImage(cmd_buf, lm_backbuffer.img, lm_backbuffer.layout, lm.img, lm.layout, 1, &blit, .NEAREST)
+    vk.CmdBlitImage(cmd_buf, lm_backbuffer.handle, lm_backbuffer.layout, lm.handle, lm.layout, 1, &blit, .NEAREST)
 
     src_desc_set_ai := vk.DescriptorSetAllocateInfo {
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,

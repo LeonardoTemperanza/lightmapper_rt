@@ -24,9 +24,16 @@ layout(set = 0, binding = 5) readonly buffer Geometries
     Geometry geometries[];
 };
 
+// Static scene resources
+//layout(set = 1, binding = 0) uniform sampler2D textures[];
+
+// Dynamic scene resources
+//layout(set = 2, binding = 0) readonly buffer
+
 struct HitInfo
 {
     bool hit;
+    bool first_bounce;
     bool hit_backface;
     vec3 world_pos;
     vec3 world_normal;
@@ -56,5 +63,5 @@ void main()
     //vec3 albedo = world_normal * 0.5f + 0.5f;
     vec3 albedo = vec3(0.7f);
     bool hit_backface = gl_HitKindEXT == gl_HitKindBackFacingTriangleEXT;
-    hit_info = HitInfo(true, hit_backface, world_pos, world_normal, albedo, vec3(0.0f));
+    hit_info = HitInfo(true, hit_info.first_bounce, hit_backface, world_pos, world_normal, albedo, vec3(0.0f));
 }

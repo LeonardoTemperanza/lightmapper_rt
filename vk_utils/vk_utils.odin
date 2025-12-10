@@ -159,7 +159,7 @@ destroy_buffer :: proc(device: vk.Device, buf: ^Buffer)
 
 Image :: struct
 {
-    img: vk.Image,
+    handle: vk.Image,
     mem: vk.DeviceMemory,
     view: vk.ImageView,
     width: u32,
@@ -172,10 +172,10 @@ create_image :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf:
     res: Image
 
     image_ci := ci
-    vk_check(vk.CreateImage(device, &image_ci, nil, &res.img))
+    vk_check(vk.CreateImage(device, &image_ci, nil, &res.handle))
 
     mem_requirements: vk.MemoryRequirements
-    vk.GetImageMemoryRequirements(device, res.img, &mem_requirements)
+    vk.GetImageMemoryRequirements(device, res.handle, &mem_requirements)
 
     // Create image memory
     memory_ai := vk.MemoryAllocateInfo {
@@ -184,7 +184,7 @@ create_image :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf:
         memoryTypeIndex = find_mem_type(phys_device, mem_requirements.memoryTypeBits, { })
     }
     vk_check(vk.AllocateMemory(device, &memory_ai, nil, &res.mem))
-    vk.BindImageMemory(device, res.img, res.mem, 0)
+    vk.BindImageMemory(device, res.handle, res.mem, 0)
 
     res.layout = .UNDEFINED
     image_barrier_safe_slow(&res, cmd_buf, .GENERAL)
@@ -192,7 +192,7 @@ create_image :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf:
     // Create view
     image_view_ci := vk.ImageViewCreateInfo {
         sType = .IMAGE_VIEW_CREATE_INFO,
-        image = res.img,
+        image = res.handle,
         viewType = .D2,
         format = image_ci.format,
         subresourceRange = {
@@ -208,8 +208,10 @@ create_image :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, cmd_buf:
     return res
 }
 
-upload_image_rgba8_srgb :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, queue_family_idx: u32, image_cpu: [][4]u8, width: u32, height: u32, usage: vk.ImageUsageFlags, srgb: bool) -> Image
+upload_image_rgba8 :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, queue: vk.Queue, cmd_pool: vk.CommandPool, queue_family_idx: u32, image_cpu: [][4]u8, width: u32, height: u32, usage: vk.ImageUsageFlags, srgb: bool) -> Image
 {
+    assert(width * height == u32(len(image_cpu)))
+
     staging_buf_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
     staging_buf_properties := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
     staging_buf := create_buffer(device, phys_device, auto_cast len(image_cpu) * size_of(image_cpu[0]), staging_buf_usage, staging_buf_properties, {})
@@ -228,7 +230,7 @@ upload_image_rgba8_srgb :: proc(device: vk.Device, phys_device: vk.PhysicalDevic
         sType = .IMAGE_CREATE_INFO,
         flags = {},
         imageType = .D2,
-        format = .R8G8B8A8_SRGB,
+        format = .R8G8B8A8_SRGB if srgb else .R8G8B8A8_UNORM,
         extent = {
             width = width,
             height = height,
@@ -247,7 +249,7 @@ upload_image_rgba8_srgb :: proc(device: vk.Device, phys_device: vk.PhysicalDevic
         sType = .COPY_BUFFER_TO_IMAGE_INFO_2,
         pNext = nil,
         srcBuffer = staging_buf.handle,
-        dstImage = res.img,
+        dstImage = res.handle,
         dstImageLayout = .GENERAL,
         regionCount = 1,
         pRegions = &vk.BufferImageCopy2 {
@@ -275,7 +277,7 @@ destroy_image :: proc(device: vk.Device, image: ^Image)
 {
     vk.DestroyImageView(device, image.view, nil)
     vk.FreeMemory(device, image.mem, nil)
-    vk.DestroyImage(device, image.img, nil)
+    vk.DestroyImage(device, image.handle, nil)
     image^ = {}
 }
 
@@ -338,7 +340,7 @@ image_barrier_safe_slow :: proc(image: ^Image, cmd_buf: vk.CommandBuffer, new_la
     barrier := []vk.ImageMemoryBarrier2 {
         {
             sType = .IMAGE_MEMORY_BARRIER_2,
-            image = image.img,
+            image = image.handle,
             subresourceRange = {
                 aspectMask = { .COLOR },
                 levelCount = 1,

@@ -14,12 +14,14 @@ import "core:image/jpeg"
 import "base:runtime"
 import "core:os"
 import "core:log"
+import "core:slice"
 
 import vku "../../vk_utils"
 import vk "vendor:vulkan"
 import "../ufbx"
 import "../gltf2"
 
+/*
 load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, cmd_pool: vk.CommandPool, path: cstring,
                        lightmap_size: i32, texels_per_world_unit := 100, min_instance_texels := 64, max_instance_texels := 1024) -> [dynamic]lm.Instance
 {
@@ -94,6 +96,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
         append(&meshes, lm.create_mesh(lm_ctx, indices[:], pos_buf[:], normals_buf[:], lm_uvs_buf[:], /*diffuse_uvs_buf[:]*/))
     }
 
+/*
     textures: [dynamic]lm.Texture_Handle
     defer delete(textures)
     for i in 0..<scene.textures.count
@@ -104,11 +107,13 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
 
         fmt.println(texture_path)
 
-        loaded, ok := load_texture(texture_path)
+        loaded, ok := load_texture(texture_path, )
         if !ok do return {}
         append(&textures, loaded)
     }
+*/
 
+/*
     // Loop through materials
     materials: [dynamic]lm.Texture_Handle
     defer delete(materials)
@@ -120,6 +125,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
             append(&materials, textures[material.fbx.diffuse_color.texture.element.typed_id])
         }
     }
+*/
 
     // Loop through instances.
     instances: [dynamic]lm.Instance
@@ -143,9 +149,10 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
 
     return instances
 }
+*/
 
 load_scene_gltf :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, cmd_pool: vk.CommandPool, path: string,
-                       lightmap_size: i32, texels_per_world_unit := 100, min_instance_texels := 64, max_instance_texels := 1024) -> (res: [dynamic]lm.Instance, ok: bool)
+                       lightmap_size: i32, texels_per_world_unit := 100, min_instance_texels := 64, max_instance_texels := 1024) -> (res: [dynamic]lm.Instance, textures: [dynamic]lm.Texture_Handle, ok: bool)
 {
     data, err_l := gltf2.load_from_file(path)
     switch err in err_l
@@ -167,8 +174,6 @@ load_scene_gltf :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, 
     {
         for primitive, j in mesh.primitives
         {
-            fmt.println(primitive)
-
             // ???
             buffer_view := &data.buffer_views[data.accessors[primitive.attributes["POSITION"]].buffer_view.?]
             assert(buffer_view.byte_stride == 12 || buffer_view.byte_stride == nil)
@@ -180,10 +185,12 @@ load_scene_gltf :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, 
             assert(buffer_view.byte_stride == 8 || buffer_view.byte_stride == nil)
             buffer_view.byte_stride = nil
 
+            assert(primitive.mode == .Triangles)
+
             positions := gltf2.buffer_slice(data, primitive.attributes["POSITION"])
             normals := gltf2.buffer_slice(data, primitive.attributes["NORMAL"])
-            //diffuse_uvs := gltf2.buffer_slice(data, primitive.attributes["TEXCOORD_0"])
-            lm_uvs := gltf2.buffer_slice(data, primitive.attributes["TEXCOORD_0"])
+            uvs := gltf2.buffer_slice(data, primitive.attributes["TEXCOORD_0"])
+            lm_uvs := gltf2.buffer_slice(data, primitive.attributes["TEXCOORD_1"])
             indices := gltf2.buffer_slice(data, primitive.indices.?)
 
             indices_u32: [dynamic]u32
@@ -201,7 +208,7 @@ load_scene_gltf :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, 
                                              positions.([][3]f32),
                                              normals.([][3]f32),
                                              lm_uvs.([][2]f32),
-                                             /*diffuse_uvs_buf[:]*/)
+                                             uvs.([][2]f32))
             meshes[{i,j}] = loaded
 
             fmt.println("loaded primitive")
@@ -209,24 +216,37 @@ load_scene_gltf :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, 
     }
 
     // Load textures
-    textures: [dynamic]lm.Texture_Handle
-    defer delete(textures)
+    textures = {}
+    // textures: [dynamic]lm.Texture_Handle
+    // defer delete(textures)
     for image in data.images
     {
         if image.uri != nil
         {
             fmt.println("name:", image.name)
 
-            loaded, ok := load_texture_from_memory(image.uri.([]byte))
-            if !ok do return {}, false
+            loaded, ok_l := load_texture_from_memory(image.uri.([]byte), ctx, lm_ctx, cmd_pool)
+            if !ok_l do return {}, {}, false
 
             append(&textures, loaded)
-            fmt.println("loaded texture")
         }
         else if image.buffer_view != nil
         {
-            assert(false, "not implemented")
+            buf_view := data.buffer_views[image.buffer_view.?]
+            buf_slice := data.buffers[buf_view.buffer].uri.([]byte)
+            buf_slice = buf_slice[buf_view.byte_offset:buf_view.byte_offset+buf_view.byte_length]
+
+            loaded, ok_l := load_texture_from_memory(buf_slice, ctx, lm_ctx, cmd_pool)
+            if !ok_l do return {}, {}, false
+
+            append(&textures, loaded)
         }
+        else
+        {
+            panic("Invalid GLTF file.")
+        }
+
+        fmt.println("loaded texture")
     }
 
     Material :: struct
@@ -238,49 +258,70 @@ load_scene_gltf :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, 
     defer delete(materials)
     for material in data.materials
     {
-        base_color_tex := material.metallic_roughness.?.base_color_texture.?
-        base_color_tex_id := base_color_tex.index
-        append(&materials, Material { textures[base_color_tex_id] })
+        if material.metallic_roughness == nil || material.metallic_roughness.?.base_color_texture == nil
+        {
+            append(&materials, Material { lm.SENTINEL_TEXTURE_HANDLE })
+        }
+        else
+        {
+            base_color_tex := material.metallic_roughness.?.base_color_texture.?
+            base_color_tex_id := base_color_tex.index
+            gltf_tex := data.textures[base_color_tex_id]
+            if gltf_tex.source == nil {
+                append(&materials, Material { lm.SENTINEL_TEXTURE_HANDLE })
+            } else {
+                append(&materials, Material { textures[gltf_tex.source.?] })
+            }
+        }
     }
 
     // Load instances
-    parents := make([]i32, len(data.nodes))  // -1 means no parent
-    defer delete(parents)
-    for &parent in parents do parent = -1
-    for node, i in data.nodes
-    {
-        for child in node.children {
-            parents[child] = i32(i)
-        }
-    }
-
     instances: [dynamic]lm.Instance
-    for node, i in data.nodes
+    for node_idx in data.scenes[0].nodes
     {
-        mesh := data.meshes[node.mesh.?]
-        for primitive, j in mesh.primitives
+        node := data.nodes[node_idx]
+
+        traverse_node(&instances, data, 1, int(node_idx), meshes, materials[:])
+
+        traverse_node :: proc(instances: ^[dynamic]lm.Instance, data: ^gltf2.Data, parent_transform: matrix[4, 4]f32, node_idx: int, meshes: map[Primitive_ID]lm.Mesh_Handle, materials: []Material)
         {
-            mesh_handle := meshes[{int(node.mesh.?),j}]
+            node := data.nodes[node_idx]
 
-            mat := materials[primitive.material.?]
+            flip_z: matrix[4, 4]f32 = 1
+            flip_z[2, 2] = -1
+            local_transform := xform_to_mat(node.translation, node.rotation, node.scale)
+            transform := parent_transform * local_transform
+            if node.mesh != nil
+            {
+                mesh_idx := node.mesh.?
+                mesh := data.meshes[mesh_idx]
 
-            instance := lm.Instance {
-                transform = get_node_world_transform_gltf(data, parents, u32(i)),
-                mesh = mesh_handle,
-                diffuse_tex = mat.diffuse_tex,
-                lm_idx = {},
-                lm_offset = {},
-                lm_scale = {}
+                for primitive, j in mesh.primitives
+                {
+                    mesh_handle := meshes[{int(mesh_idx),j}]
+                    mat := materials[primitive.material.?]
+
+                    instance := lm.Instance {
+                        transform = flip_z * transform,
+                        mesh = mesh_handle,
+                        diffuse_tex = mat.diffuse_tex,
+                        lm_idx = {},
+                        lm_offset = {},
+                        lm_scale = {}
+                    }
+                    append(instances, instance)
+                }
             }
-            append(&instances, instance)
-        }
 
-        fmt.println(data.nodes)
+            for child in node.children {
+                traverse_node(instances, data, transform, int(child), meshes, materials)
+            }
+        }
     }
 
     pack_lightmap_uvs(lm_ctx, instances[:], lightmap_size, texels_per_world_unit, min_instance_texels, max_instance_texels)
 
-    return instances, true
+    return instances, textures, true
 }
 
 pack_lightmap_uvs :: proc(lm_ctx: ^lm.Context, instances: []lm.Instance, lightmap_size: i32, texels_per_world_unit := 100, min_instance_texels := 64, max_instance_texels := 1024)
@@ -344,14 +385,16 @@ pack_lightmap_uvs :: proc(lm_ctx: ^lm.Context, instances: []lm.Instance, lightma
     }
 }
 
+/*
 load_texture :: proc(path: string) -> (res: lm.Texture_Handle, ok: bool)
 {
     file := load_file(path, allocator = context.allocator) or_return
     defer delete(file)
     return load_texture_from_memory(file)
 }
+*/
 
-load_texture_from_memory :: proc(content: []byte) -> (res: lm.Texture_Handle, ok: bool)
+load_texture_from_memory :: proc(content: []byte, using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, cmd_pool: vk.CommandPool) -> (res: lm.Texture_Handle, ok: bool)
 {
     options := image.Options {
         .alpha_add_if_missing,
@@ -360,9 +403,13 @@ load_texture_from_memory :: proc(content: []byte) -> (res: lm.Texture_Handle, ok
     defer image.destroy(tex)
     if err != nil do return {}, false
 
-    // vku.upload_texture()
+    pixels := tex.pixels.buf[tex.pixels.off:]
+    content_rgba8 := slice.from_ptr(cast(^[4]u8)raw_data(pixels), tex.width * tex.height)
 
-    return {}, true
+    usages := vk.ImageUsageFlags { .SAMPLED }
+    image := vku.upload_image_rgba8(device, phys_device, queue, cmd_pool, queue_family_idx, content_rgba8[:], u32(tex.width), u32(tex.height), usages, srgb = true)
+    handle := lm.register_texture(lm_ctx, image)
+    return handle, true
 }
 
 load_file :: proc(path: string, allocator: runtime.Allocator) -> (data: []byte, ok: bool)
@@ -426,9 +473,21 @@ v3_to_v4 :: proc(v: [3]f32, w: Maybe(f32) = nil) -> (res: [4]f32)
     return
 }
 
-xform_to_mat :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4, 4]f32
+xform_to_mat_f64 :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4, 4]f32
 {
     return cast(matrix[4, 4]f32) (#force_inline linalg.matrix4_translate(pos) *
            #force_inline linalg.matrix4_from_quaternion(rot) *
            #force_inline linalg.matrix4_scale(scale))
+}
+
+xform_to_mat_f32 :: proc(pos: [3]f32, rot: quaternion128, scale: [3]f32) -> matrix[4, 4]f32
+{
+    return #force_inline linalg.matrix4_translate(pos) *
+           #force_inline linalg.matrix4_from_quaternion(rot) *
+           #force_inline linalg.matrix4_scale(scale)
+}
+
+xform_to_mat :: proc {
+    xform_to_mat_f32,
+    xform_to_mat_f64,
 }

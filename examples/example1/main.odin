@@ -74,7 +74,7 @@ Swapchain :: struct
     present_semaphores: []vk.Semaphore,
 }
 
-LIGHTMAP_SIZE :: 4096
+LIGHTMAP_SIZE :: 8 * 1024
 
 main :: proc()
 {
@@ -145,10 +145,7 @@ main :: proc()
     }
     lm_ctx := lm.init_test(lm_vk_ctx)
 
-    // instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/ArchVis_RT_2.fbx", LIGHTMAP_SIZE)
-    // instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza.fbx", LIGHTMAP_SIZE, 10, 4096, 4096)
-    //instances := loader.load_scene_fbx(&vk_ctx, &lm_ctx, upload_cmd_pool, "D:/lightmapper_test_scenes/sponza_2.fbx", LIGHTMAP_SIZE, texels_per_world_unit = 55, min_instance_texels = 128, max_instance_texels = 2048)
-    instances, ok_l := loader.load_scene_gltf(&vk_ctx, &lm_ctx, upload_cmd_pool, scene_path, LIGHTMAP_SIZE, texels_per_world_unit = 55, min_instance_texels = 128, max_instance_texels = 2048)
+    instances, textures, ok_l := loader.load_scene_gltf(&vk_ctx, &lm_ctx, upload_cmd_pool, scene_path, LIGHTMAP_SIZE, texels_per_world_unit = 60, min_instance_texels = 256, max_instance_texels = 2048)
     if !ok_l do log.error("Failed to load scene %v", scene_path)
 
     vk_frames := create_vk_frames(&vk_ctx)
@@ -160,7 +157,7 @@ main :: proc()
     desc_pool_ci := vk.DescriptorPoolCreateInfo {
         sType = .DESCRIPTOR_POOL_CREATE_INFO,
         flags = { .FREE_DESCRIPTOR_SET },
-        maxSets = 50,
+        maxSets = 2000,
         poolSizeCount = 5,
         pPoolSizes = raw_data([]vk.DescriptorPoolSize {
             {
@@ -173,11 +170,11 @@ main :: proc()
             },
             {
                 type = .SAMPLED_IMAGE,
-                descriptorCount = 10,
+                descriptorCount = 500,
             },
             {
                 type = .COMBINED_IMAGE_SAMPLER,
-                descriptorCount = 10,
+                descriptorCount = 500,
             },
             {
                 type = .STORAGE_BUFFER,
@@ -198,16 +195,63 @@ main :: proc()
         addressModeV = .REPEAT,
         addressModeW = .REPEAT,
     }
-
     lightmap_sampler: vk.Sampler
     vk_check(vk.CreateSampler(vk_ctx.device, &lightmap_sampler_ci, nil, &lightmap_sampler))
+
+    linear_sampler_ci := vk.SamplerCreateInfo {
+        sType = .SAMPLER_CREATE_INFO,
+        magFilter = .LINEAR,
+        minFilter = .LINEAR,
+        mipmapMode = .LINEAR,
+        addressModeU = .REPEAT,
+        addressModeV = .REPEAT,
+        addressModeW = .REPEAT,
+    }
+    linear_sampler: vk.Sampler
+    vk_check(vk.CreateSampler(vk_ctx.device, &linear_sampler_ci, nil, &linear_sampler))
+
+    // Create material descriptor sets
+    desc_sets: map[lm.Texture_Handle]vk.DescriptorSet
+    for tex in textures
+    {
+        desc_set_ai := vk.DescriptorSetAllocateInfo {
+            sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptorPool = desc_pool,
+            descriptorSetCount = 1,
+            pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.mat_desc_set_layout })
+        }
+        desc_set: vk.DescriptorSet
+        vk_check(vk.AllocateDescriptorSets(vk_ctx.device, &desc_set_ai, &desc_set))
+
+        tex_handle := lm.get_texture(&lm_ctx, tex)
+
+        writes := []vk.WriteDescriptorSet {
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = desc_set,
+                dstBinding = 0,
+                descriptorCount = 1,
+                descriptorType = .COMBINED_IMAGE_SAMPLER,
+                pImageInfo = raw_data([]vk.DescriptorImageInfo {
+                    {
+                        imageView = tex_handle.view,
+                        imageLayout = tex_handle.layout,
+                        sampler = linear_sampler,
+                    }
+                })
+            }
+        }
+        vk.UpdateDescriptorSets(vk_ctx.device, u32(len(writes)), raw_data(writes), 0, nil)
+
+        desc_sets[tex] = desc_set
+    }
 
     dir_light := lm.Dir_Light {
         angle = math.RAD_PER_DEG * 0.2,
         dir = linalg.normalize([3]f32 { 0.2, -1.0, -0.2 }),
         emission = [3]f32 { 200000.0, 184000.0, 164000.0 },
     }
-    bake := lm.start_bake(&lm_ctx, instances[:], true, dir_light, 4096, 4000, 1)
+    bake := lm.start_bake(&lm_ctx, instances[:], true, dir_light, 4096, 1000, 1)
 
     // Create main render target
     render_target: Image
@@ -345,7 +389,7 @@ main :: proc()
             pImageMemoryBarriers = &transition_to_color_attachment_barrier,
         })
 
-        render_scene(&vk_ctx, cmd_buf, depth_image_view, render_target.view, lm_desc_set, shaders, swapchain, &lm_ctx, instances[:], auto_cast width, auto_cast height)
+        render_scene(&vk_ctx, cmd_buf, depth_image_view, render_target.view, lm_desc_set, shaders, swapchain, &lm_ctx, instances[:], &desc_sets, auto_cast width, auto_cast height)
         vku.image_barrier_safe_slow(&render_target, cmd_buf, .GENERAL)
         tonemap_image(&vk_ctx, cmd_buf, shaders, tonemap_desc_set, render_target, swapchain.image_views[image_idx])
 
@@ -609,6 +653,21 @@ create_shaders :: proc(using ctx: ^lm.App_Vulkan_Context) -> Shaders
 
     // Desc set layouts
     {
+        mat_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = {},
+            bindingCount = 1,
+            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .COMBINED_IMAGE_SAMPLER,
+                    descriptorCount = 1,
+                    stageFlags = { .FRAGMENT },
+                },
+            })
+        }
+        vk_check(vk.CreateDescriptorSetLayout(device, &mat_desc_set_layout_ci, nil, &res.mat_desc_set_layout))
+
         lm_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             flags = {},
@@ -627,12 +686,17 @@ create_shaders :: proc(using ctx: ^lm.App_Vulkan_Context) -> Shaders
 
     // Pipeline layouts
     {
+        pipeline_set_layouts := []vk.DescriptorSetLayout {
+            res.lm_desc_set_layout,
+            res.mat_desc_set_layout,
+        }
+
         pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
             sType = .PIPELINE_LAYOUT_CREATE_INFO,
             pushConstantRangeCount = u32(len(push_constant_ranges)),
             pPushConstantRanges = raw_data(push_constant_ranges),
-            setLayoutCount = 1,
-            pSetLayouts = &res.lm_desc_set_layout,
+            setLayoutCount = u32(len(pipeline_set_layouts)),
+            pSetLayouts = raw_data(pipeline_set_layouts),
         }
         vk_check(vk.CreatePipelineLayout(device, &pipeline_layout_ci, nil, &res.pipeline_layout))
     }
@@ -650,6 +714,11 @@ create_shaders :: proc(using ctx: ^lm.App_Vulkan_Context) -> Shaders
 
     // Create shader objects.
     {
+        lit_layouts := []vk.DescriptorSetLayout {
+            res.lm_desc_set_layout,
+            res.mat_desc_set_layout,
+        }
+
         shader_cis := [?]vk.ShaderCreateInfoEXT {
             {
                 sType = .SHADER_CREATE_INFO_EXT,
@@ -662,8 +731,8 @@ create_shaders :: proc(using ctx: ^lm.App_Vulkan_Context) -> Shaders
                 flags = { },
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = 1,
-                pSetLayouts = &res.lm_desc_set_layout
+                setLayoutCount = u32(len(lit_layouts)),
+                pSetLayouts = raw_data(lit_layouts)
             },
             {
                 sType = .SHADER_CREATE_INFO_EXT,
@@ -675,8 +744,8 @@ create_shaders :: proc(using ctx: ^lm.App_Vulkan_Context) -> Shaders
                 flags = { },
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = 1,
-                pSetLayouts = &res.lm_desc_set_layout
+                setLayoutCount = u32(len(lit_layouts)),
+                pSetLayouts = raw_data(lit_layouts)
             },
             {
                 sType = .SHADER_CREATE_INFO_EXT,
@@ -729,6 +798,7 @@ Shaders :: struct
     tonemap_frag: vk.ShaderEXT,
 
     // Desc set layouts
+    mat_desc_set_layout: vk.DescriptorSetLayout,
     lm_desc_set_layout: vk.DescriptorSetLayout,
 }
 
@@ -741,7 +811,7 @@ destroy_shaders :: proc(using ctx: ^lm.App_Vulkan_Context, shaders: Shaders)
     vk.DestroyShaderEXT(device, shaders.tonemap_frag, nil)
 }
 
-render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, lm_ctx: ^lm.Context, instances: []lm.Instance, width: u32, height: u32)
+render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffer, depth_view: vk.ImageView, color_view: vk.ImageView, lightmap_desc_set: vk.DescriptorSet, shaders: Shaders, swapchain: Swapchain, lm_ctx: ^lm.Context, instances: []lm.Instance, mat_descs: ^map[lm.Texture_Handle]vk.DescriptorSet, width: u32, height: u32)
 {
     depth_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO,
@@ -820,6 +890,13 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
             inputRate = .VERTEX,
             divisor = 1,
         },
+        {  // UVs
+            sType = .VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            binding = 3,
+            stride = size_of([2]f32),
+            inputRate = .VERTEX,
+            divisor = 1,
+        }
     }
     vert_attributes := [?]vk.VertexInputAttributeDescription2EXT {
         {
@@ -840,6 +917,13 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
             sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
             location = 2,
             binding = 2,
+            format = .R32G32_SFLOAT,
+            offset = 0
+        },
+        {
+            sType = .VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            location = 3,
+            binding = 3,
             format = .R32G32_SFLOAT,
             offset = 0
         },
@@ -888,14 +972,13 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
         vk.CmdBindVertexBuffers(cmd_buf, 0, 1, &mesh.pos.handle, &offset)
         vk.CmdBindVertexBuffers(cmd_buf, 1, 1, &mesh.normals.handle, &offset)
         vk.CmdBindVertexBuffers(cmd_buf, 2, 1, &mesh.lm_uvs.handle, &offset)
+        vk.CmdBindVertexBuffers(cmd_buf, 3, 1, &mesh.uvs.handle, &offset)
         vk.CmdBindIndexBuffer(cmd_buf, mesh.indices.handle, 0, .UINT32)
 
-        /*
         tex := lm.get_texture(lm_ctx, instance.diffuse_tex)
         if tex != nil {
-            vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.pipeline_layout, 0, 1, &tex.desc_set, 0, nil)
+            vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.pipeline_layout, 1, 1, &mat_descs[instance.diffuse_tex], 0, nil)
         }
-        */
 
         Push :: struct {
             model_to_world: matrix[4, 4]f32,
@@ -961,7 +1044,7 @@ tonemap_image :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuff
     assert(len(shader_stages) == len(to_bind))
     vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
-    vk.CmdDrawIndexed(cmd_buf, 6, 1, 0, 0, 0)
+    vk.CmdDraw(cmd_buf, 6, 1, 0, 0)
 
     vk.CmdEndRendering(cmd_buf)
 }
@@ -998,30 +1081,6 @@ load_file :: proc(filename: string, allocator: runtime.Allocator) -> []byte
 
 /////////////////////////////////////
 // This part can be ignored.
-
-/*
-destroy_mesh :: proc(using ctx: ^lm.App_Vulkan_Context, mesh: ^Mesh)
-{
-    destroy_buffer(ctx, &mesh.pos)
-    destroy_buffer(ctx, &mesh.normals)
-    if mesh.lm_uvs_present {
-        destroy_buffer(ctx, &mesh.lm_uvs)
-    }
-    destroy_buffer(ctx, &mesh.indices_gpu)
-
-    mesh^ = {}
-}
-
-destroy_scene :: proc(using ctx: ^lm.App_Vulkan_Context, scene: ^Scene)
-{
-    delete(scene.instances)
-    for &mesh in scene.meshes {
-        destroy_mesh(ctx, &mesh)
-    }
-    delete(scene.meshes)
-    scene^ = {}
-}
-*/
 
 xform_to_mat :: proc(pos: [3]f64, rot: quaternion256, scale: [3]f64) -> matrix[4, 4]f32
 {
