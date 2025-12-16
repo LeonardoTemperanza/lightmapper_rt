@@ -1,11 +1,11 @@
 
-- Resource management
+v Resource management
 - Scene update (immediate mode)
-- Load and render diffuse textures
+v Load and render diffuse textures
 - Diffuse textures in pathtracer
-- Better pathtracing (light sampling)
-- Directional light in pathtracing
-- Nice demos
+v Better pathtracing (light sampling)
+v Directional light in pathtracing
+v Nice demos
 
 Nice to have:
 - Area and point lights

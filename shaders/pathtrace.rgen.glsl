@@ -240,8 +240,7 @@ float sample_lights_pdf(vec3 pos, vec3 incoming)
     return eval_sun_pdf(incoming, -push.dir_light, push.dir_light_angle);
 }
 
-// Alpha stores the validity of this sample, in [0, 1].
-vec3 pathtrace(vec3 start_pos, vec3 world_normal)
+vec3 pathtrace(vec3 start_pos, vec3 world_normal, vec3 geom_normal)
 {
     vec3 radiance = vec3(0.0f);
     vec3 weight = vec3(1.0f);
@@ -357,13 +356,16 @@ void main()
     vec4 gbuf_worldpos_sample = imageLoad(gbuf_worldpos, pixel);
     vec3 world_pos = gbuf_worldpos_sample.xyz;
 
+    vec4 gbuf_worldgeomnormals_sample = imageLoad(gbuf_worldgeomnormals, pixel);
+    vec3 world_geom_normal = normalize(gbuf_worldgeomnormals_sample.xyz * 2.0f - 1.0f);
+
     init_rng(pixel.y * size.x + pixel.x);
 
     uint NUM_SAMPLES = 1;
     float MAX_RADIANCE = 15.0f;
     vec3 color = vec3(0.0f);
     for(int i = 0; i < NUM_SAMPLES; ++i)
-        color += clamp_radiance(pathtrace(world_pos, world_normal));
+        color += clamp_radiance(pathtrace(world_pos, world_normal, world_geom_normal));
     color /= NUM_SAMPLES;
 
     // Progressive pathtracing.

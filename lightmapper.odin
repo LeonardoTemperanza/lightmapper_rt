@@ -47,6 +47,8 @@ import oidn "oidn_odin_bindings"
 // For renderdoc debugging
 SYNCHRONOUS :: #config(LM_SYNCHRONOUS, true)
 
+MAX_TEXTURES :: 2048
+
 Context :: struct
 {
     using vk_ctx: Lightmapper_Vulkan_Context,
@@ -57,7 +59,8 @@ Context :: struct
     desc_pool: vk.DescriptorPool,
 
     textures_desc: vk.DescriptorSet,
-    textures_desc_layout: vk.DescriptorSet,
+
+    default_sampler: vk.Sampler,
 
     meshes: [dynamic]Mesh,
     meshes_free: [dynamic]u32,
@@ -148,7 +151,7 @@ init_test :: proc(vk_ctx: Lightmapper_Vulkan_Context) -> Context
             },
             {
                 type = .COMBINED_IMAGE_SAMPLER,
-                descriptorCount = 10,
+                descriptorCount = MAX_TEXTURES + 100,
             },
             {
                 type = .STORAGE_BUFFER,
@@ -158,15 +161,25 @@ init_test :: proc(vk_ctx: Lightmapper_Vulkan_Context) -> Context
     }
     vk_check(vk.CreateDescriptorPool(vk_ctx.device, &desc_pool_ci, nil, &res.desc_pool))
 
-    /*
+    // Global resources
     desc_set_ai := vk.DescriptorSetAllocateInfo {
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
-        descriptorPool = desc_pool,
+        descriptorPool = res.desc_pool,
         descriptorSetCount = 1,
-        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.seams_desc_set_layout })
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { res.shaders.tex_array_desc })
     }
-    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &res.textures_desc))
-    */
+    vk_check(vk.AllocateDescriptorSets(res.device, &desc_set_ai, &res.textures_desc))
+
+    linear_sampler_ci := vk.SamplerCreateInfo {
+        sType = .SAMPLER_CREATE_INFO,
+        magFilter = .NEAREST,
+        minFilter = .NEAREST,
+        mipmapMode = .NEAREST,
+        addressModeU = .REPEAT,
+        addressModeV = .REPEAT,
+        addressModeW = .REPEAT,
+    }
+    vk_check(vk.CreateSampler(vk_ctx.device, &linear_sampler_ci, nil, &res.default_sampler))
 
     return res
 }
@@ -203,7 +216,6 @@ create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, no
     mesh.normals_cpu = slice.clone_to_dynamic(normals)
     mesh.geom_normals_cpu = compute_geom_normals(indices, positions)
     mesh.lm_uvs_cpu = slice.clone_to_dynamic(lm_uvs)
-    // TODO diffuse uvs
 
     seams := find_seams(indices, positions, normals, lm_uvs)
     defer delete(seams)
@@ -237,7 +249,7 @@ create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, no
             sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
             descriptorPool = desc_pool,
             descriptorSetCount = 1,
-            pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.seams_desc_set_layout })
+            pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.seams_desc })
         }
         vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &mesh.seams_desc_set))
         writes := []vk.WriteDescriptorSet {
@@ -277,13 +289,6 @@ create_mesh :: proc(using ctx: ^Context, indices: []u32, positions: [][3]f32, no
     return Mesh_Handle { idx = free_slot, gen = mesh.gen }
 }
 
-/*
-register_mesh :: proc(indices: []u32, positions: [][3]f32, lm_uvs: [][2]f32, indices_buf: Buffer, positions_buf: Buffer, lm_uvs_buf: Buffer) -> Mesh_Handle
-{
-    return {}
-}
-*/
-
 get_mesh :: proc(using ctx: ^Context, handle: Mesh_Handle) -> ^Mesh
 {
     if u32(len(meshes)) <= handle.idx do return nil
@@ -302,76 +307,6 @@ release_mesh :: proc(using ctx: ^Context, handle: Mesh_Handle)
         append(&meshes_free, handle.idx)
     }
 }
-
-/*
-create_texture :: proc(using ctx: ^Context, ci: vk.ImageCreateInfo) -> Texture_Handle
-{
-    texture: Texture
-
-    {
-        cmd_buf := vku.begin_tmp_cmd_buf(device, upload_cmd_pool)
-        defer vku.end_tmp_cmd_buf(device, upload_cmd_pool, queue, cmd_buf)
-
-        texture.image = vku.create_image(device, phys_device, cmd_buf, ci)
-    }
-
-    free_slot := u32(0)
-    if len(textures_free) > 0
-    {
-        free_slot = pop(&textures_free)
-        texture.gen = textures[free_slot].gen
-        textures[free_slot] = texture
-    }
-    else
-    {
-        texture.gen = 0
-        append(&textures, texture)
-        free_slot = u32(len(textures)) - 1
-    }
-
-    // Update descriptor set
-    {
-        writes := []vk.WriteDescriptorSet {
-            {
-                sType = .WRITE_DESCRIPTOR_SET,
-                dstSet = textures_desc,
-                dstBinding = 0,
-                descriptorCount = 1,
-                dstArrayElement = free_slot,
-                descriptorType = .SAMPLED_IMAGE,
-                pImageInfo = raw_data([]vk.DescriptorImageInfo {
-                    {
-                        sampler = vk.Sampler(0),
-                        imageView = texture.view,
-                        imageLayout = texture.layout,
-                    }
-                })
-            }
-        }
-        vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
-
-        writes = []vk.WriteDescriptorSet {
-            {
-                sType = .WRITE_DESCRIPTOR_SET,
-                dstSet = texture.desc_set,
-                dstBinding = 0,
-                descriptorCount = 1,
-                descriptorType = .SAMPLED_IMAGE,
-                pImageInfo = raw_data([]vk.DescriptorImageInfo {
-                    {
-                        sampler = vk.Sampler(0),
-                        imageView = texture.view,
-                        imageLayout = texture.layout,
-                    }
-                })
-            }
-        }
-        vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
-    }
-
-    return Texture_Handle { idx = free_slot, gen = texture.gen }
-}
-*/
 
 register_texture :: proc(using ctx: ^Context, img: vku.Image) -> Texture_Handle
 {
@@ -394,7 +329,6 @@ register_texture :: proc(using ctx: ^Context, img: vku.Image) -> Texture_Handle
     }
 
     // Update descriptor set
-    when false
     {
         writes := []vk.WriteDescriptorSet {
             {
@@ -403,10 +337,10 @@ register_texture :: proc(using ctx: ^Context, img: vku.Image) -> Texture_Handle
                 dstBinding = 0,
                 descriptorCount = 1,
                 dstArrayElement = free_slot,
-                descriptorType = .SAMPLED_IMAGE,
+                descriptorType = .COMBINED_IMAGE_SAMPLER,
                 pImageInfo = raw_data([]vk.DescriptorImageInfo {
                     {
-                        sampler = vk.Sampler(0),
+                        sampler = default_sampler,
                         imageView = texture.view,
                         imageLayout = texture.layout,
                     }
@@ -697,7 +631,6 @@ init_vk_context :: proc(window: ^sdl.Window, debug_callback: vk.ProcDebugUtilsMe
         instance_extensions := sdl.Vulkan_GetInstanceExtensions(&count)
         extensions := slice.concatenate([][]cstring {
             instance_extensions[:count],
-
             {
                 vk.EXT_DEBUG_UTILS_EXTENSION_NAME,
                 vk.KHR_WIN32_SURFACE_EXTENSION_NAME,
@@ -711,10 +644,17 @@ init_vk_context :: proc(window: ^sdl.Window, debug_callback: vk.ProcDebugUtilsMe
             pfnUserCallback = debug_callback
         }
 
-        validation_features := []vk.ValidationFeatureEnableEXT {
-            //.GPU_ASSISTED,
-            //.GPU_ASSISTED_RESERVE_BINDING_SLOT,
-            .SYNCHRONIZATION_VALIDATION,
+        when ODIN_DEBUG
+        {
+            validation_features := []vk.ValidationFeatureEnableEXT {
+                //.GPU_ASSISTED,
+                //.GPU_ASSISTED_RESERVE_BINDING_SLOT,
+                .SYNCHRONIZATION_VALIDATION,
+            }
+        }
+        else
+        {
+            validation_features := []vk.ValidationFeatureEnableEXT {}
         }
 
         next: rawptr
@@ -818,6 +758,14 @@ init_vk_context :: proc(window: ^sdl.Window, debug_callback: vk.ProcDebugUtilsMe
         maintenance6 = true,
     }
     */
+    next = &vk.PhysicalDeviceVulkan12Features {
+        sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        pNext = next,
+        runtimeDescriptorArray = true,
+        shaderSampledImageArrayNonUniformIndexing = true,
+        timelineSemaphore = true,
+        bufferDeviceAddress = true,
+    }
     next = &vk.PhysicalDeviceVulkan13Features {
         sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
         pNext = next,
@@ -843,16 +791,6 @@ init_vk_context :: proc(window: ^sdl.Window, debug_callback: vk.ProcDebugUtilsMe
         sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
         pNext = next,
         rayTracingPipeline = true,
-    }
-    next = &vk.PhysicalDeviceBufferDeviceAddressFeatures {
-        sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
-        pNext = next,
-        bufferDeviceAddress = true,
-    }
-    next = &vk.PhysicalDeviceTimelineSemaphoreFeatures {
-        sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
-        pNext = next,
-        timelineSemaphore = true,
     }
     next = &vk.PhysicalDeviceFeatures2 {
         sType = .PHYSICAL_DEVICE_FEATURES_2,
@@ -908,6 +846,7 @@ Geometry :: struct
 {
     normals: vk.DeviceAddress,
     indices: vk.DeviceAddress,
+    uvs: vk.DeviceAddress,
 }
 
 bake_thread :: proc(t: ^thr.Thread)
@@ -987,6 +926,7 @@ bake_main :: proc(using bake: ^Bake)
 
             geom.normals = vku.get_buffer_device_address(device, meshes[i].normals)
             geom.indices = vku.get_buffer_device_address(device, meshes[i].indices)
+            geom.uvs     = vku.get_buffer_device_address(device, meshes[i].uvs)
         }
 
         usage := vk.BufferUsageFlags { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
@@ -996,7 +936,7 @@ bake_main :: proc(using bake: ^Bake)
     }
 
     // Create SBT buffers
-    pathtrace_sbt    := vku.create_sbt_buffer(device, phys_device, queue, cmd_pool, shaders.rt_pipeline, 3)
+    pathtrace_sbt    := vku.create_sbt_buffer(device, phys_device, queue, cmd_pool, shaders.pathtrace_pipeline, 3)
     defer vku.destroy_buffer(device, &pathtrace_sbt)
     push_samples_sbt := vku.create_sbt_buffer(device, phys_device, queue, cmd_pool, shaders.push_samples_pipeline, 3)
     defer vku.destroy_buffer(device, &push_samples_sbt)
@@ -1005,12 +945,12 @@ bake_main :: proc(using bake: ^Bake)
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
         descriptorPool = desc_pool,
         descriptorSetCount = 1,
-        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.rt_desc_set_layout })
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.gbuffers_desc })
     }
-    rt_desc_set: vk.DescriptorSet
-    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &rt_desc_set))
+    gbuffers_desc_set: vk.DescriptorSet
+    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &gbuffers_desc_set))
     //defer vk.FreeDescriptorSets(device, 1, &rt_desc_set, nil)
-    update_rt_desc_set(device, rt_desc_set, tlas.as.handle, lightmap, gbufs, geoms_buf)
+    update_rt_desc_set(device, gbuffers_desc_set, tlas.as.handle, lightmap, gbufs, geoms_buf)
 
     // Dummy sampler
     dummy_sampler_ci := vk.SamplerCreateInfo {
@@ -1031,7 +971,7 @@ bake_main :: proc(using bake: ^Bake)
         sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
         descriptorPool = desc_pool,
         descriptorSetCount = 1,
-        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.dilate_desc_set_layout })
+        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.io_tex_desc })
     }
     dilate_desc_set: [2]vk.DescriptorSet  // Front to back, back to front.
     vk_check(vk.AllocateDescriptorSets(device, &dilate_desc_set_ai, &dilate_desc_set[0]))
@@ -1043,7 +983,7 @@ bake_main :: proc(using bake: ^Bake)
         sync.mutex_lock(debug_mutex0)
     }
 
-    render_gbuffers(bake, cmd_buf, &gbufs, push_samples_sbt, rt_desc_set)
+    render_gbuffers(bake, cmd_buf, &gbufs, push_samples_sbt, gbuffers_desc_set)
 
     vk_check(vk.EndCommandBuffer(cmd_buf))
 
@@ -1087,7 +1027,7 @@ bake_main :: proc(using bake: ^Bake)
             flags = { .ONE_TIME_SUBMIT },
         }))
 
-        pathtrace_iter(bake, cmd_buf, pathtrace_sbt, rt_desc_set, iter)
+        pathtrace_iter(bake, cmd_buf, pathtrace_sbt, gbuffers_desc_set, iter)
 
         vku.image_barrier_safe_slow(&lightmap, cmd_buf, .GENERAL)
 
@@ -1354,7 +1294,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         assert(len(shader_stages) == len(to_bind))
         vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
-        draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
+        draw_gbuffer(bake, cmd_buf, shaders.gbuf_raster_pipeline_layout)
     }
 
     // World normal
@@ -1389,7 +1329,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         assert(len(shader_stages) == len(to_bind))
         vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
-        draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
+        draw_gbuffer(bake, cmd_buf, shaders.gbuf_raster_pipeline_layout)
     }
 
     // World geometric normal
@@ -1424,7 +1364,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         assert(len(shader_stages) == len(to_bind))
         vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
-        draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout, use_geom_normals = true)
+        draw_gbuffer(bake, cmd_buf, shaders.gbuf_raster_pipeline_layout, use_geom_normals = true)
     }
 
     // Tri idx
@@ -1459,7 +1399,7 @@ render_gbuffers :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, gbuffers: 
         assert(len(shader_stages) == len(to_bind))
         vk.CmdBindShadersEXT(cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
-        draw_gbuffer(bake, cmd_buf, shaders.pipeline_layout)
+        draw_gbuffer(bake, cmd_buf, shaders.gbuf_raster_pipeline_layout)
     }
 
     gbuffers_barrier(gbuffers, cmd_buf)
@@ -1564,7 +1504,7 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
     vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.push_samples_pipeline)
 
     tmp := rt_desc_set
-    vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
+    vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.push_samples_pipeline_layout, 0, 1, &tmp, 0, nil)
 
     sbt_addr := u64(vku.get_buffer_device_address(device, sbt))
 
@@ -1603,10 +1543,13 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
 {
     rt_info := vku.get_rt_info(vk_ctx.phys_device)
 
-    vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline)
+    vk.CmdBindPipeline(cmd_buf, .RAY_TRACING_KHR, shaders.pathtrace_pipeline)
 
-    tmp := rt_desc_set
-    vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.rt_pipeline_layout, 0, 1, &tmp, 0, nil)
+    desc_sets := []vk.DescriptorSet {
+        rt_desc_set,
+        //textures_desc,
+    }
+    vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.pathtrace_pipeline_layout, 0, u32(len(desc_sets)), raw_data(desc_sets), 0, nil)
 
     sbt_addr := u64(vku.get_buffer_device_address(device, sbt))
 
@@ -1656,7 +1599,7 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
         dir_light = dir_light.dir,
         dir_light_emission = dir_light.emission,
     }
-    vk.CmdPushConstants(cmd_buf, shaders.rt_pipeline_layout, { .RAYGEN_KHR, .MISS_KHR }, 0, size_of(push), &push)
+    vk.CmdPushConstants(cmd_buf, shaders.pathtrace_pipeline_layout, { .RAYGEN_KHR, .MISS_KHR }, 0, size_of(push), &push)
 
     vk.CmdTraceRaysKHR(cmd_buf, &raygen_region, &raymiss_region, &rayhit_region, &callable_region, lightmap_size, lightmap_size, 1)
 }
@@ -1691,8 +1634,8 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
         descriptorPool = desc_pool,
         descriptorSetCount = 2,
         pSetLayouts = raw_data([]vk.DescriptorSetLayout {
-            shaders.seams_src_desc_set_layout,
-            shaders.seams_src_desc_set_layout,
+            shaders.io_tex_desc,
+            shaders.io_tex_desc,
         })
     }
     src_desc_sets: [2]vk.DescriptorSet
@@ -1702,9 +1645,9 @@ smooth_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layo
 
     linear_sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
-        magFilter = .NEAREST,
-        minFilter = .NEAREST,
-        mipmapMode = .NEAREST,
+        magFilter = .LINEAR,
+        minFilter = .LINEAR,
+        mipmapMode = .LINEAR,
         addressModeU = .REPEAT,
         addressModeV = .REPEAT,
         addressModeW = .REPEAT,
@@ -1943,563 +1886,6 @@ draw_seams :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, pipeline_layout
 
         vk.CmdDraw(cmd_buf, mesh.num_seams * 2, 1, 0, 0)
     }
-}
-
-Shaders :: struct
-{
-    // GBuffer generation
-    lm_desc_set_layout: vk.DescriptorSetLayout,
-    pipeline_layout: vk.PipelineLayout,
-    uv_space: vk.ShaderEXT,
-    gbuffer_world_pos: vk.ShaderEXT,
-    gbuffer_world_normals: vk.ShaderEXT,
-    gbuffer_tri_idx: vk.ShaderEXT,
-
-    // Lightmap dilation
-    dilate_desc_set_layout: vk.DescriptorSetLayout,
-    dilate_shader: vk.ShaderEXT,
-    dilate_pipeline_layout: vk.PipelineLayout,
-
-    // Sample pushing
-    push_samples_pipeline: vk.Pipeline,
-
-    // Seam smoothing
-    seams_src_desc_set_layout: vk.DescriptorSetLayout,
-    seams_desc_set_layout: vk.DescriptorSetLayout,
-    seams_pipeline_layout: vk.PipelineLayout,
-    seams_vert: vk.ShaderEXT,
-    seams_frag: vk.ShaderEXT,
-
-    // RT
-    rt_desc_set_layout: vk.DescriptorSetLayout,
-    rt_pipeline_layout: vk.PipelineLayout,
-    rt_pipeline: vk.Pipeline,
-}
-
-create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
-{
-    res: Shaders
-
-    push_constant_ranges := []vk.PushConstantRange {
-        {
-            stageFlags = { .VERTEX, .FRAGMENT },
-            size = 256,
-        }
-    }
-
-    // Desc set layouts
-    {
-        lm_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags = {},
-            bindingCount = 1,
-            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
-                {
-                    binding = 0,
-                    descriptorType = .COMBINED_IMAGE_SAMPLER,
-                    descriptorCount = 1,
-                    stageFlags = { .FRAGMENT },
-                },
-            })
-        }
-        vk_check(vk.CreateDescriptorSetLayout(device, &lm_desc_set_layout_ci, nil, &res.lm_desc_set_layout))
-
-        dilate_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags = {},
-            bindingCount = 2,
-            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
-                {
-                    binding = 0,
-                    descriptorType = .COMBINED_IMAGE_SAMPLER,
-                    descriptorCount = 1,
-                    stageFlags = { .COMPUTE },
-                },
-                {
-                    binding = 1,
-                    descriptorType = .STORAGE_IMAGE,
-                    descriptorCount = 1,
-                    stageFlags = { .COMPUTE },
-                }
-            })
-        }
-        vk_check(vk.CreateDescriptorSetLayout(device, &dilate_desc_set_layout_ci, nil, &res.dilate_desc_set_layout))
-
-        rt_desc_set_layout_bindings := []vk.DescriptorSetLayoutBinding {
-            {
-                binding = 0,
-                descriptorType = .ACCELERATION_STRUCTURE_KHR,
-                descriptorCount = 1,
-                stageFlags = { .RAYGEN_KHR },
-            },
-            {
-                binding = 1,
-                descriptorType = .STORAGE_IMAGE,
-                descriptorCount = 1,
-                stageFlags = { .RAYGEN_KHR },
-            },
-            {
-                binding = 2,
-                descriptorType = .STORAGE_IMAGE,
-                descriptorCount = 1,
-                stageFlags = { .RAYGEN_KHR },
-            },
-            {
-                binding = 3,
-                descriptorType = .STORAGE_IMAGE,
-                descriptorCount = 1,
-                stageFlags = { .RAYGEN_KHR },
-            },
-            {
-                binding = 4,
-                descriptorType = .STORAGE_IMAGE,
-                descriptorCount = 1,
-                stageFlags = { .RAYGEN_KHR },
-            },
-            {
-                binding = 5,
-                descriptorType = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags = { .CLOSEST_HIT_KHR },
-            }
-        }
-
-        rt_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags = {},
-            bindingCount = u32(len(rt_desc_set_layout_bindings)),
-            pBindings = raw_data(rt_desc_set_layout_bindings)
-        }
-        vk_check(vk.CreateDescriptorSetLayout(device, &rt_desc_set_layout_ci, nil, &res.rt_desc_set_layout))
-
-        seams_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags = {},
-            bindingCount = 1,
-            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
-                {
-                    binding = 0,
-                    descriptorType = .STORAGE_BUFFER,
-                    descriptorCount = 1,
-                    stageFlags = { .VERTEX },
-                },
-            })
-        }
-        seams_src_desc_set_layout_ci := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags = {},
-            bindingCount = 1,
-            pBindings = raw_data([]vk.DescriptorSetLayoutBinding {
-                {
-                    binding = 0,
-                    descriptorType = .COMBINED_IMAGE_SAMPLER,
-                    descriptorCount = 1,
-                    stageFlags = { .FRAGMENT },
-                }
-            })
-        }
-        vk_check(vk.CreateDescriptorSetLayout(device, &seams_desc_set_layout_ci, nil, &res.seams_desc_set_layout))
-        vk_check(vk.CreateDescriptorSetLayout(device, &seams_src_desc_set_layout_ci, nil, &res.seams_src_desc_set_layout))
-    }
-
-    // Pipeline layouts
-    {
-        pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
-            sType = .PIPELINE_LAYOUT_CREATE_INFO,
-            pushConstantRangeCount = u32(len(push_constant_ranges)),
-            pPushConstantRanges = raw_data(push_constant_ranges),
-            setLayoutCount = 1,
-            pSetLayouts = &res.lm_desc_set_layout,
-        }
-        vk_check(vk.CreatePipelineLayout(device, &pipeline_layout_ci, nil, &res.pipeline_layout))
-
-        dilate_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
-            sType = .PIPELINE_LAYOUT_CREATE_INFO,
-            pushConstantRangeCount = u32(len(push_constant_ranges)),
-            pPushConstantRanges = raw_data(push_constant_ranges),
-            setLayoutCount = 1,
-            pSetLayouts = &res.dilate_desc_set_layout,
-        }
-        vk_check(vk.CreatePipelineLayout(device, &dilate_pipeline_layout_ci, nil, &res.dilate_pipeline_layout))
-
-        rt_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
-            sType = .PIPELINE_LAYOUT_CREATE_INFO,
-            flags = {},
-            pushConstantRangeCount = u32(1),
-            pPushConstantRanges = raw_data([]vk.PushConstantRange {
-                {
-                    stageFlags = { .RAYGEN_KHR, .MISS_KHR },
-                    size = 256,
-                }
-            }),
-            setLayoutCount = 1,
-            pSetLayouts = &res.rt_desc_set_layout
-        }
-        vk_check(vk.CreatePipelineLayout(device, &rt_pipeline_layout_ci, nil, &res.rt_pipeline_layout))
-
-        seams_pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
-            sType = .PIPELINE_LAYOUT_CREATE_INFO,
-            flags = {},
-            pushConstantRangeCount = u32(1),
-            pPushConstantRanges = raw_data([]vk.PushConstantRange {
-                {
-                    stageFlags = { .VERTEX, .FRAGMENT },
-                    size = 256,
-                }
-            }),
-            setLayoutCount = 2,
-            pSetLayouts = raw_data([]vk.DescriptorSetLayout {
-                res.seams_desc_set_layout,
-                res.seams_src_desc_set_layout,
-            })
-        }
-        vk_check(vk.CreatePipelineLayout(device, &seams_pipeline_layout_ci, nil, &res.seams_pipeline_layout))
-    }
-
-    uv_space_vert_code              := #load("shaders/uv_space.vert.spv", []u32)
-    gbuffer_world_pos_frag_code     := #load("shaders/gbuffer_world_pos.frag.spv", []u32)
-    gbuffer_world_normals_frag_code := #load("shaders/gbuffer_world_normals.frag.spv", []u32)
-    gbuffer_tri_idx_frag_code       := #load("shaders/gbuffer_tri_idx.frag.spv", []u32)
-    push_samples_raygen_code        := #load("shaders/push_samples.rgen.spv", []u32)
-    push_samples_raymiss_code       := #load("shaders/push_samples.rmiss.spv", []u32)
-    push_samples_rayhit_code        := #load("shaders/push_samples.rchit.spv", []u32)
-    raygen_code                     := #load("shaders/pathtrace.rgen.spv", []u32)
-    raymiss_code                    := #load("shaders/pathtrace.rmiss.spv", []u32)
-    rayhit_code                     := #load("shaders/pathtrace.rchit.spv", []u32)
-    dilate_code                     := #load("shaders/dilate.comp.spv", []u32)
-    seams_vert_code                 := #load("shaders/seams.vert.spv", []u32)
-    seams_frag_code                 := #load("shaders/seams.frag.spv", []u32)
-
-    // NOTE: #load(<string-path>, <type>) used to produce unaligned reads and writes (https://github.com/odin-lang/Odin/issues/5771)
-    ensure(uintptr(raw_data(uv_space_vert_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(gbuffer_world_pos_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(gbuffer_world_normals_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(gbuffer_tri_idx_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(push_samples_raygen_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(push_samples_raymiss_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(push_samples_rayhit_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(raygen_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(raymiss_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(rayhit_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(dilate_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(seams_vert_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-    ensure(uintptr(raw_data(seams_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
-
-    // Create shader objects.
-    {
-        shader_cis := [?]vk.ShaderCreateInfoEXT {
-            {
-                sType = .SHADER_CREATE_INFO_EXT,
-                codeType = .SPIRV,
-                codeSize = len(uv_space_vert_code) * size_of(uv_space_vert_code[0]),
-                pCode = raw_data(uv_space_vert_code),
-                pName = "main",
-                stage = { .VERTEX },
-                nextStage = { .FRAGMENT },
-                flags = { },
-                pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges)
-            },
-            {
-                sType = .SHADER_CREATE_INFO_EXT,
-                codeType = .SPIRV,
-                codeSize = len(gbuffer_world_pos_frag_code) * size_of(gbuffer_world_pos_frag_code[0]),
-                pCode = raw_data(gbuffer_world_pos_frag_code),
-                pName = "main",
-                stage = { .FRAGMENT },
-                flags = { },
-                pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges),
-            },
-            {
-                sType = .SHADER_CREATE_INFO_EXT,
-                codeType = .SPIRV,
-                codeSize = len(gbuffer_world_normals_frag_code) * size_of(gbuffer_world_normals_frag_code[0]),
-                pCode = raw_data(gbuffer_world_normals_frag_code),
-                pName = "main",
-                stage = { .FRAGMENT },
-                flags = { },
-                pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges),
-            },
-            {
-                sType = .SHADER_CREATE_INFO_EXT,
-                codeType = .SPIRV,
-                codeSize = len(gbuffer_tri_idx_frag_code) * size_of(gbuffer_tri_idx_frag_code[0]),
-                pCode = raw_data(gbuffer_tri_idx_frag_code),
-                pName = "main",
-                stage = { .FRAGMENT },
-                flags = { },
-                pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges),
-            },
-            {
-                sType = .SHADER_CREATE_INFO_EXT,
-                codeType = .SPIRV,
-                codeSize = len(dilate_code) * size_of(dilate_code[0]),
-                pCode = raw_data(dilate_code),
-                pName = "main",
-                stage = { .COMPUTE },
-                flags = { },
-                pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = 1,
-                pSetLayouts = &res.dilate_desc_set_layout,
-            },
-            {
-                sType = .SHADER_CREATE_INFO_EXT,
-                codeType = .SPIRV,
-                codeSize = len(seams_vert_code) * size_of(seams_vert_code[0]),
-                pCode = raw_data(seams_vert_code),
-                pName = "main",
-                stage = { .VERTEX },
-                nextStage = { .FRAGMENT },
-                flags = { },
-                pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = 2,
-                pSetLayouts = raw_data([]vk.DescriptorSetLayout {
-                    res.seams_desc_set_layout,
-                    res.seams_src_desc_set_layout,
-                })
-            },
-            {
-                sType = .SHADER_CREATE_INFO_EXT,
-                codeType = .SPIRV,
-                codeSize = len(seams_frag_code) * size_of(seams_frag_code[0]),
-                pCode = raw_data(seams_frag_code),
-                pName = "main",
-                stage = { .FRAGMENT },
-                flags = { },
-                pushConstantRangeCount = u32(len(push_constant_ranges)),
-                pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = 2,
-                pSetLayouts = raw_data([]vk.DescriptorSetLayout {
-                    res.seams_desc_set_layout,
-                    res.seams_src_desc_set_layout,
-                })
-            },
-        }
-        shaders: [len(shader_cis)]vk.ShaderEXT
-        vk_check(vk.CreateShadersEXT(device, len(shaders), raw_data(&shader_cis), nil, raw_data(&shaders)))
-        res.uv_space = shaders[0]
-        res.gbuffer_world_pos = shaders[1]
-        res.gbuffer_world_normals = shaders[2]
-        res.gbuffer_tri_idx = shaders[3]
-        res.dilate_shader = shaders[4]
-        res.seams_vert = shaders[5]
-        res.seams_frag = shaders[6]
-    }
-
-    // RT
-    // NOTE: The constant is wrong, this is now fixed but not in the latest release.
-    #assert(vk.SHADER_UNUSED_KHR == ~u32(0), "Some vk constants are wrong! Are you on an old Odin version? Update to >= dev-2025-11!")
-
-    push_samples_raygen_shader: vk.ShaderModule
-    push_samples_raymiss_shader: vk.ShaderModule
-    push_samples_rayhit_shader: vk.ShaderModule
-
-    raygen_shader: vk.ShaderModule
-    raymiss_shader: vk.ShaderModule
-    rayhit_shader: vk.ShaderModule
-
-    {
-        shader_module_ci := vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO,
-            flags = {},
-            codeSize = len(push_samples_raygen_code) * size_of(push_samples_raygen_code[0]),
-            pCode = auto_cast raw_data(push_samples_raygen_code),
-        }
-        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_raygen_shader))
-    }
-    {
-        shader_module_ci := vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO,
-            flags = {},
-            codeSize = len(push_samples_raymiss_code) * size_of(push_samples_raymiss_code[0]),
-            pCode = auto_cast raw_data(push_samples_raymiss_code),
-        }
-        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_raymiss_shader))
-    }
-    {
-        shader_module_ci := vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO,
-            flags = {},
-            codeSize = len(push_samples_rayhit_code) * size_of(push_samples_rayhit_code[0]),
-            pCode = auto_cast raw_data(push_samples_rayhit_code),
-        }
-        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_rayhit_shader))
-    }
-
-    {
-        shader_module_ci := vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO,
-            flags = {},
-            codeSize = len(raygen_code) * size_of(raygen_code[0]),
-            pCode = auto_cast raw_data(raygen_code),
-        }
-        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raygen_shader))
-    }
-    {
-        shader_module_ci := vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO,
-            flags = {},
-            codeSize = len(raymiss_code) * size_of(raymiss_code[0]),
-            pCode = auto_cast raw_data(raymiss_code),
-        }
-        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raymiss_shader))
-    }
-    {
-        shader_module_ci := vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO,
-            flags = {},
-            codeSize = len(rayhit_code) * size_of(rayhit_code[0]),
-            pCode = auto_cast raw_data(rayhit_code),
-        }
-        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &rayhit_shader))
-    }
-
-    push_samples_pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
-        sType = .RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
-        flags = {},
-        stageCount = 3,
-        pStages = raw_data([]vk.PipelineShaderStageCreateInfo {
-            {
-                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-                flags = {},
-                stage = { .RAYGEN_KHR },
-                module = push_samples_raygen_shader,
-                pName = "main"
-            },
-            {
-                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-                flags = {},
-                stage = { .MISS_KHR },
-                module = push_samples_raymiss_shader,
-                pName = "main"
-            },
-            {
-                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-                flags = {},
-                stage = { .CLOSEST_HIT_KHR },
-                module = push_samples_rayhit_shader,
-                pName = "main"
-            },
-        }),
-        groupCount = 3,
-        pGroups = raw_data([]vk.RayTracingShaderGroupCreateInfoKHR {
-            {  // Raygen group
-                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
-                type = .GENERAL,
-                generalShader = 0,
-                closestHitShader = vk.SHADER_UNUSED_KHR,
-                anyHitShader = vk.SHADER_UNUSED_KHR,
-                intersectionShader = vk.SHADER_UNUSED_KHR,
-            },
-            {  // Miss group
-                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
-                type = .GENERAL,
-                generalShader = 1,
-                closestHitShader = vk.SHADER_UNUSED_KHR,
-                anyHitShader = vk.SHADER_UNUSED_KHR,
-                intersectionShader = vk.SHADER_UNUSED_KHR,
-            },
-            {  // Triangles hit group
-                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
-                type = .TRIANGLES_HIT_GROUP,
-                generalShader = vk.SHADER_UNUSED_KHR,
-                closestHitShader = 2,
-                anyHitShader = vk.SHADER_UNUSED_KHR,
-                intersectionShader = vk.SHADER_UNUSED_KHR,
-            }
-        }),
-        maxPipelineRayRecursionDepth = 1,
-        pLibraryInfo = nil,
-        pLibraryInterface = nil,
-        pDynamicState = nil,
-        layout = res.rt_pipeline_layout,
-        basePipelineHandle = cast(vk.Pipeline) 0,
-        basePipelineIndex = 0,
-    }
-    vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &push_samples_pipeline_ci, nil, &res.push_samples_pipeline))
-
-    rt_pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
-        sType = .RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
-        flags = {},
-        stageCount = 3,
-        pStages = raw_data([]vk.PipelineShaderStageCreateInfo {
-            {
-                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-                flags = {},
-                stage = { .RAYGEN_KHR },
-                module = raygen_shader,
-                pName = "main"
-            },
-            {
-                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-                flags = {},
-                stage = { .MISS_KHR },
-                module = raymiss_shader,
-                pName = "main"
-            },
-            {
-                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-                flags = {},
-                stage = { .CLOSEST_HIT_KHR },
-                module = rayhit_shader,
-                pName = "main"
-            },
-        }),
-        groupCount = 3,
-        pGroups = raw_data([]vk.RayTracingShaderGroupCreateInfoKHR {
-            {  // Raygen group
-                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
-                type = .GENERAL,
-                generalShader = 0,
-                closestHitShader = vk.SHADER_UNUSED_KHR,
-                anyHitShader = vk.SHADER_UNUSED_KHR,
-                intersectionShader = vk.SHADER_UNUSED_KHR,
-            },
-            {  // Miss group
-                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
-                type = .GENERAL,
-                generalShader = 1,
-                closestHitShader = vk.SHADER_UNUSED_KHR,
-                anyHitShader = vk.SHADER_UNUSED_KHR,
-                intersectionShader = vk.SHADER_UNUSED_KHR,
-            },
-            {  // Triangles hit group
-                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
-                type = .TRIANGLES_HIT_GROUP,
-                generalShader = vk.SHADER_UNUSED_KHR,
-                closestHitShader = 2,
-                anyHitShader = vk.SHADER_UNUSED_KHR,
-                intersectionShader = vk.SHADER_UNUSED_KHR,
-            }
-        }),
-        maxPipelineRayRecursionDepth = 1,
-        pLibraryInfo = nil,
-        pLibraryInterface = nil,
-        pDynamicState = nil,
-        layout = res.rt_pipeline_layout,
-        basePipelineHandle = cast(vk.Pipeline) 0,
-        basePipelineIndex = 0,
-    }
-    vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &rt_pipeline_ci, nil, &res.rt_pipeline))
-
-    return res
-}
-
-destroy_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context, shaders: ^Shaders)
-{
-    vk.DestroyPipelineLayout(device, shaders.pipeline_layout, nil)
-    vk.DestroyShaderEXT(device, shaders.uv_space, nil)
-    vk.DestroyShaderEXT(device, shaders.gbuffer_world_pos, nil)
-    vk.DestroyShaderEXT(device, shaders.gbuffer_world_normals, nil)
-
-    vk.DestroyDescriptorSetLayout(device, shaders.rt_desc_set_layout, nil)
-    vk.DestroyPipelineLayout(device, shaders.rt_pipeline_layout, nil)
-    vk.DestroyPipeline(device, shaders.rt_pipeline, nil)
 }
 
 GBuffers :: struct
@@ -3212,4 +2598,621 @@ find_seams :: proc(indices: []u32, positions: [][3]f32, normals: [][3]f32, uvs: 
 
         return false
     }
+}
+
+/////////////////////////////////////
+// Shader compilation and layouts
+
+Shaders :: struct
+{
+    // GBuffer generation
+    lm_desc_set_layout: vk.DescriptorSetLayout,
+    gbuf_raster_pipeline_layout: vk.PipelineLayout,
+    uv_space: vk.ShaderEXT,
+    gbuffer_world_pos: vk.ShaderEXT,
+    gbuffer_world_normals: vk.ShaderEXT,
+    gbuffer_tri_idx: vk.ShaderEXT,
+
+    // Lightmap dilation
+    dilate_shader: vk.ShaderEXT,
+    dilate_pipeline_layout: vk.PipelineLayout,
+
+    // Sample pushing
+    push_samples_pipeline_layout: vk.PipelineLayout,
+    push_samples_pipeline: vk.Pipeline,
+
+    // Seam smoothing
+    seams_pipeline_layout: vk.PipelineLayout,
+    seams_vert: vk.ShaderEXT,
+    seams_frag: vk.ShaderEXT,
+
+    // Pathtrace
+    pathtrace_pipeline_layout: vk.PipelineLayout,
+    pathtrace_pipeline: vk.Pipeline,
+
+    // Descriptor Set layouts
+    gbuffers_desc: vk.DescriptorSetLayout,
+    tex_array_desc: vk.DescriptorSetLayout,  // Array of sampled textures
+    seams_desc: vk.DescriptorSetLayout,
+    io_tex_desc: vk.DescriptorSetLayout,  // Used for dilating
+    tex_desc: vk.DescriptorSetLayout,  // Single sampled texture
+}
+
+create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
+{
+    res: Shaders
+
+    push_constant_ranges := []vk.PushConstantRange {
+        {
+            stageFlags = { .VERTEX, .FRAGMENT },
+            size = 256,
+        }
+    }
+
+    rt_push_constant_ranges := []vk.PushConstantRange {
+        {
+            stageFlags = { .RAYGEN_KHR, /*.CLOSEST_HIT_KHR,*/ .MISS_KHR },
+            size = 256,
+        }
+    }
+
+    // Desc set layouts
+    {
+        // GBuffers
+        {
+            bindings := []vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .ACCELERATION_STRUCTURE_KHR,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 1,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 2,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 3,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 4,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .RAYGEN_KHR },
+                },
+                {
+                    binding = 5,
+                    descriptorType = .STORAGE_BUFFER,
+                    descriptorCount = 1,
+                    stageFlags = { .CLOSEST_HIT_KHR },
+                }
+            }
+            layout_ci := vk.DescriptorSetLayoutCreateInfo {
+                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                flags = {},
+                bindingCount = u32(len(bindings)),
+                pBindings = raw_data(bindings)
+            }
+            vk_check(vk.CreateDescriptorSetLayout(device, &layout_ci, nil, &res.gbuffers_desc))
+        }
+
+        // Tex array
+        {
+            bindings := []vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .COMBINED_IMAGE_SAMPLER,
+                    descriptorCount = MAX_TEXTURES,
+                    stageFlags = { .FRAGMENT },
+                },
+            }
+            layout_ci := vk.DescriptorSetLayoutCreateInfo {
+                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                flags = {},
+                bindingCount = u32(len(bindings)),
+                pBindings = raw_data(bindings)
+            }
+            vk_check(vk.CreateDescriptorSetLayout(device, &layout_ci, nil, &res.tex_array_desc))
+        }
+
+        // Seams desc
+        {
+            bindings := []vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .STORAGE_BUFFER,
+                    descriptorCount = 1,
+                    stageFlags = { .VERTEX },
+                },
+            }
+            layout_ci := vk.DescriptorSetLayoutCreateInfo {
+                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                flags = {},
+                bindingCount = u32(len(bindings)),
+                pBindings = raw_data(bindings)
+            }
+            vk_check(vk.CreateDescriptorSetLayout(device, &layout_ci, nil, &res.seams_desc))
+        }
+
+        // I/O tex desc
+        {
+            bindings := []vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .COMBINED_IMAGE_SAMPLER,
+                    descriptorCount = 1,
+                    stageFlags = { .COMPUTE },
+                },
+                {
+                    binding = 1,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = 1,
+                    stageFlags = { .COMPUTE },
+                }
+            }
+            layout_ci := vk.DescriptorSetLayoutCreateInfo {
+                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                flags = {},
+                bindingCount = u32(len(bindings)),
+                pBindings = raw_data(bindings)
+            }
+            vk_check(vk.CreateDescriptorSetLayout(device, &layout_ci, nil, &res.io_tex_desc))
+        }
+
+        // Single tex
+        {
+            bindings := []vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .COMBINED_IMAGE_SAMPLER,
+                    descriptorCount = 1,
+                    stageFlags = { .FRAGMENT },
+                },
+            }
+            layout_ci := vk.DescriptorSetLayoutCreateInfo {
+                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                flags = {},
+                bindingCount = u32(len(bindings)),
+                pBindings = raw_data(bindings)
+            }
+            vk_check(vk.CreateDescriptorSetLayout(device, &layout_ci, nil, &res.tex_desc))
+        }
+    }
+
+    // Pipeline layouts
+    {
+        // GBuf raster
+        {
+            layouts := []vk.DescriptorSetLayout {
+                res.tex_desc
+            }
+            layout_ci := vk.PipelineLayoutCreateInfo {
+                sType = .PIPELINE_LAYOUT_CREATE_INFO,
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = u32(len(layouts)),
+                pSetLayouts = raw_data(layouts),
+            }
+            vk_check(vk.CreatePipelineLayout(device, &layout_ci, nil, &res.gbuf_raster_pipeline_layout))
+        }
+
+        // Dilate
+        {
+            layouts := []vk.DescriptorSetLayout {
+                res.io_tex_desc
+            }
+            layout_ci := vk.PipelineLayoutCreateInfo {
+                sType = .PIPELINE_LAYOUT_CREATE_INFO,
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = u32(len(layouts)),
+                pSetLayouts = raw_data(layouts),
+            }
+            vk_check(vk.CreatePipelineLayout(device, &layout_ci, nil, &res.dilate_pipeline_layout))
+        }
+
+        // Push samples
+        {
+            layouts := []vk.DescriptorSetLayout {
+                res.gbuffers_desc
+            }
+            layout_ci := vk.PipelineLayoutCreateInfo {
+                sType = .PIPELINE_LAYOUT_CREATE_INFO,
+                pushConstantRangeCount = u32(len(rt_push_constant_ranges)),
+                pPushConstantRanges = raw_data(rt_push_constant_ranges),
+                setLayoutCount = u32(len(layouts)),
+                pSetLayouts = raw_data(layouts),
+            }
+            vk_check(vk.CreatePipelineLayout(device, &layout_ci, nil, &res.push_samples_pipeline_layout))
+        }
+
+        // Seams
+        {
+            layouts := []vk.DescriptorSetLayout {
+                res.seams_desc,
+                res.tex_desc,
+            }
+            layout_ci := vk.PipelineLayoutCreateInfo {
+                sType = .PIPELINE_LAYOUT_CREATE_INFO,
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = u32(len(layouts)),
+                pSetLayouts = raw_data(layouts),
+            }
+            vk_check(vk.CreatePipelineLayout(device, &layout_ci, nil, &res.seams_pipeline_layout))
+        }
+
+        // Pathtrace
+        {
+            layouts := []vk.DescriptorSetLayout {
+                res.gbuffers_desc
+            }
+            layout_ci := vk.PipelineLayoutCreateInfo {
+                sType = .PIPELINE_LAYOUT_CREATE_INFO,
+                pushConstantRangeCount = u32(len(rt_push_constant_ranges)),
+                pPushConstantRanges = raw_data(rt_push_constant_ranges),
+                setLayoutCount = u32(len(layouts)),
+                pSetLayouts = raw_data(layouts),
+            }
+            vk_check(vk.CreatePipelineLayout(device, &layout_ci, nil, &res.pathtrace_pipeline_layout))
+        }
+    }
+
+    uv_space_vert_code              := #load("shaders/uv_space.vert.spv", []u32)
+    gbuffer_world_pos_frag_code     := #load("shaders/gbuffer_world_pos.frag.spv", []u32)
+    gbuffer_world_normals_frag_code := #load("shaders/gbuffer_world_normals.frag.spv", []u32)
+    gbuffer_tri_idx_frag_code       := #load("shaders/gbuffer_tri_idx.frag.spv", []u32)
+    push_samples_raygen_code        := #load("shaders/push_samples.rgen.spv", []u32)
+    push_samples_raymiss_code       := #load("shaders/push_samples.rmiss.spv", []u32)
+    push_samples_rayhit_code        := #load("shaders/push_samples.rchit.spv", []u32)
+    raygen_code                     := #load("shaders/pathtrace.rgen.spv", []u32)
+    raymiss_code                    := #load("shaders/pathtrace.rmiss.spv", []u32)
+    rayhit_code                     := #load("shaders/pathtrace.rchit.spv", []u32)
+    dilate_code                     := #load("shaders/dilate.comp.spv", []u32)
+    seams_vert_code                 := #load("shaders/seams.vert.spv", []u32)
+    seams_frag_code                 := #load("shaders/seams.frag.spv", []u32)
+
+    // NOTE: #load(<string-path>, <type>) used to produce unaligned reads and writes (https://github.com/odin-lang/Odin/issues/5771)
+    ensure(uintptr(raw_data(uv_space_vert_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(gbuffer_world_pos_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(gbuffer_world_normals_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(gbuffer_tri_idx_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(push_samples_raygen_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(push_samples_raymiss_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(push_samples_rayhit_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(raygen_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(raymiss_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(rayhit_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(dilate_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(seams_vert_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+    ensure(uintptr(raw_data(seams_frag_code)) % 4 == 0, "#load directive is producing unaligned accesses! Are you on an old Odin version? Update to >= dev-2025-11!")
+
+    // Create shader objects.
+    {
+        shader_cis := [?]vk.ShaderCreateInfoEXT {
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(uv_space_vert_code) * size_of(uv_space_vert_code[0]),
+                pCode = raw_data(uv_space_vert_code),
+                pName = "main",
+                stage = { .VERTEX },
+                nextStage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges)
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(gbuffer_world_pos_frag_code) * size_of(gbuffer_world_pos_frag_code[0]),
+                pCode = raw_data(gbuffer_world_pos_frag_code),
+                pName = "main",
+                stage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(gbuffer_world_normals_frag_code) * size_of(gbuffer_world_normals_frag_code[0]),
+                pCode = raw_data(gbuffer_world_normals_frag_code),
+                pName = "main",
+                stage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(gbuffer_tri_idx_frag_code) * size_of(gbuffer_tri_idx_frag_code[0]),
+                pCode = raw_data(gbuffer_tri_idx_frag_code),
+                pName = "main",
+                stage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(dilate_code) * size_of(dilate_code[0]),
+                pCode = raw_data(dilate_code),
+                pName = "main",
+                stage = { .COMPUTE },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 1,
+                pSetLayouts = &res.io_tex_desc,
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(seams_vert_code) * size_of(seams_vert_code[0]),
+                pCode = raw_data(seams_vert_code),
+                pName = "main",
+                stage = { .VERTEX },
+                nextStage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 2,
+                pSetLayouts = raw_data([]vk.DescriptorSetLayout {
+                    res.seams_desc,
+                    res.tex_desc,
+                })
+            },
+            {
+                sType = .SHADER_CREATE_INFO_EXT,
+                codeType = .SPIRV,
+                codeSize = len(seams_frag_code) * size_of(seams_frag_code[0]),
+                pCode = raw_data(seams_frag_code),
+                pName = "main",
+                stage = { .FRAGMENT },
+                flags = { },
+                pushConstantRangeCount = u32(len(push_constant_ranges)),
+                pPushConstantRanges = raw_data(push_constant_ranges),
+                setLayoutCount = 2,
+                pSetLayouts = raw_data([]vk.DescriptorSetLayout {
+                    res.seams_desc,
+                    res.tex_desc,
+                })
+            },
+        }
+        shaders: [len(shader_cis)]vk.ShaderEXT
+        vk_check(vk.CreateShadersEXT(device, len(shaders), raw_data(&shader_cis), nil, raw_data(&shaders)))
+        res.uv_space = shaders[0]
+        res.gbuffer_world_pos = shaders[1]
+        res.gbuffer_world_normals = shaders[2]
+        res.gbuffer_tri_idx = shaders[3]
+        res.dilate_shader = shaders[4]
+        res.seams_vert = shaders[5]
+        res.seams_frag = shaders[6]
+    }
+
+    // RT
+    // NOTE: This constant used to be wrong.
+    #assert(vk.SHADER_UNUSED_KHR == ~u32(0), "Some vk constants are wrong! Are you on an old Odin version? Update to >= dev-2025-11!")
+
+    push_samples_raygen_shader: vk.ShaderModule
+    push_samples_raymiss_shader: vk.ShaderModule
+    push_samples_rayhit_shader: vk.ShaderModule
+
+    raygen_shader: vk.ShaderModule
+    raymiss_shader: vk.ShaderModule
+    rayhit_shader: vk.ShaderModule
+
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(push_samples_raygen_code) * size_of(push_samples_raygen_code[0]),
+            pCode = auto_cast raw_data(push_samples_raygen_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_raygen_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(push_samples_raymiss_code) * size_of(push_samples_raymiss_code[0]),
+            pCode = auto_cast raw_data(push_samples_raymiss_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_raymiss_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(push_samples_rayhit_code) * size_of(push_samples_rayhit_code[0]),
+            pCode = auto_cast raw_data(push_samples_rayhit_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &push_samples_rayhit_shader))
+    }
+
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(raygen_code) * size_of(raygen_code[0]),
+            pCode = auto_cast raw_data(raygen_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raygen_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(raymiss_code) * size_of(raymiss_code[0]),
+            pCode = auto_cast raw_data(raymiss_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &raymiss_shader))
+    }
+    {
+        shader_module_ci := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            flags = {},
+            codeSize = len(rayhit_code) * size_of(rayhit_code[0]),
+            pCode = auto_cast raw_data(rayhit_code),
+        }
+        vk_check(vk.CreateShaderModule(device, &shader_module_ci, nil, &rayhit_shader))
+    }
+
+    push_samples_pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
+        sType = .RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+        flags = {},
+        stageCount = 3,
+        pStages = raw_data([]vk.PipelineShaderStageCreateInfo {
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .RAYGEN_KHR },
+                module = push_samples_raygen_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .MISS_KHR },
+                module = push_samples_raymiss_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .CLOSEST_HIT_KHR },
+                module = push_samples_rayhit_shader,
+                pName = "main"
+            },
+        }),
+        groupCount = 3,
+        pGroups = raw_data([]vk.RayTracingShaderGroupCreateInfoKHR {
+            {  // Raygen group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 0,
+                closestHitShader = vk.SHADER_UNUSED_KHR,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
+            },
+            {  // Miss group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 1,
+                closestHitShader = vk.SHADER_UNUSED_KHR,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
+            },
+            {  // Triangles hit group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .TRIANGLES_HIT_GROUP,
+                generalShader = vk.SHADER_UNUSED_KHR,
+                closestHitShader = 2,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
+            }
+        }),
+        maxPipelineRayRecursionDepth = 1,
+        pLibraryInfo = nil,
+        pLibraryInterface = nil,
+        pDynamicState = nil,
+        layout = res.push_samples_pipeline_layout,
+        basePipelineHandle = cast(vk.Pipeline) 0,
+        basePipelineIndex = 0,
+    }
+    vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &push_samples_pipeline_ci, nil, &res.push_samples_pipeline))
+
+    pathtrace_pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
+        sType = .RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+        flags = {},
+        stageCount = 3,
+        pStages = raw_data([]vk.PipelineShaderStageCreateInfo {
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .RAYGEN_KHR },
+                module = raygen_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .MISS_KHR },
+                module = raymiss_shader,
+                pName = "main"
+            },
+            {
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+                flags = {},
+                stage = { .CLOSEST_HIT_KHR },
+                module = rayhit_shader,
+                pName = "main"
+            },
+        }),
+        groupCount = 3,
+        pGroups = raw_data([]vk.RayTracingShaderGroupCreateInfoKHR {
+            {  // Raygen group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 0,
+                closestHitShader = vk.SHADER_UNUSED_KHR,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
+            },
+            {  // Miss group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .GENERAL,
+                generalShader = 1,
+                closestHitShader = vk.SHADER_UNUSED_KHR,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
+            },
+            {  // Triangles hit group
+                sType = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                type = .TRIANGLES_HIT_GROUP,
+                generalShader = vk.SHADER_UNUSED_KHR,
+                closestHitShader = 2,
+                anyHitShader = vk.SHADER_UNUSED_KHR,
+                intersectionShader = vk.SHADER_UNUSED_KHR,
+            }
+        }),
+        maxPipelineRayRecursionDepth = 1,
+        pLibraryInfo = nil,
+        pLibraryInterface = nil,
+        pDynamicState = nil,
+        layout = res.pathtrace_pipeline_layout,
+        basePipelineHandle = cast(vk.Pipeline) 0,
+        basePipelineIndex = 0,
+    }
+    vk_check(vk.CreateRayTracingPipelinesKHR(device, {}, {}, 1, &pathtrace_pipeline_ci, nil, &res.pathtrace_pipeline))
+
+    return res
+}
+
+destroy_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context, shaders: ^Shaders)
+{
+    /*
+    vk.DestroyPipelineLayout(device, shaders.pipeline_layout, nil)
+    vk.DestroyShaderEXT(device, shaders.uv_space, nil)
+    vk.DestroyShaderEXT(device, shaders.gbuffer_world_pos, nil)
+    vk.DestroyShaderEXT(device, shaders.gbuffer_world_normals, nil)
+
+    vk.DestroyDescriptorSetLayout(device, shaders.rt_desc_set_layout, nil)
+    vk.DestroyPipelineLayout(device, shaders.rt_pipeline_layout, nil)
+    vk.DestroyPipeline(device, shaders.rt_pipeline, nil)
+    */
 }
