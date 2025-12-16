@@ -157,8 +157,8 @@ load_scene_gltf :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, 
     data, err_l := gltf2.load_from_file(path)
     switch err in err_l
     {
-        case gltf2.JSON_Error: break
-        case gltf2.GLTF_Error: break
+        case gltf2.JSON_Error: log.error(err)
+        case gltf2.GLTF_Error: log.error(err)
     }
     defer gltf2.unload(data)
 

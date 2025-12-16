@@ -43,7 +43,7 @@ float sun_disk_falloff(vec3 ray_dir, vec3 sun_dir, float angular_radius)
 
 void main()
 {
-    const bool indirect_only = true;
+    const bool indirect_only = false;
 
     vec3 dir = gl_WorldRayDirectionEXT;
     vec2 coords = vec2(atan(dir.x, dir.z) / (2.0f * 3.1415f), acos(clamp(dir.y, -1.0f, 1.0f)) / 3.1415f);

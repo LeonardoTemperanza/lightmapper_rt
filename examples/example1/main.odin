@@ -74,7 +74,7 @@ Swapchain :: struct
     present_semaphores: []vk.Semaphore,
 }
 
-LIGHTMAP_SIZE :: 4 * 1024
+LIGHTMAP_SIZE :: 8 * 1024
 
 main :: proc()
 {
@@ -145,7 +145,7 @@ main :: proc()
     }
     lm_ctx := lm.init_test(lm_vk_ctx)
 
-    instances, textures, ok_l := loader.load_scene_gltf(&vk_ctx, &lm_ctx, upload_cmd_pool, scene_path, LIGHTMAP_SIZE, texels_per_world_unit = 30, min_instance_texels = 128, max_instance_texels = 1028)
+    instances, textures, ok_l := loader.load_scene_gltf(&vk_ctx, &lm_ctx, upload_cmd_pool, scene_path, LIGHTMAP_SIZE, texels_per_world_unit = 60, min_instance_texels = 256, max_instance_texels = 2048)
     if !ok_l do log.error("Failed to load scene %v", scene_path)
 
     vk_frames := create_vk_frames(&vk_ctx)
@@ -251,7 +251,7 @@ main :: proc()
         dir = linalg.normalize([3]f32 { 0.2, -1.0, -0.2 }),
         emission = [3]f32 { 200000.0, 184000.0, 164000.0 },
     }
-    bake := lm.start_bake(&lm_ctx, instances[:], true, dir_light, 4096, 1000, 1)
+    bake := lm.start_bake(&lm_ctx, instances[:], true, dir_light, LIGHTMAP_SIZE, 1000, 1)
 
     // Create main render target
     render_target: Image

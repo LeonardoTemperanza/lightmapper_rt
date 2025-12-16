@@ -1081,7 +1081,7 @@ bake_main :: proc(using bake: ^Bake)
             flags = { .ONE_TIME_SUBMIT },
         }))
 
-        pathtrace_iter(bake, cmd_buf, pathtrace_sbt, gbuffers_desc_set, iter)
+        pathtrace_iter(bake, cmd_buf, pathtrace_sbt, gbuffers_desc_set, scene_dynamic_desc_set, iter)
 
         vku.image_barrier_safe_slow(&lightmap, cmd_buf, .GENERAL)
 
@@ -1593,7 +1593,7 @@ push_samples_outside_geometry :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuff
     vku.image_barrier_safe_slow(&gbuffers.world_pos, cmd_buf, .GENERAL)
 }
 
-pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer, rt_desc_set: vk.DescriptorSet, accum_counter: u32)
+pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer, rt_desc_set: vk.DescriptorSet, scene_dynamic_desc_set: vk.DescriptorSet, accum_counter: u32)
 {
     rt_info := vku.get_rt_info(vk_ctx.phys_device)
 
@@ -1601,7 +1601,8 @@ pathtrace_iter :: proc(using bake: ^Bake, cmd_buf: vk.CommandBuffer, sbt: Buffer
 
     desc_sets := []vk.DescriptorSet {
         rt_desc_set,
-        //textures_desc,
+        textures_desc,
+        scene_dynamic_desc_set,
     }
     vk.CmdBindDescriptorSets(cmd_buf, .RAY_TRACING_KHR, shaders.pathtrace_pipeline_layout, 0, u32(len(desc_sets)), raw_data(desc_sets), 0, nil)
 
@@ -2769,7 +2770,7 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                     binding = 0,
                     descriptorType = .COMBINED_IMAGE_SAMPLER,
                     descriptorCount = MAX_TEXTURES,
-                    stageFlags = { .FRAGMENT },
+                    stageFlags = { .CLOSEST_HIT_KHR },
                 },
             }
             layout_ci := vk.DescriptorSetLayoutCreateInfo {
@@ -2930,7 +2931,9 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
         // Pathtrace
         {
             layouts := []vk.DescriptorSetLayout {
-                res.gbuffers_desc
+                res.gbuffers_desc,
+                res.tex_array_desc,
+                res.scene_dynamic_desc,
             }
             layout_ci := vk.PipelineLayoutCreateInfo {
                 sType = .PIPELINE_LAYOUT_CREATE_INFO,

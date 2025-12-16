@@ -257,7 +257,7 @@ vec3 pathtrace(vec3 start_pos, vec3 world_normal, vec3 geom_normal)
 
     vec3 hit_pos = start_pos;
 
-    const bool indirect_only = true;
+    const bool indirect_only = false;
 
     const uint MAX_BOUNCES = 5;
     uint backface_hits_count = 0;

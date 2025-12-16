@@ -85,9 +85,13 @@ void main()
     else
         lm_sample = texture(lightmap, in_lm_uv);
 
+    vec4 albedo = texture(base_color, in_uv);
+
     //out_color = vec4(world_normal * 0.5f + 0.5f, 1);
     //out_color = vec4(in_lm_uv, 0.0f, 1.0f);
     //out_color = texture(lightmap, in_lm_uv);
     //out_color = uv_checkerboard(in_lm_uv);
-    out_color = lm_sample * texture(base_color, in_uv);
+    //out_color = lm_sample;
+    //out_color = albedo;
+    out_color = lm_sample * albedo;
 }

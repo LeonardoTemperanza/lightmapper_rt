@@ -34,7 +34,6 @@ layout(set = 0, binding = 5) readonly buffer Geometries
     Geometry geometries[];
 };
 
-/*
 // Static scene resources
 layout(set = 1, binding = 0) uniform sampler2D textures[];
 
@@ -48,7 +47,6 @@ layout(set = 2, binding = 0) readonly buffer Instances
 {
     Instance instances[];
 };
-*/
 
 struct HitInfo
 {
@@ -68,7 +66,7 @@ hitAttributeEXT vec2 attribs;
 void main()
 {
     uint instance_idx = gl_InstanceCustomIndexEXT;
-    // Instance instance = instances[instance_idx];
+    Instance instance = instances[instance_idx];
 
     Geometry geom = geometries[instance_idx];
 
@@ -83,20 +81,18 @@ void main()
     vec3 normal = normalize(n0*w + n1*attribs.x + n2*attribs.y);
     vec3 world_normal = normalize(transpose(mat3(gl_WorldToObjectEXT)) * normal);
 
-    vec2 uv0 = vec2(geom.uvs.buf[indices.x * 3 + 0], geom.uvs.buf[indices.x * 3 + 1]);
-    vec2 uv1 = vec2(geom.uvs.buf[indices.y * 3 + 0], geom.uvs.buf[indices.y * 3 + 1]);
-    vec2 uv2 = vec2(geom.uvs.buf[indices.z * 3 + 0], geom.uvs.buf[indices.z * 3 + 1]);
+    vec2 uv0 = vec2(geom.uvs.buf[indices.x * 2 + 0], geom.uvs.buf[indices.x * 2 + 1]);
+    vec2 uv1 = vec2(geom.uvs.buf[indices.y * 2 + 0], geom.uvs.buf[indices.y * 2 + 1]);
+    vec2 uv2 = vec2(geom.uvs.buf[indices.z * 2 + 0], geom.uvs.buf[indices.z * 2 + 1]);
     vec2 uv = uv0*w + uv1*attribs.x + uv2*attribs.y;
 
-    /*
     vec4 albedo_sample = vec4(1.0f, 1.0f, 1.0f, 1.0f);
     if(instance.albedo_tex_idx != SENTINEL_IDX)
         albedo_sample = texture(textures[nonuniformEXT(instance.albedo_tex_idx)], uv);
 
     vec4 albedo = albedo_sample;
-    */
-    //vec3 albedo = world_normal * 0.5f + 0.5f;
-    vec3 albedo = vec3(0.7f);
+    //vec4 albedo = world_normal * 0.5f + 0.5f;
+    //vec4 albedo = vec4(vec3(0.7f), 1.0f);
 
     vec3 world_pos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
     bool hit_backface = gl_HitKindEXT == gl_HitKindBackFacingTriangleEXT;
