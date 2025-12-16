@@ -140,7 +140,7 @@ load_scene_fbx :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, c
         instance := lm.Instance {
             transform = get_node_world_transform(node),
             mesh = meshes[node.mesh.element.typed_id],
-            diffuse_tex = materials[mat_id]
+            albedo_tex = materials[mat_id]
         }
         append(&instances, instance)
     }
@@ -251,7 +251,7 @@ load_scene_gltf :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, 
 
     Material :: struct
     {
-        diffuse_tex: lm.Texture_Handle
+        albedo_tex: lm.Texture_Handle
     }
 
     materials: [dynamic]Material
@@ -304,7 +304,7 @@ load_scene_gltf :: proc(using ctx: ^lm.App_Vulkan_Context, lm_ctx: ^lm.Context, 
                     instance := lm.Instance {
                         transform = flip_z * transform,
                         mesh = mesh_handle,
-                        diffuse_tex = mat.diffuse_tex,
+                        albedo_tex = mat.albedo_tex,
                         lm_idx = {},
                         lm_offset = {},
                         lm_scale = {}
@@ -404,7 +404,7 @@ load_texture_from_memory :: proc(content: []byte, using ctx: ^lm.App_Vulkan_Cont
     if err != nil do return {}, false
 
     pixels := tex.pixels.buf[tex.pixels.off:]
-    content_rgba8 := slice.from_ptr(cast(^[4]u8)raw_data(pixels), tex.width * tex.height)
+    content_rgba8 := slice.from_ptr(cast(^[4]u8) raw_data(pixels), tex.width * tex.height)
 
     usages := vk.ImageUsageFlags { .SAMPLED }
     image := vku.upload_image_rgba8(device, phys_device, queue, cmd_pool, queue_family_idx, content_rgba8[:], u32(tex.width), u32(tex.height), usages, srgb = true)

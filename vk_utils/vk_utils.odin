@@ -155,6 +155,40 @@ destroy_buffer :: proc(device: vk.Device, buf: ^Buffer)
     buf^ = {}
 }
 
+Shared_Buffer :: struct($T: typeid)
+{
+    buf: []T,
+    buf_shared: Buffer,
+    buf_gpu: Buffer
+}
+
+create_shared_buffer :: proc(device: vk.Device, phys_device: vk.PhysicalDevice, $T: typeid, num_elems: u32, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) -> Shared_Buffer(T)
+{
+    res: Persistently_Mapped_Buffer(T)
+
+    staging_usage := vk.BufferUsageFlags { .TRANSFER_SRC }
+    staging_properties := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
+    res.buf_shared = create_buffer(device, phys_device, size_of(T) * num_elems, staging_usage, staging_properties, {})
+    res.buf_gpu = create_buffer(device, phys_device, size_of(T) * num_elems, usage, properties, allocate_flags)
+
+    data: rawptr
+    vk.MapMemory(device, res.buf_shared.mem, 0, vk.DeviceSize(res.buf_shared.size), {}, &data)
+    res.buf = slice.from_ptr(cast(^T) data, num_elems)
+    return res
+}
+
+shared_buffer_submit :: proc(using buf: ^Shared_Buffer, cmd_buf: vk.CommandBuffer)
+{
+    copy_buffer(cmd_buf, buf.buf_shared, buf.buf_gpu, vk.DeviceSize(buf.buf_shared.size))
+}
+
+destroy_shared_buffer :: proc(device: vk.Device, buf: ^Shared_Buffer)
+{
+    vk.UnmapMemory(device, buf.mem)
+    destroy_buffer(device, buf.buf_shared)
+    destroy_buffer(device, buf.buf_gpu)
+}
+
 // Images
 
 Image :: struct

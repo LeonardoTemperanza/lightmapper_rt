@@ -975,9 +975,9 @@ render_scene :: proc(using ctx: ^lm.App_Vulkan_Context, cmd_buf: vk.CommandBuffe
         vk.CmdBindVertexBuffers(cmd_buf, 3, 1, &mesh.uvs.handle, &offset)
         vk.CmdBindIndexBuffer(cmd_buf, mesh.indices.handle, 0, .UINT32)
 
-        tex := lm.get_texture(lm_ctx, instance.diffuse_tex)
+        tex := lm.get_texture(lm_ctx, instance.albedo_tex)
         if tex != nil {
-            vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.pipeline_layout, 1, 1, &mat_descs[instance.diffuse_tex], 0, nil)
+            vk.CmdBindDescriptorSets(cmd_buf, .GRAPHICS, shaders.pipeline_layout, 1, 1, &mat_descs[instance.albedo_tex], 0, nil)
         }
 
         Push :: struct {

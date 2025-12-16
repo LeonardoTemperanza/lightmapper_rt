@@ -389,7 +389,7 @@ Instance :: struct
     lm_offset: [2]f32,
     lm_scale: f32,
 
-    diffuse_tex: Texture_Handle,
+    albedo_tex: Texture_Handle,
 }
 
 Mesh :: struct
@@ -935,22 +935,76 @@ bake_main :: proc(using bake: ^Bake)
         geoms_buf = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, geoms, usage, properties, allocate_flags)
     }
 
+    // Create instances buffer
+    Instance_GPU :: struct
+    {
+        albedo_tex_idx: u32,
+    }
+    instances_buf: Buffer
+    defer vku.destroy_buffer(device, &instances_buf)
+    {
+        instances_gpu := make([]Instance_GPU, len(instances))
+        defer delete(instances_gpu)
+
+        for &instance, i in instances_gpu {
+            instance.albedo_tex_idx = instances[i].albedo_tex.idx
+        }
+
+        usage := vk.BufferUsageFlags { .TRANSFER_DST, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER }
+        properties := vk.MemoryPropertyFlags { .DEVICE_LOCAL }
+        allocate_flags := vk.MemoryAllocateFlags { .DEVICE_ADDRESS }
+        instances_buf = vku.upload_buffer(device, phys_device, queue, upload_cmd_pool, instances_gpu, usage, properties, allocate_flags)
+    }
+
     // Create SBT buffers
     pathtrace_sbt    := vku.create_sbt_buffer(device, phys_device, queue, cmd_pool, shaders.pathtrace_pipeline, 3)
     defer vku.destroy_buffer(device, &pathtrace_sbt)
     push_samples_sbt := vku.create_sbt_buffer(device, phys_device, queue, cmd_pool, shaders.push_samples_pipeline, 3)
     defer vku.destroy_buffer(device, &push_samples_sbt)
 
-    desc_set_ai := vk.DescriptorSetAllocateInfo {
-        sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
-        descriptorPool = desc_pool,
-        descriptorSetCount = 1,
-        pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.gbuffers_desc })
-    }
     gbuffers_desc_set: vk.DescriptorSet
-    vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &gbuffers_desc_set))
-    //defer vk.FreeDescriptorSets(device, 1, &rt_desc_set, nil)
-    update_rt_desc_set(device, gbuffers_desc_set, tlas.as.handle, lightmap, gbufs, geoms_buf)
+    {
+        desc_set_ai := vk.DescriptorSetAllocateInfo {
+            sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptorPool = desc_pool,
+            descriptorSetCount = 1,
+            pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.gbuffers_desc })
+        }
+
+        vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &gbuffers_desc_set))
+        //defer vk.FreeDescriptorSets(device, 1, &rt_desc_set, nil)
+        update_rt_desc_set(device, gbuffers_desc_set, tlas.as.handle, lightmap, gbufs, geoms_buf)
+    }
+
+    scene_dynamic_desc_set: vk.DescriptorSet
+    {
+        desc_set_ai := vk.DescriptorSetAllocateInfo {
+            sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptorPool = desc_pool,
+            descriptorSetCount = 1,
+            pSetLayouts = raw_data([]vk.DescriptorSetLayout { shaders.scene_dynamic_desc })
+        }
+
+        vk_check(vk.AllocateDescriptorSets(device, &desc_set_ai, &scene_dynamic_desc_set))
+
+        writes := []vk.WriteDescriptorSet {
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = scene_dynamic_desc_set,
+                dstBinding = 0,
+                descriptorCount = 1,
+                descriptorType = .STORAGE_BUFFER,
+                pBufferInfo = raw_data([]vk.DescriptorBufferInfo {
+                    {
+                        buffer = instances_buf.handle,
+                        offset = vk.DeviceSize(0),
+                        range = vk.DeviceSize(vk.WHOLE_SIZE),
+                    }
+                })
+            },
+        }
+        vk.UpdateDescriptorSets(device, u32(len(writes)), raw_data(writes), 0, nil)
+    }
 
     // Dummy sampler
     dummy_sampler_ci := vk.SamplerCreateInfo {
@@ -2636,6 +2690,7 @@ Shaders :: struct
     seams_desc: vk.DescriptorSetLayout,
     io_tex_desc: vk.DescriptorSetLayout,  // Used for dilating
     tex_desc: vk.DescriptorSetLayout,  // Single sampled texture
+    scene_dynamic_desc: vk.DescriptorSetLayout,  // For pathtracing
 }
 
 create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
@@ -2787,6 +2842,25 @@ create_shaders :: proc(using ctx: ^Lightmapper_Vulkan_Context) -> Shaders
                 pBindings = raw_data(bindings)
             }
             vk_check(vk.CreateDescriptorSetLayout(device, &layout_ci, nil, &res.tex_desc))
+        }
+
+        // Scene dynamic
+        {
+            bindings := []vk.DescriptorSetLayoutBinding {
+                {
+                    binding = 0,
+                    descriptorType = .STORAGE_BUFFER,
+                    descriptorCount = 1,
+                    stageFlags = { .CLOSEST_HIT_KHR },
+                },
+            }
+            layout_ci := vk.DescriptorSetLayoutCreateInfo {
+                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                flags = {},
+                bindingCount = u32(len(bindings)),
+                pBindings = raw_data(bindings)
+            }
+            vk_check(vk.CreateDescriptorSetLayout(device, &layout_ci, nil, &res.scene_dynamic_desc))
         }
     }
 
