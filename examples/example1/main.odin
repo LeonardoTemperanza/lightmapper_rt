@@ -249,7 +249,7 @@ main :: proc()
     dir_light := lm.Dir_Light {
         angle = math.RAD_PER_DEG * 0.2,
         dir = linalg.normalize([3]f32 { 0.2, -1.0, -0.2 }),
-        emission = [3]f32 { 200000.0, 184000.0, 164000.0 },
+        emission = [3]f32 { 2000000.0, 1840000.0, 1640000.0 },
     }
     bake := lm.start_bake(&lm_ctx, instances[:], true, dir_light, LIGHTMAP_SIZE, 1000, 1)
 
@@ -507,7 +507,7 @@ create_swapchain :: proc(using ctx: ^lm.App_Vulkan_Context, width: u32, height: 
     surface_format := surface_formats[0]
     for candidate in surface_formats
     {
-        if candidate == {.B8G8R8A8_SRGB, .SRGB_NONLINEAR}
+        if candidate == {.B8G8R8A8_UNORM, .SRGB_NONLINEAR}
         {
             surface_format = candidate
             break
