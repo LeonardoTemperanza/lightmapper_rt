@@ -1,0 +1,53 @@
+// raddbg 0.9.20 project file
+
+recent_file: path: "../../../Users/leona/desktop/odin/base/runtime/core.odin"
+recent_file: path: "../no_gfx_api/gpu/impl_vk.odin"
+recent_file: path: "../main.odin"
+recent_file: path: "../no_gfx_api/gpu/impl_common.odin"
+recent_file: path: "../odin-imgui/imgui_impl_nogfx/imgui_impl_nogfx.odin"
+recent_file: path: "../no_gfx_api/gpu/gpu.odin"
+recent_file: path: "../../../Users/leona/desktop/odin/base/runtime/error_checks.odin"
+recent_file: path: "../../../Users/leona/desktop/odin/base/runtime/procs_windows_amd64.odin"
+recent_file: path: "../../../Users/leona/desktop/odin/base/runtime/core_builtin.odin"
+recent_file: path: "../../../src/llvm_package_18.1.8/llvm-project/compiler-rt/lib/sanitizer_common/sanitizer_win.cpp"
+recent_file: path: "../../../Users/leona/desktop/odin/base/runtime/entry_windows.odin"
+recent_file: path: "../../../Users/leona/desktop/odin/base/runtime/heap_allocator_windows.odin"
+recent_file: path: "../../../Users/leona/desktop/odin/base/runtime/heap_allocator.odin"
+recent_file: path: "../../../Users/leona/desktop/odin/base/runtime/internal.odin"
+recent_file: path: "D:/a/_work/1/s/src/vctools/crt/vcstartup/src/startup/exe_common.inl"
+target:
+{
+  executable: "test.exe"
+  working_directory: "../../test_lightmapper"
+  enabled: 1
+}
+breakpoint:
+{
+  source_location: "../odin-imgui/imgui_impl_nogfx/imgui_impl_nogfx.odin:103:1"
+  hit_count: 0
+  enabled: 0
+}
+breakpoint:
+{
+  source_location: "../odin-imgui/imgui_impl_nogfx/imgui_impl_nogfx.odin:158:1"
+  hit_count: 0
+  enabled: 0
+}
+breakpoint:
+{
+  source_location: "../odin-imgui/imgui_impl_nogfx/imgui_impl_nogfx.odin:215:1"
+  hit_count: 0
+  enabled: 0
+}
+breakpoint:
+{
+  source_location: "../odin-imgui/imgui_impl_nogfx/imgui_impl_nogfx.odin:299:1"
+  hit_count: 0
+  enabled: 0
+}
+breakpoint:
+{
+  source_location: "../main.odin:456:1"
+  hit_count: 0
+  enabled: 0
+}

@@ -1,0 +1,33 @@
+
+Data :: struct
+{
+    base_color_map: textureid,
+    base_color_map_sampler: samplerid,
+
+    metallic_roughness_map: textureid,
+    metallic_roughness_map_sampler: samplerid,
+
+    normal_map: textureid,
+    normal_map_sampler: samplerid,
+}
+
+main :: (normal_vert: vec4 @in_loc(0), uv: vec2 @in_loc(1), world_pos: vec4 @in_loc(2), data: ^Data @data) -> vec4 @out_loc(0)
+{
+    // Sample base color texture
+    base_color := texture_sample(data.base_color_map, data.base_color_map_sampler, uv);
+    if base_color.w < 0.1 { discard; }
+
+    // Sample normal map and transform to world space
+    // TODO: Properly transform normal map from tangent space to world space
+    normal_map_sample := texture_sample(data.normal_map, data.normal_map_sampler, uv);
+    // For now, use vertex normal (normal_map_sample would need tangent/bitangent)
+    world_normal := normalize(normal_vert.xyz);
+    // Pack normal into RGB (0.5 + 0.5 * normal to map from [-1,1] to [0,1])
+    packed_normal := vec4(world_normal * 0.5 + 0.5, 1.0);
+
+    // Sample metallic/roughness texture
+    metallic_roughness_sample := texture_sample(data.metallic_roughness_map, data.metallic_roughness_map_sampler, uv);
+
+    albedo := base_color;
+    return albedo;
+}

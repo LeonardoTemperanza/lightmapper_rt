@@ -1,0 +1,34 @@
+
+/*
+Input :: struct
+{
+    world_pos: vec3 @in_loc(0),
+    world_normal: vec3 @in_loc(1),
+    uv: vec2 @out_loc(2),
+}
+*/
+
+Output :: struct
+{
+    world_pos: vec4 @out_loc(0),  // Alpha holds world texel size.
+    world_normal: vec4 @out_loc(1),
+}
+
+Data :: struct
+{
+    test: uint,
+}
+
+main :: (world_pos: vec3 @in_loc(0), world_normal: vec3 @in_loc(1), uv: vec2 @out_loc(2), data: ^Data @data) -> Output
+{
+    // Approximate texel world size using derivatives. Assuming
+    // there is no heavy distortion on lightmap uvs.
+    // From: https://ndotl.wordpress.com/2018/08/29/baking-artifact-free-lightmaps/
+    d_uv := max(abs(dfdx_fine(world_pos)), abs(dfdy_fine(world_pos)));
+    texel_world_size := max(d_uv.x, max(d_uv.y, d_uv.z)) * sqrt(2.0);
+
+    frag_out: Output;
+    frag_out.world_pos = vec4(world_pos, texel_world_size);
+    frag_out.world_normal = vec4(normalize(world_normal) * 0.5 + 0.5, 1);
+    return frag_out;
+}

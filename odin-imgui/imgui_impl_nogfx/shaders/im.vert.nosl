@@ -1,0 +1,44 @@
+
+Im_Draw_Vert :: struct
+{
+    pos: vec2,
+    uv: vec2,
+    col: uint,
+}
+
+Data :: struct
+{
+    verts: []Im_Draw_Vert,
+    vert_offset: uint,
+    scale: vec2,
+    translate: vec2,
+}
+
+Output :: struct
+{
+    pos: vec4 @position,
+    color: vec4 @out_loc(0),
+    uv: vec2 @out_loc(1),
+}
+
+main :: (data: ^Data @data, vert_id: uint @vert_id) -> Output
+{
+    vert_id_global := vert_id + data.vert_offset;
+    vert := data.verts[vert_id_global];
+
+    out: Output;
+    out.color = uint_to_rgba8(vert.col);
+    out.pos = vec4(vert.pos * data.scale + data.translate, 0, 1);
+    out.uv = vert.uv;
+    return out;
+}
+
+uint_to_rgba8 :: (v: uint) -> vec4
+{
+    return vec4(
+        float(v & 0xFF),
+        float((v >> 8)  & 0xFF),
+        float((v >> 16) & 0xFF),
+        float((v >> 24) & 0xFF),
+    ) / 255.0;
+}

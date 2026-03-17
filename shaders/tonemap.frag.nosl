@@ -1,0 +1,33 @@
+
+Data :: struct
+{
+    texture_id: textureid,
+    sampler_id: samplerid,
+}
+
+main :: (uv: vec2 @in_loc(0), data: ^Data @data) -> vec4 @out_loc(0)
+{
+    linear := texture_sample(data.texture_id, data.sampler_id, uv);
+    return linear_to_srgb(hdr_to_ldr(max(vec4(0, 0, 0, 0), linear)));
+}
+
+linear_to_srgb :: (color: vec4) -> vec4
+{
+    cutoff := vec3(float(color.x < 0.0031308), float(color.y < 0.0031308), float(color.z < 0.0031308));
+    higher := vec3(1.055) * pow(color.xyz, vec3(1.0/2.4)) - vec3(0.055);
+    lower := color.xyz * vec3(12.92);
+
+    return vec4(mix(higher, lower, cutoff), color.w);
+}
+
+filmic :: (x: vec3) -> vec3
+{
+    X := max(vec3(0.0), x - 0.004);
+    result := (X * (6.2 * X + 0.5)) / (X * (6.2 * X + 1.7) + 0.06);
+    return pow(result, vec3(2.2));
+}
+
+hdr_to_ldr :: (color: vec4) -> vec4
+{
+    return vec4(filmic(color.xyz), color.w);
+}

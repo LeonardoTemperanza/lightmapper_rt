@@ -1,0 +1,11 @@
+
+Data :: struct
+{
+    tex_id: textureid,
+    sampler_id: samplerid,
+}
+
+main :: (data: ^Data @data, in_color: vec4 @in_loc(0), in_uv: vec2 @in_loc(1)) -> vec4 @out_loc(0)
+{
+    return in_color * texture_sample(data.tex_id, data.sampler_id, in_uv.xy);
+}

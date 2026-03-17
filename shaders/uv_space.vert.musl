@@ -1,0 +1,31 @@
+
+Output :: struct
+{
+    out_pos: vec4 @position,
+    world_pos: vec3 @out_loc(0),
+    world_normal: vec3 @out_loc(1),
+    uv: vec2 @out_loc(2),
+}
+
+Data :: struct
+{
+    pos: []vec3,
+    normals: []vec3,
+    uvs: []vec2,
+    lightmap_uvs: []vec2,
+    model_to_world: mat4,
+    model_to_world_normals: mat4,
+}
+
+main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output
+{
+    // Simulate conservative rasterization
+    
+
+    vert_out: Output;
+    vert_out.out_pos = vec4(data.lightmap_uvs[vert_id], 0, 1);
+    vert_out.world_pos = (data.model_to_world * vec4(data.pos[vert_id], 1)).xyz;
+    vert_out.world_normal = (data.model_to_world_normals * vec4(data.normals[vert_id], 0)).xyz;
+    vert_out.uv = data.uvs[vert_id];
+    return vert_out;
+}

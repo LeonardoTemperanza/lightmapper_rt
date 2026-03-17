@@ -1,0 +1,37 @@
+
+Data :: struct
+{
+    positions: []vec4,
+    normals: []vec4,
+    uvs: []vec2,
+    model_to_world: mat4,
+    model_to_world_normal: mat4,
+    world_to_view: mat4,
+    view_to_proj: mat4,
+}
+
+Output :: struct
+{
+    pos: vec4 @position,
+    normal: vec4 @out_loc(0),
+    uv: vec2 @out_loc(1),
+    world_pos: vec4 @out_loc(2),
+}
+
+main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output
+{
+    clip_pos := vec4(data.positions[vert_id].xyz, 1.0);
+    world_pos := data.model_to_world * clip_pos;
+    clip_pos = data.world_to_view * world_pos;
+    clip_pos = data.view_to_proj * clip_pos;
+    clip_pos.y = 0.0 - clip_pos.y;
+
+    world_normal := data.model_to_world_normal * data.normals[vert_id];
+
+    vert_out: Output;
+    vert_out.pos = clip_pos;
+    vert_out.normal = world_normal;
+    vert_out.uv = data.uvs[vert_id];
+    vert_out.world_pos = world_pos;
+    return vert_out;
+}
