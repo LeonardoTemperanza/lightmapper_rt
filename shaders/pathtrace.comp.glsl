@@ -180,8 +180,10 @@ struct Material_Point
 };
 Material_Point Material_Point_ZERO;
 void main();
-vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_id_, uint sampler_);
-Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_id_);
+vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_, uint sampler_);
+Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_);
+Hit_Info ray_skip_alpha_stochastically(Ray start_ray_, Scene scene_, uint tlas_);
+float get_alpha(Scene scene_, Hit_Info hit_);
 uint hash_u32(uint seed_);
 void init_rng(uint global_id_, uint accum_counter_);
 uint random_u32();
@@ -267,7 +269,7 @@ void main()
 
 }
 
-vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_id_, uint sampler_)
+vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_, uint sampler_)
 {
     vec3 radiance_ = vec3_ZERO;
     vec3 weight_ = vec3_ZERO;
@@ -287,7 +289,7 @@ vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_id_, uint sampler_)
         vec3 incoming_;
         for(bounce_ = 0; (bounce_ <= max_bounces_); bounce_ = (bounce_ + 1))
         {
-            hit_ = ray_scene_intersection(ray_, scene_, tlas_id_);
+            hit_ = ray_skip_alpha_stochastically(ray_, scene_, tlas_);
             if((!hit_.hit_))
             {
                 vec3 emission_;
@@ -352,7 +354,7 @@ incoming_ = sample_lights(scene_.lights_, hit_pos_, hit_.normal_, outgoing_);   
     return radiance_;
 }
 
-Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_id_)
+Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_)
 {
     uint Ray_Flags_Opaque_ = uint_ZERO;
     uint Ray_Flags_Terminate_On_First_Hit_ = uint_ZERO;
@@ -387,7 +389,7 @@ Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_id_)
     desc_.t_max_ = 1000000000.0;
     desc_.origin_ = ray_.ori_;
     desc_.dir_ = ray_.dir_;
-    rayquery_init(rq_, desc_, tlas_id_);
+    rayquery_init(rq_, desc_, tlas_);
     rayquery_proceed(rq_);
     hit_ = rayquery_result(rq_);
     if((hit_.kind_ != Ray_Result_Kind_Hit_Mesh_))
@@ -420,6 +422,81 @@ Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_id_)
     hit_info_.tri_idx_ = hit_.primitive_idx_;
     hit_info_.uv_ = hit_.barycentrics_;
     return hit_info_;
+}
+
+Hit_Info ray_skip_alpha_stochastically(Ray start_ray_, Scene scene_, uint tlas_)
+{
+    Hit_Info hit_ = Hit_Info_ZERO;
+    Ray ray_ = Ray_ZERO;
+    float t_ = float_ZERO;
+    int max_opacity_bounces_ = int_ZERO;
+    ray_ = start_ray_;
+    t_ = 0.0;
+    max_opacity_bounces_ = 100;
+    // for construct
+    {
+        int opacity_bounce_;
+        float alpha_;
+        for(opacity_bounce_ = 0; (opacity_bounce_ < max_opacity_bounces_); opacity_bounce_ += 1)
+        {
+            hit_ = ray_scene_intersection(ray_, scene_, tlas_);
+            if((!hit_.hit_))
+            {
+                break;
+            }
+
+            t_ += hit_.t_;
+            alpha_ = get_alpha(scene_, hit_);
+            if(((alpha_ < 1) && (random_f32() >= alpha_)))
+            {
+                ray_.ori_ = (ray_.ori_ + (ray_.dir_ * hit_.t_));
+            }
+            else
+            {
+                break;
+break;            }
+
+        }
+    }
+
+    hit_.t_ = t_;
+    return hit_;
+}
+
+float get_alpha(Scene scene_, Hit_Info hit_)
+{
+    vec4 color_sample_ = vec4_ZERO;
+    float alpha_ = float_ZERO;
+    color_sample_ = vec4(1);
+    if(true)
+    {
+        Instance instance_;
+        Mesh mesh_;
+        _res_slice_uint indices_;
+        uint base_idx_;
+        vec2 uv0_;
+        vec2 uv1_;
+        vec2 uv2_;
+        float w_;
+        vec2 texcoords_;
+        instance_ = scene_.instances_._res_[hit_.instance_idx_];
+        mesh_ = scene_.meshes_._res_[hit_.mesh_idx_];
+        indices_ = mesh_.indices_;
+        base_idx_ = (hit_.tri_idx_ * 3);
+        uv0_ = mesh_.uvs_._res_[indices_._res_[(base_idx_ + 0)]];
+        uv1_ = mesh_.uvs_._res_[indices_._res_[(base_idx_ + 1)]];
+        uv2_ = mesh_.uvs_._res_[indices_._res_[(base_idx_ + 2)]];
+        w_ = ((1.0 - hit_.uv_.x) - hit_.uv_.y);
+        texcoords_ = (((uv0_ * w_) + (uv1_ * hit_.uv_.x)) + (uv2_ * hit_.uv_.y));
+        if(true)
+        {
+            color_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(instance_.albedo_tex_)], _res_samplers_[nonuniformEXT(0)]), texcoords_);
+        }
+
+    }
+
+    alpha_ = color_sample_.a;
+    return alpha_;
 }
 
 uint hash_u32(uint seed_)

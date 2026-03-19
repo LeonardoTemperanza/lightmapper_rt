@@ -73,7 +73,7 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
     }
 }
 
-pathtrace :: (start_ray: Ray, scene: Scene, tlas_id: bvh_id, sampler: sampler_id) -> vec3
+pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -> vec3
 {
     radiance := vec3(0, 0, 0);
     weight := vec3(1, 1, 1);
@@ -82,7 +82,7 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas_id: bvh_id, sampler: sampler_id
     max_bounces := 5;
     for bounce := 0; bounce <= max_bounces; bounce = bounce + 1
     {
-        hit := ray_scene_intersection(ray, scene, tlas_id);
+        hit := ray_skip_alpha_stochastically(ray, scene, tlas);
         if !hit.hit
         {
             emission := sun_disk_falloff(ray.dir, -scene.lights.dir_light_dir, scene.lights.dir_light_angle) * scene.lights.dir_light_emission;
@@ -158,7 +158,7 @@ Hit_Info :: struct
     uv: vec2,
 }
 
-ray_scene_intersection :: (ray: Ray, scene: Scene, tlas_id: bvh_id) -> Hit_Info
+ray_scene_intersection :: (ray: Ray, scene: Scene, tlas: bvh_id) -> Hit_Info
 {
     // @tmp: These constants will be implicit (They may even be an enum)
     Ray_Flags_Opaque: uint = 1;
@@ -177,7 +177,7 @@ ray_scene_intersection :: (ray: Ray, scene: Scene, tlas_id: bvh_id) -> Hit_Info
     desc.t_max = 1000000000.0;
     desc.origin = ray.ori;
     desc.dir = ray.dir;
-    rq := rayquery_init(desc, tlas_id);
+    rq := rayquery_init(desc, tlas);
 
     rayquery_proceed(rq);
 
@@ -218,6 +218,61 @@ ray_scene_intersection :: (ray: Ray, scene: Scene, tlas_id: bvh_id) -> Hit_Info
     hit_info.tri_idx = hit.primitive_idx;
     hit_info.uv = hit.barycentrics;
     return hit_info;
+}
+
+ray_skip_alpha_stochastically :: (start_ray: Ray, scene: Scene, tlas: bvh_id) -> Hit_Info
+{
+    hit: Hit_Info;
+    ray := start_ray;
+    t := 0.0;
+    max_opacity_bounces := 100;
+    for opacity_bounce := 0; opacity_bounce < max_opacity_bounces; opacity_bounce += 1
+    {
+        hit = ray_scene_intersection(ray, scene, tlas);
+        if !hit.hit { break; }
+
+        t += hit.t;
+
+        alpha := get_alpha(scene, hit);
+        if alpha < 1 && random_f32() >= alpha {
+            ray.ori = ray.ori + ray.dir * hit.t;
+        } else {
+            break;
+        }
+    }
+
+    // Make sure the distance is accurate to the initial
+    // ray, not the last (shorter) one.
+    hit.t = t;
+    return hit;
+}
+
+get_alpha :: (scene: Scene, hit: Hit_Info) -> float
+{
+    // Sample textures.
+    color_sample := vec4(1);
+    // TODO: If it has uvs...
+    if true
+    {
+        instance := scene.instances[hit.instance_idx];
+        mesh := scene.meshes[hit.mesh_idx];
+        indices := mesh.indices;
+        base_idx := hit.tri_idx * 3;
+        uv0 := mesh.uvs[indices[base_idx + 0]];
+        uv1 := mesh.uvs[indices[base_idx + 1]];
+        uv2 := mesh.uvs[indices[base_idx + 2]];
+        w := 1.0 - hit.uv.x - hit.uv.y;
+        texcoords := uv0*w + uv1*hit.uv.x + uv2*hit.uv.y;
+
+        // If it has a color texture...
+        if true
+        {
+            color_sample = texture_sample(instance.albedo_tex, 0, texcoords);
+        }
+    }
+
+    alpha := color_sample.a;
+    return alpha;
 }
 
 // RNG
