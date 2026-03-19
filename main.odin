@@ -88,8 +88,8 @@ main :: proc()
 
     gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
 
-    pathtrace_ground_truth_shader := gpu.shader_create_compute(#load("shaders/pathtrace_ground_truth.comp.spv", []u32), 8, 8, 1)
-    defer gpu.shader_destroy(pathtrace_ground_truth_shader)
+    pathtrace_shader := gpu.shader_create_compute(#load("shaders/pathtrace.comp.spv", []u32), 8, 8, 1)
+    defer gpu.shader_destroy(pathtrace_shader)
 
     vert_shader_lit := gpu.shader_create(#load("shaders/lit.vert.spv", []u32), .Vertex)
     frag_shader_lit := gpu.shader_create(#load("shaders/lit.frag.spv", []u32), .Fragment)
@@ -477,7 +477,7 @@ main :: proc()
                         camera_to_world = intr.matrix_flatten(camera_to_world),
                     }
 
-                    gpu.cmd_set_compute_shader(cmd_buf, pathtrace_ground_truth_shader)
+                    gpu.cmd_set_compute_shader(cmd_buf, pathtrace_shader)
 
                     num_groups_x := (u32(window_size_x) + 8 - 1) / 8
                     num_groups_y := (u32(window_size_y) + 8 - 1) / 8

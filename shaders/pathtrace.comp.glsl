@@ -25,53 +25,53 @@ mat4 _res_mat4_from_mat4x3(mat4x3 m)
 
 struct Ray_Desc
 {
-    uint flags;
-    uint cull_mask;
-    float t_min;
-    float t_max;
-    vec3 origin;
-    vec3 dir;
+    uint flags_;
+    uint cull_mask_;
+    float t_min_;
+    float t_max_;
+    vec3 origin_;
+    vec3 dir_;
 };
 Ray_Desc Ray_Desc_ZERO;
 
 struct Ray_Result
 {
-    uint kind;
-    float t;
-    uint instance_idx;
-    uint primitive_idx;
-    vec2 barycentrics;
-    bool front_face;
-    mat4 object_to_world;
-    mat4 world_to_object;
+    uint kind_;
+    float t_;
+    uint instance_idx_;
+    uint primitive_idx_;
+    vec2 barycentrics_;
+    bool front_face_;
+    mat4 object_to_world_;
+    mat4 world_to_object_;
 };
 Ray_Result Ray_Result_ZERO;
 
 Ray_Result rayquery_result(rayQueryEXT rq)
 {
     Ray_Result res;
-    res.kind = rayQueryGetIntersectionTypeEXT(rq, true);
-    res.t = rayQueryGetIntersectionTEXT(rq, true);
-    res.instance_idx  = rayQueryGetIntersectionInstanceIdEXT(rq, true);
-    res.primitive_idx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
-    res.front_face    = rayQueryGetIntersectionFrontFaceEXT(rq, true);
-    res.object_to_world = _res_mat4_from_mat4x3(rayQueryGetIntersectionObjectToWorldEXT(rq, true));
-    res.world_to_object = _res_mat4_from_mat4x3(rayQueryGetIntersectionWorldToObjectEXT(rq, true));
-    res.barycentrics    = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+    res.kind_ = rayQueryGetIntersectionTypeEXT(rq, true);
+    res.t_ = rayQueryGetIntersectionTEXT(rq, true);
+    res.instance_idx_  = rayQueryGetIntersectionInstanceIdEXT(rq, true);
+    res.primitive_idx_ = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+    res.front_face_    = rayQueryGetIntersectionFrontFaceEXT(rq, true);
+    res.object_to_world_ = _res_mat4_from_mat4x3(rayQueryGetIntersectionObjectToWorldEXT(rq, true));
+    res.world_to_object_ = _res_mat4_from_mat4x3(rayQueryGetIntersectionWorldToObjectEXT(rq, true));
+    res.barycentrics_    = rayQueryGetIntersectionBarycentricsEXT(rq, true);
     return res;
 }
 
 Ray_Result rayquery_candidate(rayQueryEXT rq)
 {
     Ray_Result res;
-    res.kind = rayQueryGetIntersectionTypeEXT(rq, false);
-    res.t = rayQueryGetIntersectionTEXT(rq, false);
-    res.instance_idx  = rayQueryGetIntersectionInstanceIdEXT(rq, false);
-    res.primitive_idx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-    res.front_face    = rayQueryGetIntersectionFrontFaceEXT(rq, false);
-    res.object_to_world = _res_mat4_from_mat4x3(rayQueryGetIntersectionObjectToWorldEXT(rq, false));
-    res.world_to_object = _res_mat4_from_mat4x3(rayQueryGetIntersectionWorldToObjectEXT(rq, false));
-    res.barycentrics    = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+    res.kind_ = rayQueryGetIntersectionTypeEXT(rq, false);
+    res.t_ = rayQueryGetIntersectionTEXT(rq, false);
+    res.instance_idx_  = rayQueryGetIntersectionInstanceIdEXT(rq, false);
+    res.primitive_idx_ = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+    res.front_face_    = rayQueryGetIntersectionFrontFaceEXT(rq, false);
+    res.object_to_world_ = _res_mat4_from_mat4x3(rayQueryGetIntersectionObjectToWorldEXT(rq, false));
+    res.world_to_object_ = _res_mat4_from_mat4x3(rayQueryGetIntersectionWorldToObjectEXT(rq, false));
+    res.barycentrics_    = rayQueryGetIntersectionBarycentricsEXT(rq, false);
     return res;
 }
 
@@ -79,12 +79,12 @@ void rayquery_init(rayQueryEXT rq, Ray_Desc desc, uint bvh)
 {
     rayQueryInitializeEXT(rq,
                           _res_bvhs_[nonuniformEXT(bvh)],
-                          desc.flags,
-                          desc.cull_mask,
-                          desc.origin,
-                          desc.t_min,
-                          desc.dir,
-                          desc.t_max);
+                          desc.flags_,
+                          desc.cull_mask_,
+                          desc.origin_,
+                          desc.t_min_,
+                          desc.dir_,
+                          desc.t_max_);
 }
 
 bool rayquery_proceed(rayQueryEXT rq)
@@ -102,8 +102,8 @@ vec2 vec2_ZERO;
 vec3 vec3_ZERO;
 vec4 vec4_ZERO;
 mat4 mat4_ZERO;
-uint textureid_ZERO;
-uint samplerid_ZERO;
+uint texture_id_ZERO;
+uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
 
@@ -111,65 +111,80 @@ layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_slice_Instance;
 layout(buffer_reference) readonly buffer _res_slice_Mesh;
 layout(buffer_reference) readonly buffer _res_slice_vec4;
+layout(buffer_reference) readonly buffer _res_slice_vec2;
 layout(buffer_reference) readonly buffer _res_slice_uint;
 layout(buffer_reference) readonly buffer _res_ptr_Data;
 
 struct Scene
 {
-    _res_slice_Instance instances;
-    _res_slice_Mesh meshes;
+    _res_slice_Instance instances_;
+    _res_slice_Mesh meshes_;
 };
 Scene Scene_ZERO;
 struct Mesh
 {
-    _res_slice_vec4 pos;
-    _res_slice_vec4 normal;
-    _res_slice_uint indices;
+    _res_slice_vec4 pos_;
+    _res_slice_vec4 normal_;
+    _res_slice_vec2 uvs_;
+    _res_slice_uint indices_;
 };
 Mesh Mesh_ZERO;
 struct Instance
 {
-    uint mesh_idx;
+    uint mesh_idx_;
+    uint albedo_tex_;
 };
 Instance Instance_ZERO;
 struct Data
 {
-    uint output_texture_id;
-    Scene scene;
-    vec2 resolution;
-    uint accum_counter;
-    mat4 camera_to_world;
+    uint output_texture_id_;
+    uint tlas_;
+    uint linear_sampler_;
+    Scene scene_;
+    vec2 resolution_;
+    uint accum_counter_;
+    mat4 camera_to_world_;
 };
 Data Data_ZERO;
 struct Ray
 {
-    vec3 ori;
-    vec3 dir;
+    vec3 ori_;
+    vec3 dir_;
 };
 Ray Ray_ZERO;
 struct Hit_Info
 {
-    bool hit;
-    float t;
-    vec3 normal;
+    bool hit_;
+    float t_;
+    vec3 normal_;
+    uint mesh_idx_;
+    uint instance_idx_;
+    uint tri_idx_;
+    vec2 uv_;
 };
 Hit_Info Hit_Info_ZERO;
+struct Material_Point
+{
+    vec3 color_;
+};
+Material_Point Material_Point_ZERO;
 void main();
-vec3 pathtrace(Ray start_ray, Scene scene);
-Hit_Info ray_scene_intersection(Ray ray, Scene scene);
-uint hash_u32(uint seed);
-void init_rng(uint global_id, uint accum_counter);
+vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_id_, uint sampler_);
+Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_id_);
+uint hash_u32(uint seed_);
+void init_rng(uint global_id_, uint accum_counter_);
 uint random_u32();
 float random_f32();
 vec2 random_vec2();
-float copysignf(float mag, float sgn);
-mat4 basis_fromz(vec3 v);
-vec3 sample_hemisphere_cos(vec3 normal, vec2 ruv);
-float sample_hemisphere_cos_pdf(vec3 normal, vec3 direction);
-vec3 sample_matte(vec3 color, vec3 normal, vec3 outgoing, vec2 rn);
-vec3 eval_matte(vec3 color, vec3 normal, vec3 outgoing, vec3 incoming);
-float sample_matte_pdf(vec3 color, vec3 normal, vec3 outgoing, vec3 incoming);
-bool is_finite(vec3 v);
+float copysignf(float mag_, float sgn_);
+mat4 basis_fromz(vec3 v_);
+vec3 sample_hemisphere_cos(vec3 normal_, vec2 ruv_);
+float sample_hemisphere_cos_pdf(vec3 normal_, vec3 direction_);
+Material_Point get_material_point(Scene scene_, Hit_Info hit_);
+vec3 sample_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec2 rn_);
+vec3 eval_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_);
+float sample_matte_pdf(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_);
+bool is_finite(vec3 v_);
 float pi = 3.1415;
 uint RNG_STATE;
 layout(buffer_reference, scalar) readonly buffer _res_ptr_void { uint _res_void_; };
@@ -179,6 +194,8 @@ layout(buffer_reference, scalar) readonly buffer _res_slice_Mesh { Mesh _res_[];
 _res_slice_Mesh _res_slice_Mesh_ZERO;
 layout(buffer_reference, scalar) readonly buffer _res_slice_vec4 { vec4 _res_[]; };
 _res_slice_vec4 _res_slice_vec4_ZERO;
+layout(buffer_reference, scalar) readonly buffer _res_slice_vec2 { vec2 _res_[]; };
+_res_slice_vec2 _res_slice_vec2_ZERO;
 layout(buffer_reference, scalar) readonly buffer _res_slice_uint { uint _res_[]; };
 _res_slice_uint _res_slice_uint_ZERO;
 layout(buffer_reference, scalar) readonly buffer _res_ptr_Data { Data _res_; };
@@ -204,80 +221,82 @@ void main()
     vec3 world_camera_lookat_ = vec3_ZERO;
     Ray camera_ray_ = Ray_ZERO;
     vec3 color_ = vec3_ZERO;
-    init_rng(uint(((global_invocation_id_.y * data_._res_.resolution.x) + global_invocation_id_.x)), data_._res_.accum_counter);
-    uv_ = (global_invocation_id_.xy / data_._res_.resolution);
+    init_rng(uint(((global_invocation_id_.y * data_._res_.resolution_.x) + global_invocation_id_.x)), data_._res_.accum_counter_);
+    uv_ = (global_invocation_id_.xy / data_._res_.resolution_);
     coord_ = ((2.0 * uv_) - 1.0);
     coord_ = (coord_ * tan((((90.0 * pi) / 180.0) / 2.0)));
-    coord_.y = ((coord_.y * data_._res_.resolution.y) / data_._res_.resolution.x);
-    world_camera_pos_ = (data_._res_.camera_to_world * vec4(0, 0, 0, 1)).xyz;
+    coord_.y = ((coord_.y * data_._res_.resolution_.y) / data_._res_.resolution_.x);
+    world_camera_pos_ = (data_._res_.camera_to_world_ * vec4(0, 0, 0, 1)).xyz;
     camera_lookat_ = normalize(vec3(coord_, 1));
-    world_camera_lookat_ = normalize((data_._res_.camera_to_world * vec4(camera_lookat_, 0.0))).xyz;
-    camera_ray_.ori = world_camera_pos_;
-    camera_ray_.dir = world_camera_lookat_;
-    color_ = pathtrace(camera_ray_, data_._res_.scene);
-    if(((global_invocation_id_.x < data_._res_.resolution.x) && (global_invocation_id_.y < data_._res_.resolution.y)))
+    world_camera_lookat_ = normalize((data_._res_.camera_to_world_ * vec4(camera_lookat_, 0.0))).xyz;
+    camera_ray_.ori_ = world_camera_pos_;
+    camera_ray_.dir_ = world_camera_lookat_;
+    color_ = pathtrace(camera_ray_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_);
+    if(((global_invocation_id_.x < data_._res_.resolution_.x) && (global_invocation_id_.y < data_._res_.resolution_.y)))
     {
-        if((data_._res_.accum_counter > 1))
+        vec2 output_pixel_;
+        output_pixel_ = vec2(global_invocation_id_.x, (data_._res_.resolution_.y - global_invocation_id_.y));
+        if((data_._res_.accum_counter_ > 1))
         {
             float weight_;
             vec3 prev_color_;
-            weight_ = (1.0 / float(data_._res_.accum_counter));
-            prev_color_ = imageLoad(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id)], ivec2(global_invocation_id_.xy)).xyz;
+            weight_ = (1.0 / float(data_._res_.accum_counter_));
+            prev_color_ = imageLoad(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(output_pixel_)).xyz;
             color_ = ((prev_color_ * (1 - weight_)) + (color_ * weight_));
             color_ = max(color_, vec3(0, 0, 0));
         }
 
-        imageStore(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id)], ivec2(global_invocation_id_.xy), vec4(color_, 1));
+        imageStore(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(output_pixel_), vec4(color_, 1));
     }
 
 }
 
-vec3 pathtrace(Ray start_ray_, Scene scene_)
+vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_id_, uint sampler_)
 {
     vec3 radiance_ = vec3_ZERO;
     vec3 weight_ = vec3_ZERO;
     Ray ray_ = Ray_ZERO;
-    vec3 albedo_color_ = vec3_ZERO;
     int max_bounces_ = int_ZERO;
     radiance_ = vec3(0, 0, 0);
     weight_ = vec3(1, 1, 1);
     ray_ = start_ray_;
-    albedo_color_ = vec3(0.8, 0.8, 0.8);
     max_bounces_ = 5;
     // for construct
     {
         int bounce_;
         Hit_Info hit_;
+        Material_Point mat_point_;
         vec3 outgoing_;
         vec3 incoming_;
         vec2 rnd_;
         float prob_;
         for(bounce_ = 0; (bounce_ <= max_bounces_); bounce_ = (bounce_ + 1))
         {
-            hit_ = ray_scene_intersection(ray_, scene_);
-            if((!hit_.hit))
+            hit_ = ray_scene_intersection(ray_, scene_, tlas_id_);
+            if((!hit_.hit_))
             {
                 vec2 coords_;
                 vec3 emission_;
-                coords_ = vec2((atan(ray_.dir.x, ray_.dir.z) / (2.0 * 3.1415)), (acos(clamp(ray_.dir.y, (-1.0), 1.0)) / 3.1415));
+                coords_ = vec2((atan(ray_.dir_.x, ray_.dir_.z) / (2.0 * 3.1415)), (acos(clamp(ray_.dir_.y, (-1.0), 1.0)) / 3.1415));
                 emission_ = (mix(vec3(0.8, 0.7, 0.1), vec3(0.1, 0.2, 0.8), vec3(coords_.y)) * 5.0);
-                radiance_ = (radiance_ + emission_);
+                radiance_ += (emission_ * weight_);
                 break;
             }
 
-            outgoing_ = (-ray_.dir);
+            mat_point_ = get_material_point(scene_, hit_);
+            outgoing_ = (-ray_.dir_);
             incoming_ = vec3(0, 0, 0);
             rnd_ = random_vec2();
-            incoming_ = sample_matte(albedo_color_, hit_.normal, outgoing_, rnd_);
+            incoming_ = sample_matte(mat_point_.color_, hit_.normal_, outgoing_, rnd_);
             if((incoming_ == vec3(0, 0, 0)))
             {
                 break;
             }
 
-            prob_ = sample_matte_pdf(albedo_color_, hit_.normal, outgoing_, incoming_);
-            weight_ = ((weight_ * eval_matte(albedo_color_, hit_.normal, outgoing_, incoming_)) / prob_);
-            ray_.ori = (ray_.ori + (ray_.dir * hit_.t));
-            ray_.dir = incoming_;
+            prob_ = sample_matte_pdf(mat_point_.color_, hit_.normal_, outgoing_, incoming_);
+            weight_ *= (eval_matte(mat_point_.color_, hit_.normal_, outgoing_, incoming_) / prob_);
+            ray_.ori_ = (ray_.ori_ + (ray_.dir_ * hit_.t_));
+            ray_.dir_ = incoming_;
             if(((weight_ == vec3(0, 0, 0)) || (!is_finite(weight_))))
             {
                 break;
@@ -301,7 +320,7 @@ vec3 pathtrace(Ray start_ray_, Scene scene_)
     return radiance_;
 }
 
-Hit_Info ray_scene_intersection(Ray ray_, Scene scene_)
+Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_id_)
 {
     uint Ray_Flags_Opaque_ = uint_ZERO;
     uint Ray_Flags_Terminate_On_First_Hit_ = uint_ZERO;
@@ -330,35 +349,44 @@ Hit_Info ray_scene_intersection(Ray ray_, Scene scene_)
     Ray_Result_Kind_Miss_ = 0;
     Ray_Result_Kind_Hit_Mesh_ = 1;
     Ray_Result_Kind_Hit_AABB_ = 2;
-    desc_.flags = Ray_Flags_Opaque_;
-    desc_.cull_mask = 0xFF;
-    desc_.t_min = 0.001;
-    desc_.t_max = 1000000000.0;
-    desc_.origin = ray_.ori;
-    desc_.dir = ray_.dir;
-    rayquery_init(rq_, desc_, 0);
+    desc_.flags_ = Ray_Flags_Opaque_;
+    desc_.cull_mask_ = 0xFF;
+    desc_.t_min_ = 0.001;
+    desc_.t_max_ = 1000000000.0;
+    desc_.origin_ = ray_.ori_;
+    desc_.dir_ = ray_.dir_;
+    rayquery_init(rq_, desc_, tlas_id_);
     rayquery_proceed(rq_);
     hit_ = rayquery_result(rq_);
-    if((hit_.kind != Ray_Result_Kind_Hit_Mesh_))
+    if((hit_.kind_ != Ray_Result_Kind_Hit_Mesh_))
     {
-        hit_info_.hit = false;
+        hit_info_.hit_ = false;
         return hit_info_;
     }
 
-    instance_ = scene_.instances._res_[hit_.instance_idx];
-    mesh_ = scene_.meshes._res_[instance_.mesh_idx];
-    indices_ = mesh_.indices;
-    base_idx_ = (hit_.primitive_idx * 3);
-    w_ = ((1.0 - hit_.barycentrics.x) - hit_.barycentrics.y);
-    n0_ = mesh_.normal._res_[indices_._res_[(base_idx_ + 0)]];
-    n1_ = mesh_.normal._res_[indices_._res_[(base_idx_ + 1)]];
-    n2_ = mesh_.normal._res_[indices_._res_[(base_idx_ + 2)]];
-    normal_ = normalize((((n0_ * w_) + (n1_ * hit_.barycentrics.x)) + (n2_ * hit_.barycentrics.y)));
-    world_normal_ = normalize((transpose(hit_.world_to_object) * vec4(normal_.xyz, 1)));
-    bary_ = hit_.barycentrics;
-    hit_info_.hit = true;
-    hit_info_.t = hit_.t;
-    hit_info_.normal = world_normal_.xyz;
+    instance_ = scene_.instances_._res_[hit_.instance_idx_];
+    mesh_ = scene_.meshes_._res_[instance_.mesh_idx_];
+    indices_ = mesh_.indices_;
+    base_idx_ = (hit_.primitive_idx_ * 3);
+    w_ = ((1.0 - hit_.barycentrics_.x) - hit_.barycentrics_.y);
+    n0_ = mesh_.normal_._res_[indices_._res_[(base_idx_ + 0)]];
+    n1_ = mesh_.normal_._res_[indices_._res_[(base_idx_ + 1)]];
+    n2_ = mesh_.normal_._res_[indices_._res_[(base_idx_ + 2)]];
+    normal_ = normalize((((n0_ * w_) + (n1_ * hit_.barycentrics_.x)) + (n2_ * hit_.barycentrics_.y)));
+    if(hit_.front_face_)
+    {
+        normal_ *= (-1.0);
+    }
+
+    world_normal_ = normalize((transpose(hit_.world_to_object_) * vec4(normal_.xyz, 1)));
+    bary_ = hit_.barycentrics_;
+    hit_info_.hit_ = true;
+    hit_info_.t_ = hit_.t_;
+    hit_info_.normal_ = world_normal_.xyz;
+    hit_info_.mesh_idx_ = instance_.mesh_idx_;
+    hit_info_.instance_idx_ = hit_.instance_idx_;
+    hit_info_.tri_idx_ = hit_.primitive_idx_;
+    hit_info_.uv_ = hit_.barycentrics_;
     return hit_info_;
 }
 
@@ -412,15 +440,7 @@ vec2 random_vec2()
 
 float copysignf(float mag_, float sgn_)
 {
-    if((sgn_ < 0))
-    {
-        return (-mag_);
-    }
-    else
-    {
-        return mag_;
-return mag_;    }
-
+    return ((sgn_ > 0)) ? (mag_) : ((-mag_));
 }
 
 mat4 basis_fromz(vec3 v_)
@@ -468,49 +488,55 @@ return (cosw_ / pi);    }
 
 }
 
+Material_Point get_material_point(Scene scene_, Hit_Info hit_)
+{
+    vec4 color_sample_ = vec4_ZERO;
+    Material_Point mat_point_ = Material_Point_ZERO;
+    color_sample_ = vec4(1);
+    if(true)
+    {
+        Instance instance_;
+        Mesh mesh_;
+        _res_slice_uint indices_;
+        uint base_idx_;
+        vec2 uv0_;
+        vec2 uv1_;
+        vec2 uv2_;
+        float w_;
+        vec2 texcoords_;
+        instance_ = scene_.instances_._res_[hit_.instance_idx_];
+        mesh_ = scene_.meshes_._res_[hit_.mesh_idx_];
+        indices_ = mesh_.indices_;
+        base_idx_ = (hit_.tri_idx_ * 3);
+        uv0_ = mesh_.uvs_._res_[indices_._res_[(base_idx_ + 0)]];
+        uv1_ = mesh_.uvs_._res_[indices_._res_[(base_idx_ + 1)]];
+        uv2_ = mesh_.uvs_._res_[indices_._res_[(base_idx_ + 2)]];
+        w_ = ((1.0 - hit_.uv_.x) - hit_.uv_.y);
+        texcoords_ = (((uv0_ * w_) + (uv1_ * hit_.uv_.x)) + (uv2_ * hit_.uv_.y));
+        if(true)
+        {
+            color_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(instance_.albedo_tex_)], _res_samplers_[nonuniformEXT(0)]), texcoords_);
+        }
+
+    }
+
+    mat_point_.color_ = color_sample_.rgb;
+    return mat_point_;
+}
+
 vec3 sample_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec2 rn_)
 {
-    vec3 up_normal_ = vec3_ZERO;
-    if((dot(normal_, outgoing_) > 0))
-    {
-        up_normal_ = normal_;
-    }
-    else
-    {
-        up_normal_ = (-normal_);
-up_normal_ = (-normal_);    }
-
-    return sample_hemisphere_cos(up_normal_, rn_);
+    return sample_hemisphere_cos(normal_, rn_);
 }
 
 vec3 eval_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_)
 {
-    if(((dot(normal_, incoming_) * dot(normal_, outgoing_)) <= 0))
-    {
-        return vec3(0, 0, 0);
-    }
-
     return ((color_ / pi) * abs(dot(normal_, incoming_)));
 }
 
 float sample_matte_pdf(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_)
 {
-    vec3 up_normal_ = vec3_ZERO;
-    if(((dot(normal_, incoming_) * dot(normal_, outgoing_)) <= 0))
-    {
-        return 0;
-    }
-
-    if((dot(normal_, outgoing_) > 0))
-    {
-        up_normal_ = normal_;
-    }
-    else
-    {
-        up_normal_ = (-normal_);
-up_normal_ = (-normal_);    }
-
-    return sample_hemisphere_cos_pdf(up_normal_, incoming_);
+    return sample_hemisphere_cos_pdf(normal_, incoming_);
 }
 
 bool is_finite(vec3 v_)

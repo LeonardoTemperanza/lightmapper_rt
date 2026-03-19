@@ -13,8 +13,8 @@ vec2 vec2_ZERO;
 vec3 vec3_ZERO;
 vec4 vec4_ZERO;
 mat4 mat4_ZERO;
-uint textureid_ZERO;
-uint samplerid_ZERO;
+uint texture_id_ZERO;
+uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
 layout(location = 0) out vec4 _res_out_loc0_;
@@ -25,14 +25,14 @@ layout(buffer_reference) readonly buffer _res_ptr_Data;
 
 struct Data
 {
-    uint texture_id;
-    uint sampler_id;
+    uint texture_id_;
+    uint sampler_id_;
 };
 Data Data_ZERO;
 void main();
-vec4 linear_to_srgb(vec4 color);
-vec3 filmic(vec3 x);
-vec4 hdr_to_ldr(vec4 color);
+vec4 linear_to_srgb(vec4 color_);
+vec3 filmic(vec3 x_);
+vec4 hdr_to_ldr(vec4 color_);
 layout(buffer_reference, scalar) readonly buffer _res_ptr_void { uint _res_void_; };
 layout(buffer_reference, scalar) readonly buffer _res_ptr_Data { Data _res_; };
 _res_ptr_Data _res_ptr_Data_ZERO;
@@ -53,7 +53,7 @@ void main()
     vec2 uv_ = _res_in_loc0_;
     _res_ptr_Data data_ = _res_frag_data_;
     vec4 linear_ = vec4_ZERO;
-    linear_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.texture_id)], _res_samplers_[nonuniformEXT(data_._res_.sampler_id)]), uv_);
+    linear_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.texture_id_)], _res_samplers_[nonuniformEXT(data_._res_.sampler_id_)]), uv_);
     _res_out_loc0_ = linear_to_srgb(hdr_to_ldr(max(vec4(0, 0, 0, 0), linear_)));
 }
 

@@ -13,8 +13,8 @@ vec2 vec2_ZERO;
 vec3 vec3_ZERO;
 vec4 vec4_ZERO;
 mat4 mat4_ZERO;
-uint textureid_ZERO;
-uint samplerid_ZERO;
+uint texture_id_ZERO;
+uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
 layout(location = 0) out vec2 _res_out_loc0_;
@@ -25,19 +25,19 @@ layout(buffer_reference) readonly buffer _res_ptr_Data;
 
 struct Vertex
 {
-    vec3 pos;
-    vec2 uv;
+    vec3 pos_;
+    vec2 uv_;
 };
 Vertex Vertex_ZERO;
 struct Data
 {
-    _res_slice_Vertex verts;
+    _res_slice_Vertex verts_;
 };
 Data Data_ZERO;
 struct Output
 {
-    vec4 pos;
-    vec2 uv;
+    vec4 pos_;
+    vec2 uv_;
 };
 Output Output_ZERO;
 void main();
@@ -63,8 +63,8 @@ void main()
     uint vert_id_ = gl_VertexIndex;
     _res_ptr_Data data_ = _res_vert_data_;
     Output vert_out_ = Output_ZERO;
-    vert_out_.pos = vec4(data_._res_.verts._res_[vert_id_].pos.xyz, 1.0);
-    vert_out_.uv = data_._res_.verts._res_[vert_id_].uv;
-    gl_Position = vert_out_.pos; _res_out_loc0_ = vert_out_.uv; 
+    vert_out_.pos_ = vec4(data_._res_.verts_._res_[vert_id_].pos_.xyz, 1.0);
+    vert_out_.uv_ = data_._res_.verts_._res_[vert_id_].uv_;
+    gl_Position = vert_out_.pos_; _res_out_loc0_ = vert_out_.uv_; 
 }
 

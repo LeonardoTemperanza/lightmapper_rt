@@ -1,8 +1,8 @@
 
 Data :: struct
 {
-    texture_id: textureid,
-    sampler_id: samplerid,
+    texture_id: texture_id,
+    sampler_id: sampler_id,
 }
 
 main :: (uv: vec2 @in_loc(0), data: ^Data @data) -> vec4 @out_loc(0)

@@ -13,13 +13,13 @@ vec2 vec2_ZERO;
 vec3 vec3_ZERO;
 vec4 vec4_ZERO;
 mat4 mat4_ZERO;
-uint textureid_ZERO;
-uint samplerid_ZERO;
+uint texture_id_ZERO;
+uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
 layout(location = 2) out vec4 _res_out_loc2_;
-layout(location = 0) out vec4 _res_out_loc0_;
 layout(location = 1) out vec2 _res_out_loc1_;
+layout(location = 0) out vec4 _res_out_loc0_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_slice_vec4;
@@ -28,21 +28,21 @@ layout(buffer_reference) readonly buffer _res_ptr_Data;
 
 struct Data
 {
-    _res_slice_vec4 positions;
-    _res_slice_vec4 normals;
-    _res_slice_vec2 uvs;
-    mat4 model_to_world;
-    mat4 model_to_world_normal;
-    mat4 world_to_view;
-    mat4 view_to_proj;
+    _res_slice_vec4 positions_;
+    _res_slice_vec4 normals_;
+    _res_slice_vec2 uvs_;
+    mat4 model_to_world_;
+    mat4 model_to_world_normal_;
+    mat4 world_to_view_;
+    mat4 view_to_proj_;
 };
 Data Data_ZERO;
 struct Output
 {
-    vec4 pos;
-    vec4 normal;
-    vec2 uv;
-    vec4 world_pos;
+    vec4 pos_;
+    vec4 normal_;
+    vec2 uv_;
+    vec4 world_pos_;
 };
 Output Output_ZERO;
 void main();
@@ -73,16 +73,16 @@ void main()
     vec4 world_pos_ = vec4_ZERO;
     vec4 world_normal_ = vec4_ZERO;
     Output vert_out_ = Output_ZERO;
-    clip_pos_ = vec4(data_._res_.positions._res_[vert_id_].xyz, 1.0);
-    world_pos_ = (data_._res_.model_to_world * clip_pos_);
-    clip_pos_ = (data_._res_.world_to_view * world_pos_);
-    clip_pos_ = (data_._res_.view_to_proj * clip_pos_);
+    clip_pos_ = vec4(data_._res_.positions_._res_[vert_id_].xyz, 1.0);
+    world_pos_ = (data_._res_.model_to_world_ * clip_pos_);
+    clip_pos_ = (data_._res_.world_to_view_ * world_pos_);
+    clip_pos_ = (data_._res_.view_to_proj_ * clip_pos_);
     clip_pos_.y = (0.0 - clip_pos_.y);
-    world_normal_ = (data_._res_.model_to_world_normal * data_._res_.normals._res_[vert_id_]);
-    vert_out_.pos = clip_pos_;
-    vert_out_.normal = world_normal_;
-    vert_out_.uv = data_._res_.uvs._res_[vert_id_];
-    vert_out_.world_pos = world_pos_;
-    gl_Position = vert_out_.pos; _res_out_loc0_ = vert_out_.normal; _res_out_loc1_ = vert_out_.uv; _res_out_loc2_ = vert_out_.world_pos; 
+    world_normal_ = (data_._res_.model_to_world_normal_ * data_._res_.normals_._res_[vert_id_]);
+    vert_out_.pos_ = clip_pos_;
+    vert_out_.normal_ = world_normal_;
+    vert_out_.uv_ = data_._res_.uvs_._res_[vert_id_];
+    vert_out_.world_pos_ = world_pos_;
+    gl_Position = vert_out_.pos_; _res_out_loc0_ = vert_out_.normal_; _res_out_loc1_ = vert_out_.uv_; _res_out_loc2_ = vert_out_.world_pos_; 
 }
 

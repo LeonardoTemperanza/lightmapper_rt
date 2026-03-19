@@ -16,14 +16,14 @@ Mesh :: struct
 Instance :: struct
 {
     mesh_idx: uint,
-    albedo_tex: textureid,
+    albedo_tex: texture_id,
 }
 
 Data :: struct
 {
-    output_texture_id: textureid,
+    output_texture_id: texture_id,
     tlas: bvh_id,
-    linear_sampler: samplerid,
+    linear_sampler: sampler_id,
     scene: Scene,
     resolution: vec2,
     accum_counter: uint,
@@ -47,7 +47,7 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
     camera_ray: Ray;
     camera_ray.ori = world_camera_pos;
     camera_ray.dir = world_camera_lookat;
-    color := pathtrace(camera_ray, data.scene, data.tlas);
+    color := pathtrace(camera_ray, data.scene, data.tlas, data.linear_sampler);
 
     if global_invocation_id.x < data.resolution.x && global_invocation_id.y < data.resolution.y
     {
