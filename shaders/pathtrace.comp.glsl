@@ -203,6 +203,7 @@ vec3 sample_sun_direction(vec3 sun_dir_, float angular_radius_, vec2 u_);
 float eval_sun_pdf(vec3 dir_, vec3 sun_dir_, float angular_radius_);
 vec3 sample_lights(Lights lights_, vec3 pos_, vec3 normal_, vec3 outgoing_);
 float sample_lights_pdf(Lights lights_, vec3 pos_, vec3 incoming_);
+vec3 clamp_radiance(vec3 radiance_);
 float pi = 3.1415;
 uint RNG_STATE;
 layout(buffer_reference, scalar) readonly buffer _res_ptr_void { uint _res_void_; };
@@ -249,7 +250,7 @@ void main()
     world_camera_lookat_ = normalize((data_._res_.camera_to_world_ * vec4(camera_lookat_, 0.0))).xyz;
     camera_ray_.ori_ = world_camera_pos_;
     camera_ray_.dir_ = world_camera_lookat_;
-    color_ = pathtrace(camera_ray_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_);
+    color_ = clamp_radiance(pathtrace(camera_ray_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_));
     if(((global_invocation_id_.x < data_._res_.resolution_.x) && (global_invocation_id_.y < data_._res_.resolution_.y)))
     {
         vec2 output_pixel_;
@@ -719,5 +720,24 @@ vec3 sample_lights(Lights lights_, vec3 pos_, vec3 normal_, vec3 outgoing_)
 float sample_lights_pdf(Lights lights_, vec3 pos_, vec3 incoming_)
 {
     return eval_sun_pdf(incoming_, (-lights_.dir_light_dir_), lights_.dir_light_angle_);
+}
+
+vec3 clamp_radiance(vec3 radiance_)
+{
+    vec3 res_ = vec3_ZERO;
+    float max_radiance_ = float_ZERO;
+    res_ = radiance_;
+    if((!is_finite(res_)))
+    {
+        res_ = vec3(0.0);
+    }
+
+    max_radiance_ = 100.0;
+    if((((res_.x > max_radiance_) || (res_.y > max_radiance_)) || (res_.z > max_radiance_)))
+    {
+        res_ *= (max_radiance_ / max(res_.x, max(res_.y, res_.z)));
+    }
+
+    return res_;
 }
 

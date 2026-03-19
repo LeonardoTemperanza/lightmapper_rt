@@ -55,7 +55,7 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
     camera_ray: Ray;
     camera_ray.ori = world_camera_pos;
     camera_ray.dir = world_camera_lookat;
-    color := pathtrace(camera_ray, data.scene, data.tlas, data.linear_sampler);
+    color := clamp_radiance(pathtrace(camera_ray, data.scene, data.tlas, data.linear_sampler));
 
     if global_invocation_id.x < data.resolution.x && global_invocation_id.y < data.resolution.y
     {
@@ -477,4 +477,18 @@ sample_lights :: (lights: Lights, pos: vec3, normal: vec3, outgoing: vec3) -> ve
 sample_lights_pdf :: (lights: Lights, pos: vec3, incoming: vec3) -> float
 {
     return eval_sun_pdf(incoming, -lights.dir_light_dir, lights.dir_light_angle);
+}
+
+// Hack to guard from floating point imprecision. Kind of necessary
+// when doing any form of MIS.
+clamp_radiance :: (radiance: vec3) -> vec3
+{
+    res := radiance;
+    if !is_finite(res) { res = vec3(0.0); }
+
+    max_radiance := 100.0;
+    if res.x > max_radiance || res.y > max_radiance || res.z > max_radiance {
+        res *= max_radiance / max(res.x, max(res.y, res.z));
+    }
+    return res;
 }
