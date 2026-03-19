@@ -133,9 +133,6 @@ main :: proc()
         gltf2.unload(gltf_data)
     }
 
-    scene := upload_scene(gltf_scene, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
-    defer scene_destroy(&scene)
-
     defer {
         // Clean up loaded textures
         sync.guard(&mutex)
@@ -205,6 +202,9 @@ main :: proc()
             thread.join(worker_thread)
         }
     }
+
+    scene := upload_scene(gltf_scene, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
+    defer scene_destroy(&scene)
 
     max_anisotropy := min(16.0, gpu.device_limits().max_anisotropy)
     // Lightmap samplers
@@ -354,9 +354,8 @@ main :: proc()
                     imgui.end_combo()
                 }
             }
-
-            imgui.end()
         }
+        imgui.end()
 
         if show_texture_viewer {
             gui_show_debug_texture_window("Lightmap Viewer", 0, 1024, 1024, &show_texture_viewer)
@@ -673,6 +672,7 @@ Scene_Shader :: struct
 Instance_Shader :: struct
 {
     mesh_idx: u32,
+    albedo_tex_id: u32,
 }
 
 upload_scene :: proc(scene: shared.Scene, upload_arena: ^gpu.Arena, bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> Scene_GPU
@@ -689,7 +689,10 @@ upload_scene :: proc(scene: shared.Scene, upload_arena: ^gpu.Arena, bvh_scratch_
     // Construct structures used by the shader
     instances_gpu := gpu.arena_alloc(upload_arena, Instance_Shader, len(scene.instances))
     for &instance, i in instances_gpu.cpu {
-        instance = { mesh_idx = scene.instances[i].mesh_idx }
+        instance = {
+            mesh_idx = scene.instances[i].mesh_idx,
+            albedo_tex_id = scene.meshes[scene.instances[i].mesh_idx].base_color_map,
+        }
     }
     res.instances = gpu.mem_alloc(Instance_Shader, len(scene.instances), gpu.Memory.GPU)
     gpu.cmd_mem_copy(cmd_buf, res.instances, instances_gpu, len(scene.instances))
@@ -1166,11 +1169,11 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
     draw_list   := imgui.get_window_draw_list()
 
     imgui.draw_list_push_clip_rect(draw_list, canvas_pos,
-        add_vec2(canvas_pos, canvas_size), true)
+        canvas_pos + canvas_size, true)
 
     // Background
     imgui.draw_list_add_rect_filled(draw_list, canvas_pos,
-        add_vec2(canvas_pos, canvas_size),
+        canvas_pos + canvas_size,
         rgba8_to_u32(30, 30, 30, 255))
 
     // Checkerboard pattern
@@ -1183,8 +1186,8 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
         {
             if (row + col) % 2 == 0 { continue }
 
-            p0 := add_vec2(canvas_pos, {f32(col) * checker_sz, f32(row) * checker_sz})
-            p1 := add_vec2(p0, {checker_sz, checker_sz})
+            p0 := canvas_pos + {f32(col) * checker_sz, f32(row) * checker_sz}
+            p1 := p0 + {checker_sz, checker_sz}
             imgui.draw_list_add_rect_filled(draw_list, p0, p1,
                 rgba8_to_u32(60, 60, 60, 255))
         }
@@ -1209,7 +1212,7 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
         zoom = clamp(zoom, 1.0, 64.0)
 
         // Mouse position relative to canvas origin
-        mouse_canvas := sub_vec2(io.mouse_pos, canvas_pos)
+        mouse_canvas := io.mouse_pos - canvas_pos
         // The point on the texture the mouse is over must stay fixed:
         // mouse_canvas = pan + texel_pos * zoom  (before and after)
         // So: pan_new = mouse_canvas - (mouse_canvas - pan_old) * (zoom_new / old_zoom)
@@ -1219,14 +1222,14 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
 
     // Drag
     if is_active && imgui.is_mouse_dragging(.Right, 0.0) {
-        pan = add_vec2(pan, io.mouse_delta)
+        pan = pan + io.mouse_delta
     }
 
     // Texture
     img_w := tex_width  * zoom
     img_h := tex_height * zoom
-    img_p0 := add_vec2(canvas_pos, pan)
-    img_p1 := add_vec2(img_p0, {img_w, img_h})
+    img_p0 := canvas_pos + pan
+    img_p1 := img_p0 + {img_w, img_h}
 
     // Set sampler to nearest
     imgui.draw_list_add_callback(draw_list, set_nearest_sampler_callback, nil)
@@ -1275,7 +1278,7 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
         mouse := io.mouse_pos
 
         // Map mouse from screen-space into texture pixel coords
-        rel   := sub_vec2(mouse, img_p0)
+        rel   := mouse - img_p0
         px    := int(rel.x / zoom)
         py    := int(rel.y / zoom)
 
@@ -1325,34 +1328,6 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
     imgui.draw_list_pop_clip_rect(draw_list)
 
     imgui.end()
-}
-
-// Dear imgui bindings use a struct for vectors instead of the builtin
-// [2]f32 and [3]f32 types...
-
-to_imgui_vec2 :: #force_inline proc(v: [2]f32) -> imgui.Vec2
-{
-    return { v.x, v.y }
-}
-
-from_imgui_vec2 :: #force_inline proc(v: imgui.Vec2) -> [2]f32
-{
-    return { v.x, v.y }
-}
-
-add_vec2 :: #force_inline proc(v1: imgui.Vec2, v2: imgui.Vec2) -> imgui.Vec2
-{
-    return { v1.x + v2.x, v1.y + v2.y }
-}
-
-sub_vec2 :: #force_inline proc(v1: imgui.Vec2, v2: imgui.Vec2) -> imgui.Vec2
-{
-    return { v1.x - v2.x, v1.y - v2.y }
-}
-
-mul_vec2 :: #force_inline proc(v: imgui.Vec2, f: f32) -> imgui.Vec2
-{
-    return { v.x * f, v.y * f }
 }
 
 set_nearest_sampler_callback :: proc(draw_list: ^imgui.Draw_List, cmd: ^imgui.Draw_Cmd)

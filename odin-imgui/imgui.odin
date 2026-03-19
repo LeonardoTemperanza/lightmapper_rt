@@ -1033,18 +1033,25 @@ Font_Builder_IO :: struct {}
 // Forward declarations: ImGui layer
 Context :: struct {}
 
+Vec2 :: [2]f32
+Vec4 :: [4]f32
+
+/*
 Vec2 :: struct {
 	x: f32,
 	y: f32,
 }
+*/
 
 // ImVec4: 4D vector used to store clipping rectangles, colors etc. [Compile-time configurable type]
+/*
 Vec4 :: struct {
 	x: f32,
 	y: f32,
 	z: f32,
 	w: f32,
 }
+*/
 
 // Sorting specifications for a table (often handling sort specs for a single column, occasionally more)
 // Obtained by calling TableGetSortSpecs().

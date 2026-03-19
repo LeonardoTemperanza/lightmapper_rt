@@ -16,12 +16,13 @@ Mesh :: struct
 Instance :: struct
 {
     mesh_idx: uint,
+    albedo_tex: textureid,
 }
 
 Data :: struct
 {
     output_texture_id: textureid,
-    tlas_id: bvh_id,
+    tlas: bvh_id,
     scene: Scene,
     resolution: vec2,
     accum_counter: uint,
@@ -45,7 +46,7 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
     camera_ray: Ray;
     camera_ray.ori = world_camera_pos;
     camera_ray.dir = world_camera_lookat;
-    color := pathtrace(camera_ray, data.scene, data.tlas_id);
+    color := pathtrace(camera_ray, data.scene, data.tlas);
 
     if global_invocation_id.x < data.resolution.x && global_invocation_id.y < data.resolution.y
     {
@@ -129,6 +130,7 @@ Hit_Info :: struct
     t: float,
     normal: vec3,
     mesh_idx: uint,
+    instance_idx: uint,
     tri_idx: uint,
     uv: vec2,
 }
@@ -189,6 +191,7 @@ ray_scene_intersection :: (ray: Ray, scene: Scene, tlas_id: bvh_id) -> Hit_Info
     hit_info.t = hit.t;
     hit_info.normal = world_normal.xyz;
     hit_info.mesh_idx = instance.mesh_idx;
+    hit_info.instance_idx = hit.instance_idx;
     hit_info.tri_idx = hit.primitive_idx;
     hit_info.uv = hit.barycentrics;
     return hit_info;
@@ -295,6 +298,7 @@ get_material_point :: (scene: Scene, hit: Hit_Info) -> Material_Point
     // TODO: If it has uvs...
     if true
     {
+        instance := scene.instances[hit.instance_idx];
         mesh := scene.meshes[hit.mesh_idx];
         indices := mesh.indices;
         base_idx := hit.tri_idx * 3;
@@ -307,7 +311,7 @@ get_material_point :: (scene: Scene, hit: Hit_Info) -> Material_Point
         // If it has a color texture...
         if true
         {
-            color_sample = texture_sample(0, 0, texcoords);
+            color_sample = texture_sample(instance.albedo_tex, 0, texcoords);
         }
     }
 

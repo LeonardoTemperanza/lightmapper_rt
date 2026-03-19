@@ -132,12 +132,13 @@ Mesh Mesh_ZERO;
 struct Instance
 {
     uint mesh_idx;
+    uint albedo_tex;
 };
 Instance Instance_ZERO;
 struct Data
 {
     uint output_texture_id;
-    uint tlas_id;
+    uint tlas;
     Scene scene;
     vec2 resolution;
     uint accum_counter;
@@ -156,6 +157,7 @@ struct Hit_Info
     float t;
     vec3 normal;
     uint mesh_idx;
+    uint instance_idx;
     uint tri_idx;
     vec2 uv;
 };
@@ -228,7 +230,7 @@ void main()
     world_camera_lookat_ = normalize((data_._res_.camera_to_world * vec4(camera_lookat_, 0.0))).xyz;
     camera_ray_.ori = world_camera_pos_;
     camera_ray_.dir = world_camera_lookat_;
-    color_ = pathtrace(camera_ray_, data_._res_.scene, data_._res_.tlas_id);
+    color_ = pathtrace(camera_ray_, data_._res_.scene, data_._res_.tlas);
     if(((global_invocation_id_.x < data_._res_.resolution.x) && (global_invocation_id_.y < data_._res_.resolution.y)))
     {
         vec2 output_pixel_;
@@ -381,6 +383,7 @@ Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_id_)
     hit_info_.t = hit_.t;
     hit_info_.normal = world_normal_.xyz;
     hit_info_.mesh_idx = instance_.mesh_idx;
+    hit_info_.instance_idx = hit_.instance_idx;
     hit_info_.tri_idx = hit_.primitive_idx;
     hit_info_.uv = hit_.barycentrics;
     return hit_info_;
@@ -491,6 +494,7 @@ Material_Point get_material_point(Scene scene_, Hit_Info hit_)
     color_sample_ = vec4(1);
     if(true)
     {
+        Instance instance_;
         Mesh mesh_;
         _res_slice_uint indices_;
         uint base_idx_;
@@ -499,6 +503,7 @@ Material_Point get_material_point(Scene scene_, Hit_Info hit_)
         vec2 uv2_;
         float w_;
         vec2 texcoords_;
+        instance_ = scene_.instances._res_[hit_.instance_idx];
         mesh_ = scene_.meshes._res_[hit_.mesh_idx];
         indices_ = mesh_.indices;
         base_idx_ = (hit_.tri_idx * 3);
@@ -509,7 +514,7 @@ Material_Point get_material_point(Scene scene_, Hit_Info hit_)
         texcoords_ = (((uv0_ * w_) + (uv1_ * hit_.uv.x)) + (uv2_ * hit_.uv.y));
         if(true)
         {
-            color_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(0)], _res_samplers_[nonuniformEXT(0)]), texcoords_);
+            color_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(instance_.albedo_tex)], _res_samplers_[nonuniformEXT(0)]), texcoords_);
         }
 
     }
