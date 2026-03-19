@@ -23,6 +23,7 @@ Data :: struct
 {
     output_texture_id: textureid,
     tlas: bvh_id,
+    linear_sampler: samplerid,
     scene: Scene,
     resolution: vec2,
     accum_counter: uint,
@@ -64,7 +65,7 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
     }
 }
 
-pathtrace :: (start_ray: Ray, scene: Scene, tlas_id: bvh_id) -> vec3
+pathtrace :: (start_ray: Ray, scene: Scene, tlas_id: bvh_id, sampler: sampler_id) -> vec3
 {
     radiance := vec3(0, 0, 0);
     weight := vec3(1, 1, 1);

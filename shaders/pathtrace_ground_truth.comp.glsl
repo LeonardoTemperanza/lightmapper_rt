@@ -139,6 +139,7 @@ struct Data
 {
     uint output_texture_id;
     uint tlas;
+    uint linear_sampler;
     Scene scene;
     vec2 resolution;
     uint accum_counter;

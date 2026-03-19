@@ -454,9 +454,10 @@ main :: proc()
             {
                 if pathtrace_gt_counter < max_gt_accums
                 {
-                    Compute_Data :: struct {
+                    Compute_Data :: struct #all_or_none {
                         output_texture_id: u32,
                         tlas_id: u32,
+                        linear_sampler: u32,
                         scene: Scene_Shader,
                         resolution: [2]f32,
                         accum_counter: u32,
@@ -469,6 +470,7 @@ main :: proc()
                     compute_data.cpu^ = {
                         output_texture_id = COLOR_TARGET_RW_IDX,
                         tlas_id = bvh_id,
+                        linear_sampler = sampler_linear_id,
                         scene = { instances = scene.instances.gpu.ptr, meshes = scene.meshes_shader.gpu.ptr },
                         accum_counter = pathtrace_gt_counter,
                         resolution = { f32(window_size_x), f32(window_size_y) },
@@ -480,7 +482,6 @@ main :: proc()
                     num_groups_x := (u32(window_size_x) + 8 - 1) / 8
                     num_groups_y := (u32(window_size_y) + 8 - 1) / 8
                     num_groups_z := u32(1)
-
                     gpu.cmd_dispatch(cmd_buf, compute_data.gpu, num_groups_x, num_groups_y, num_groups_z)
 
                     gpu.cmd_barrier(cmd_buf, .Compute, .Fragment_Shader, {})
