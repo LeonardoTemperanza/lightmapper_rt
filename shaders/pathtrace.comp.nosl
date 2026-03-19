@@ -3,6 +3,7 @@ Scene :: struct
 {
     instances: []Instance,
     meshes: []Mesh,
+    lights: Lights,
 }
 
 Mesh :: struct
@@ -28,6 +29,13 @@ Data :: struct
     resolution: vec2,
     accum_counter: uint,
     camera_to_world: mat4,
+}
+
+Lights :: struct
+{
+    dir_light_dir: vec3,
+    dir_light_angle: float,
+    dir_light_emission: vec3,
 }
 
 main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
@@ -77,12 +85,12 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas_id: bvh_id, sampler: sampler_id
         hit := ray_scene_intersection(ray, scene, tlas_id);
         if !hit.hit
         {
-            // Simple gradient environment map.
-            coords := vec2(atan(ray.dir.x, ray.dir.z) / (2.0 * 3.1415), acos(clamp(ray.dir.y, -1.0, 1.0)) / 3.1415);
-            emission := mix(vec3(0.8, 0.7, 0.1), vec3(0.1, 0.2, 0.8), vec3(coords.y)) * 5.0;
+            emission := sun_disk_falloff(ray.dir, -scene.lights.dir_light_dir, scene.lights.dir_light_angle) * scene.lights.dir_light_emission;
             radiance += emission * weight;
             break;
         }
+
+        hit_pos := ray.ori + ray.dir * hit.t;
 
         mat_point := get_material_point(scene, hit);
 
@@ -92,16 +100,30 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas_id: bvh_id, sampler: sampler_id
         outgoing := -ray.dir;
 
         // Compute next direction.
-        incoming := vec3(0, 0, 0);
-        rnd := random_vec2();
-        incoming = sample_matte(mat_point.color, hit.normal, outgoing, rnd);
-        if incoming == vec3(0, 0, 0) { break; }
+        incoming: vec3;
+        {
+            light_prob := 0.5;
+            bsdf_prob := 0.5;
+            if random_f32() < bsdf_prob
+            {
+                rnd0 := random_f32();
+                rnd1 := random_vec2();
+                incoming = sample_matte(mat_point.color, hit.normal, outgoing, rnd1);
+            }
+            else
+            {
+                incoming = sample_lights(scene.lights, hit_pos, hit.normal, outgoing);
+            }
 
-        prob := sample_matte_pdf(mat_point.color, hit.normal, outgoing, incoming);
-        weight *= eval_matte(mat_point.color, hit.normal, outgoing, incoming) / prob;
+            if incoming == vec3(0, 0, 0) { break; }
+
+            prob := bsdf_prob * sample_matte_pdf(mat_point.color, hit.normal, outgoing, incoming) +
+                    light_prob * sample_lights_pdf(scene.lights, hit_pos, incoming);
+            weight *= eval_matte(mat_point.color, hit.normal, outgoing, incoming) / prob;
+        }
 
         // Update ray.
-        ray.ori = ray.ori + ray.dir * hit.t;
+        ray.ori = hit_pos;
         ray.dir = incoming;
 
         // Check weight.
@@ -344,4 +366,60 @@ is_finite :: (v: vec3) -> bool
     is_y_finite := (float_bits_to_int(v.y) & 0x7F800000) != 0x7F800000;
     is_z_finite := (float_bits_to_int(v.z) & 0x7F800000) != 0x7F800000;
     return is_x_finite && is_y_finite && is_z_finite;
+}
+
+// Light sampling
+
+sun_disk_falloff :: (ray_dir: vec3, sun_dir: vec3, angular_radius: float) -> float
+{
+    cos_theta := dot(ray_dir, sun_dir);
+    cos_inner := cos(angular_radius);
+    cos_outer := cos(angular_radius * 1.5);
+    return smoothstep(cos_outer, cos_inner, cos_theta);
+}
+
+sample_sun_direction :: (sun_dir: vec3, angular_radius: float, u: vec2) -> vec3
+{
+    cos_theta_max := cos(angular_radius);
+    cos_theta := mix(1.0, cos_theta_max, u.x);
+    sin_theta := sqrt(1.0 - cos_theta * cos_theta);
+    phi := 2.0 * pi * u.y;
+
+    t: vec3; b: vec3;
+    if abs(sun_dir.z) < 0.999 {
+        t = normalize(cross(sun_dir, vec3(0.0, 0.0, 1.0)));
+    } else {
+        t = normalize(cross(sun_dir, vec3(0.0, 1.0, 0.0)));
+    }
+    b = cross(sun_dir, t);
+
+    return t * (cos(phi) * sin_theta) +
+           b * (sin(phi) * sin_theta) +
+           sun_dir * cos_theta;
+}
+
+eval_sun_pdf :: (dir: vec3, sun_dir: vec3, angular_radius: float) -> float
+{
+    cos_theta := dot(dir, sun_dir);
+    cos_max   := cos(angular_radius);
+
+    // If the direction falls outside the sun cone, the light
+    // would never have sampled it, thus PDF = 0.
+    if cos_theta < cos_max {
+        return 0;
+    }
+
+    // Otherwise constant over the disk.
+    solid_angle := 2 * pi * (1 - cos_max);
+    return 1 / solid_angle;
+}
+
+sample_lights :: (lights: Lights, pos: vec3, normal: vec3, outgoing: vec3) -> vec3
+{
+    return sample_sun_direction(-lights.dir_light_dir, lights.dir_light_angle, random_vec2());
+}
+
+sample_lights_pdf :: (lights: Lights, pos: vec3, incoming: vec3) -> float
+{
+    return eval_sun_pdf(incoming, -lights.dir_light_dir, lights.dir_light_angle);
 }

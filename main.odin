@@ -471,7 +471,15 @@ main :: proc()
                         output_texture_id = COLOR_TARGET_RW_IDX,
                         tlas_id = bvh_id,
                         linear_sampler = sampler_linear_id,
-                        scene = { instances = scene.instances.gpu.ptr, meshes = scene.meshes_shader.gpu.ptr },
+                        scene = {
+                            instances = scene.instances.gpu.ptr,
+                            meshes = scene.meshes_shader.gpu.ptr,
+                            lights = {
+                                dir_light_dir   = linalg.normalize([3]f32 { 0.2, -1.0, -0.2 }),
+                                dir_light_angle = math.RAD_PER_DEG * 0.2,
+                                dir_light_emission = [3]f32 { 2000000.0, 1840000.0, 1640000.0 },
+                            }
+                        },
                         accum_counter = pathtrace_gt_counter,
                         resolution = { f32(window_size_x), f32(window_size_y) },
                         camera_to_world = intr.matrix_flatten(camera_to_world),
@@ -668,6 +676,14 @@ Scene_Shader :: struct
 {
     instances: rawptr,
     meshes: rawptr,
+    lights: Lights_Shader,
+}
+
+Lights_Shader :: struct
+{
+    dir_light_dir: [3]f32,
+    dir_light_angle: f32,
+    dir_light_emission: [3]f32,
 }
 
 Instance_Shader :: struct

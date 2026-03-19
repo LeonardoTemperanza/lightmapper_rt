@@ -115,10 +115,19 @@ layout(buffer_reference) readonly buffer _res_slice_vec2;
 layout(buffer_reference) readonly buffer _res_slice_uint;
 layout(buffer_reference) readonly buffer _res_ptr_Data;
 
+struct Lights
+{
+    vec3 dir_light_dir_;
+    float dir_light_angle_;
+    vec3 dir_light_emission_;
+};
+Lights Lights_ZERO;
 struct Scene
 {
     _res_slice_Instance instances_;
     _res_slice_Mesh meshes_;
+    Lights lights_;
+    uint _res_padding_0;
 };
 Scene Scene_ZERO;
 struct Mesh
@@ -140,10 +149,12 @@ struct Data
     uint output_texture_id_;
     uint tlas_;
     uint linear_sampler_;
+    uint _res_padding_0;
     Scene scene_;
     vec2 resolution_;
     uint accum_counter_;
     mat4 camera_to_world_;
+    uint _res_padding_1;
 };
 Data Data_ZERO;
 struct Ray
@@ -185,6 +196,11 @@ vec3 sample_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec2 rn_);
 vec3 eval_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_);
 float sample_matte_pdf(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_);
 bool is_finite(vec3 v_);
+float sun_disk_falloff(vec3 ray_dir_, vec3 sun_dir_, float angular_radius_);
+vec3 sample_sun_direction(vec3 sun_dir_, float angular_radius_, vec2 u_);
+float eval_sun_pdf(vec3 dir_, vec3 sun_dir_, float angular_radius_);
+vec3 sample_lights(Lights lights_, vec3 pos_, vec3 normal_, vec3 outgoing_);
+float sample_lights_pdf(Lights lights_, vec3 pos_, vec3 incoming_);
 float pi = 3.1415;
 uint RNG_STATE;
 layout(buffer_reference, scalar) readonly buffer _res_ptr_void { uint _res_void_; };
@@ -265,37 +281,53 @@ vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_id_, uint sampler_)
     {
         int bounce_;
         Hit_Info hit_;
+        vec3 hit_pos_;
         Material_Point mat_point_;
         vec3 outgoing_;
         vec3 incoming_;
-        vec2 rnd_;
-        float prob_;
         for(bounce_ = 0; (bounce_ <= max_bounces_); bounce_ = (bounce_ + 1))
         {
             hit_ = ray_scene_intersection(ray_, scene_, tlas_id_);
             if((!hit_.hit_))
             {
-                vec2 coords_;
                 vec3 emission_;
-                coords_ = vec2((atan(ray_.dir_.x, ray_.dir_.z) / (2.0 * 3.1415)), (acos(clamp(ray_.dir_.y, (-1.0), 1.0)) / 3.1415));
-                emission_ = (mix(vec3(0.8, 0.7, 0.1), vec3(0.1, 0.2, 0.8), vec3(coords_.y)) * 5.0);
+                emission_ = (sun_disk_falloff(ray_.dir_, (-scene_.lights_.dir_light_dir_), scene_.lights_.dir_light_angle_) * scene_.lights_.dir_light_emission_);
                 radiance_ += (emission_ * weight_);
                 break;
             }
 
+            hit_pos_ = (ray_.ori_ + (ray_.dir_ * hit_.t_));
             mat_point_ = get_material_point(scene_, hit_);
             outgoing_ = (-ray_.dir_);
-            incoming_ = vec3(0, 0, 0);
-            rnd_ = random_vec2();
-            incoming_ = sample_matte(mat_point_.color_, hit_.normal_, outgoing_, rnd_);
-            if((incoming_ == vec3(0, 0, 0)))
             {
-                break;
+                float light_prob_;
+                float bsdf_prob_;
+                float prob_;
+                light_prob_ = 0.5;
+                bsdf_prob_ = 0.5;
+                if((random_f32() < bsdf_prob_))
+                {
+                    float rnd0_;
+                    vec2 rnd1_;
+                    rnd0_ = random_f32();
+                    rnd1_ = random_vec2();
+                    incoming_ = sample_matte(mat_point_.color_, hit_.normal_, outgoing_, rnd1_);
+                }
+                else
+                {
+                    incoming_ = sample_lights(scene_.lights_, hit_pos_, hit_.normal_, outgoing_);
+incoming_ = sample_lights(scene_.lights_, hit_pos_, hit_.normal_, outgoing_);                }
+
+                if((incoming_ == vec3(0, 0, 0)))
+                {
+                    break;
+                }
+
+                prob_ = ((bsdf_prob_ * sample_matte_pdf(mat_point_.color_, hit_.normal_, outgoing_, incoming_)) + (light_prob_ * sample_lights_pdf(scene_.lights_, hit_pos_, incoming_)));
+                weight_ *= (eval_matte(mat_point_.color_, hit_.normal_, outgoing_, incoming_) / prob_);
             }
 
-            prob_ = sample_matte_pdf(mat_point_.color_, hit_.normal_, outgoing_, incoming_);
-            weight_ *= (eval_matte(mat_point_.color_, hit_.normal_, outgoing_, incoming_) / prob_);
-            ray_.ori_ = (ray_.ori_ + (ray_.dir_ * hit_.t_));
+            ray_.ori_ = hit_pos_;
             ray_.dir_ = incoming_;
             if(((weight_ == vec3(0, 0, 0)) || (!is_finite(weight_))))
             {
@@ -548,5 +580,67 @@ bool is_finite(vec3 v_)
     is_y_finite_ = ((floatBitsToInt(v_.y) & 0x7F800000) != 0x7F800000);
     is_z_finite_ = ((floatBitsToInt(v_.z) & 0x7F800000) != 0x7F800000);
     return ((is_x_finite_ && is_y_finite_) && is_z_finite_);
+}
+
+float sun_disk_falloff(vec3 ray_dir_, vec3 sun_dir_, float angular_radius_)
+{
+    float cos_theta_ = float_ZERO;
+    float cos_inner_ = float_ZERO;
+    float cos_outer_ = float_ZERO;
+    cos_theta_ = dot(ray_dir_, sun_dir_);
+    cos_inner_ = cos(angular_radius_);
+    cos_outer_ = cos((angular_radius_ * 1.5));
+    return smoothstep(cos_outer_, cos_inner_, cos_theta_);
+}
+
+vec3 sample_sun_direction(vec3 sun_dir_, float angular_radius_, vec2 u_)
+{
+    float cos_theta_max_ = float_ZERO;
+    float cos_theta_ = float_ZERO;
+    float sin_theta_ = float_ZERO;
+    float phi_ = float_ZERO;
+    vec3 t_ = vec3_ZERO;
+    vec3 b_ = vec3_ZERO;
+    cos_theta_max_ = cos(angular_radius_);
+    cos_theta_ = mix(1.0, cos_theta_max_, u_.x);
+    sin_theta_ = sqrt((1.0 - (cos_theta_ * cos_theta_)));
+    phi_ = ((2.0 * pi) * u_.y);
+    if((abs(sun_dir_.z) < 0.999))
+    {
+        t_ = normalize(cross(sun_dir_, vec3(0.0, 0.0, 1.0)));
+    }
+    else
+    {
+        t_ = normalize(cross(sun_dir_, vec3(0.0, 1.0, 0.0)));
+t_ = normalize(cross(sun_dir_, vec3(0.0, 1.0, 0.0)));    }
+
+    b_ = cross(sun_dir_, t_);
+    return (((t_ * (cos(phi_) * sin_theta_)) + (b_ * (sin(phi_) * sin_theta_))) + (sun_dir_ * cos_theta_));
+}
+
+float eval_sun_pdf(vec3 dir_, vec3 sun_dir_, float angular_radius_)
+{
+    float cos_theta_ = float_ZERO;
+    float cos_max_ = float_ZERO;
+    float solid_angle_ = float_ZERO;
+    cos_theta_ = dot(dir_, sun_dir_);
+    cos_max_ = cos(angular_radius_);
+    if((cos_theta_ < cos_max_))
+    {
+        return 0;
+    }
+
+    solid_angle_ = ((2 * pi) * (1 - cos_max_));
+    return (1 / solid_angle_);
+}
+
+vec3 sample_lights(Lights lights_, vec3 pos_, vec3 normal_, vec3 outgoing_)
+{
+    return sample_sun_direction((-lights_.dir_light_dir_), lights_.dir_light_angle_, random_vec2());
+}
+
+float sample_lights_pdf(Lights lights_, vec3 pos_, vec3 incoming_)
+{
+    return eval_sun_pdf(incoming_, (-lights_.dir_light_dir_), lights_.dir_light_angle_);
 }
 

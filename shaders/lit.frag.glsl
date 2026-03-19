@@ -19,8 +19,8 @@ uint bvh_id_ZERO;
 
 layout(location = 0) out vec4 _res_out_loc0_;
 layout(location = 2) in vec4 _res_in_loc2_;
-layout(location = 1) in vec2 _res_in_loc1_;
 layout(location = 0) in vec4 _res_in_loc0_;
+layout(location = 1) in vec2 _res_in_loc1_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_ptr_Data;
