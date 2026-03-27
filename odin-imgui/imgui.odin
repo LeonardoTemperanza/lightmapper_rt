@@ -1020,11 +1020,11 @@ Wchar32 :: u32
 Wchar16 :: u16
 Wchar :: Wchar32
 Selection_User_Data :: i64
-Input_Text_Callback :: #type proc(data: ^Input_Text_Callback_Data) -> i32
-Size_Callback :: #type proc(data: ^Size_Callback_Data)
-Mem_Alloc_Func :: #type proc(sz: uint, user_data: rawptr) -> rawptr
-Mem_Free_Func :: #type proc(ptr: rawptr, user_data: rawptr)
-Draw_Callback :: #type proc(parent_list: ^Draw_List, cmd: ^Draw_Cmd)
+Input_Text_Callback :: #type proc "c"(data: ^Input_Text_Callback_Data) -> i32
+Size_Callback :: #type proc "c"(data: ^Size_Callback_Data)
+Mem_Alloc_Func :: #type proc "c"(sz: uint, user_data: rawptr) -> rawptr
+Mem_Free_Func :: #type proc "c"(ptr: rawptr, user_data: rawptr)
+Draw_Callback :: #type proc "c"(parent_list: ^Draw_List, cmd: ^Draw_Cmd)
 
 Draw_List_Shared_Data :: struct {}
 

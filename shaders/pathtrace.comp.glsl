@@ -110,7 +110,7 @@ uint bvh_id_ZERO;
 layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_slice_Instance;
 layout(buffer_reference) readonly buffer _res_slice_Mesh;
-layout(buffer_reference) readonly buffer _res_slice_vec4;
+layout(buffer_reference) readonly buffer _res_slice_vec3;
 layout(buffer_reference) readonly buffer _res_slice_vec2;
 layout(buffer_reference) readonly buffer _res_slice_uint;
 layout(buffer_reference) readonly buffer _res_ptr_Data;
@@ -132,8 +132,8 @@ struct Scene
 Scene Scene_ZERO;
 struct Mesh
 {
-    _res_slice_vec4 pos_;
-    _res_slice_vec4 normal_;
+    _res_slice_vec3 pos_;
+    _res_slice_vec3 normal_;
     _res_slice_vec2 uvs_;
     _res_slice_uint indices_;
 };
@@ -203,6 +203,7 @@ vec3 sample_sun_direction(vec3 sun_dir_, float angular_radius_, vec2 u_);
 float eval_sun_pdf(vec3 dir_, vec3 sun_dir_, float angular_radius_);
 vec3 sample_lights(Lights lights_, vec3 pos_, vec3 normal_, vec3 outgoing_);
 float sample_lights_pdf(Lights lights_, vec3 pos_, vec3 incoming_);
+vec3 sample_sky_emission(vec3 dir_, Scene scene_);
 vec3 clamp_radiance(vec3 radiance_);
 float pi = 3.1415;
 uint RNG_STATE;
@@ -211,8 +212,8 @@ layout(buffer_reference, scalar) readonly buffer _res_slice_Instance { Instance 
 _res_slice_Instance _res_slice_Instance_ZERO;
 layout(buffer_reference, scalar) readonly buffer _res_slice_Mesh { Mesh _res_[]; };
 _res_slice_Mesh _res_slice_Mesh_ZERO;
-layout(buffer_reference, scalar) readonly buffer _res_slice_vec4 { vec4 _res_[]; };
-_res_slice_vec4 _res_slice_vec4_ZERO;
+layout(buffer_reference, scalar) readonly buffer _res_slice_vec3 { vec3 _res_[]; };
+_res_slice_vec3 _res_slice_vec3_ZERO;
 layout(buffer_reference, scalar) readonly buffer _res_slice_vec2 { vec2 _res_[]; };
 _res_slice_vec2 _res_slice_vec2_ZERO;
 layout(buffer_reference, scalar) readonly buffer _res_slice_uint { uint _res_[]; };
@@ -294,7 +295,7 @@ vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_, uint sampler_)
             if((!hit_.hit_))
             {
                 vec3 emission_;
-                emission_ = (sun_disk_falloff(ray_.dir_, (-scene_.lights_.dir_light_dir_), scene_.lights_.dir_light_angle_) * scene_.lights_.dir_light_emission_);
+                emission_ = sample_sky_emission(ray_.dir_, scene_);
                 radiance_ += (emission_ * weight_);
                 break;
             }
@@ -372,10 +373,10 @@ Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_)
     _res_slice_uint indices_ = _res_slice_uint_ZERO;
     uint base_idx_ = uint_ZERO;
     float w_ = float_ZERO;
-    vec4 n0_ = vec4_ZERO;
-    vec4 n1_ = vec4_ZERO;
-    vec4 n2_ = vec4_ZERO;
-    vec4 normal_ = vec4_ZERO;
+    vec3 n0_ = vec3_ZERO;
+    vec3 n1_ = vec3_ZERO;
+    vec3 n2_ = vec3_ZERO;
+    vec3 normal_ = vec3_ZERO;
     vec4 world_normal_ = vec4_ZERO;
     vec2 bary_ = vec2_ZERO;
     Ray_Flags_Opaque_ = 1;
@@ -720,6 +721,14 @@ vec3 sample_lights(Lights lights_, vec3 pos_, vec3 normal_, vec3 outgoing_)
 float sample_lights_pdf(Lights lights_, vec3 pos_, vec3 incoming_)
 {
     return eval_sun_pdf(incoming_, (-lights_.dir_light_dir_), lights_.dir_light_angle_);
+}
+
+vec3 sample_sky_emission(vec3 dir_, Scene scene_)
+{
+    vec3 emission_ = vec3_ZERO;
+    emission_ = (sun_disk_falloff(dir_, (-scene_.lights_.dir_light_dir_), scene_.lights_.dir_light_angle_) * scene_.lights_.dir_light_emission_);
+    emission_ += vec3(0.67, 0.76, 1.00);
+    return emission_;
 }
 
 vec3 clamp_radiance(vec3 radiance_)

@@ -8,8 +8,8 @@ Scene :: struct
 
 Mesh :: struct
 {
-    pos: []vec4,
-    normal: []vec4,
+    pos: []vec3,
+    normal: []vec3,
     uvs: []vec2,
     indices: []uint,
 }
@@ -85,7 +85,7 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -
         hit := ray_skip_alpha_stochastically(ray, scene, tlas);
         if !hit.hit
         {
-            emission := sun_disk_falloff(ray.dir, -scene.lights.dir_light_dir, scene.lights.dir_light_angle) * scene.lights.dir_light_emission;
+            emission := sample_sky_emission(ray.dir, scene);
             radiance += emission * weight;
             break;
         }
@@ -477,6 +477,16 @@ sample_lights :: (lights: Lights, pos: vec3, normal: vec3, outgoing: vec3) -> ve
 sample_lights_pdf :: (lights: Lights, pos: vec3, incoming: vec3) -> float
 {
     return eval_sun_pdf(incoming, -lights.dir_light_dir, lights.dir_light_angle);
+}
+
+sample_sky_emission :: (dir: vec3, scene: Scene) -> vec3
+{
+    // Sun
+    emission := sun_disk_falloff(dir, -scene.lights.dir_light_dir, scene.lights.dir_light_angle) * scene.lights.dir_light_emission;
+
+    // Sky
+    emission += vec3(0.67, 0.76, 1.00);
+    return emission;
 }
 
 // Hack to guard from floating point imprecision. Kind of necessary

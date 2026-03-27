@@ -5,7 +5,6 @@ package imgui_impl_nogfx
 
 import "base:runtime"
 import "core:slice"
-import "core:fmt"
 
 import im "../"
 import "../../no_gfx_api/gpu"
@@ -64,6 +63,8 @@ Render_State :: struct
 
 init :: proc(init_info: Init_Info, desc_pool: ^gpu.Descriptor_Pool) -> bool
 {
+    assert(init_info.frames_in_flight <= MAX_FRAMES_IN_FLIGHT, "Exceeded max limit for frames in flight.")
+
     io := im.get_io()
     im.CHECKVERSION()
     assert(io.backend_renderer_user_data == nil, "Already initialized a renderer backend!")

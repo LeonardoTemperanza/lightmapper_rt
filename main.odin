@@ -24,6 +24,7 @@ import gltf2 "shared/gltf2"
 
 import vk "vendor:vulkan"
 import "no_gfx_api/gpu"
+import xa "../xatlas_odin"
 
 import imgui "odin-imgui"
 import imgui_impl_sdl3 "odin-imgui/imgui_impl_sdl3"
@@ -43,7 +44,10 @@ Loader_Chunk_Size :: 16
 
 // Index used for the color target texture
 COLOR_TARGET_IDX: u32 = 0
-COLOR_TARGET_RW_IDX: u32 = 0
+POSTPROCESS_TARGET_IDX: u32 = 0
+POSTPROCESS_TARGET_RW_IDX: u32 = 0
+
+LM_SIZE :: 4096
 
 // Textures can be loaded/unloaded on different threads, so we need to synchronize access to loaded_textures, image_to_texture and image_uploaded
 mutex: sync.Mutex
@@ -98,6 +102,13 @@ main :: proc()
         gpu.shader_destroy(frag_shader_lit)
     }
 
+    vert_shader_uv_debug_viz := gpu.shader_create(#load("shaders/uv_debug_viz.vert.spv", []u32), .Vertex)
+    frag_shader_uv_debug_viz := gpu.shader_create(#load("shaders/uv_debug_viz.frag.spv", []u32), .Fragment)
+    defer {
+        gpu.shader_destroy(vert_shader_uv_debug_viz)
+        gpu.shader_destroy(frag_shader_uv_debug_viz)
+    }
+
     vert_shader_tonemap := gpu.shader_create(#load("shaders/tonemap.vert.spv", []u32), .Vertex)
     frag_shader_tonemap := gpu.shader_create(#load("shaders/tonemap.frag.spv", []u32), .Fragment)
     defer {
@@ -132,6 +143,8 @@ main :: proc()
         shared.destroy_scene(&gltf_scene)
         gltf2.unload(gltf_data)
     }
+    lm_uvs := generate_lm_uvs(&gltf_scene)
+    defer destroy_lm_uvs(&lm_uvs)
 
     defer {
         // Clean up loaded textures
@@ -203,7 +216,10 @@ main :: proc()
         }
     }
 
-    scene := upload_scene(gltf_scene, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
+    lm_ctx := lm.init(&desc_pool)
+    defer lm.cleanup(&lm_ctx)
+
+    scene := upload_scene(gltf_scene, &lm_ctx, lm_uvs, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
     defer scene_destroy(&scene)
 
     max_anisotropy := min(16.0, gpu.device_limits().max_anisotropy)
@@ -212,16 +228,42 @@ main :: proc()
     sampler_point_id   := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ min_filter = .Nearest, mag_filter = .Nearest, mip_filter = .Nearest }))
     sampler_current_id := sampler_linear_id
 
-    bvh_id := gpu.desc_pool_alloc_bvh(&desc_pool, gpu.bvh_descriptor(scene.bvh))
+    //bvh_id := gpu.desc_pool_alloc_bvh(&desc_pool, gpu.bvh_descriptor(scene.bvh))
+    bvh_id := u32(0)
 
-    color_target, depth_target := create_target_textures(u32(window_size_x), u32(window_size_y), &desc_pool)
+    color_target, postprocess_target, depth_target := create_target_textures(u32(window_size_x), u32(window_size_y), &desc_pool)
     defer {
         gpu.texture_free_and_destroy(&color_target)
+        gpu.texture_free_and_destroy(&postprocess_target)
         gpu.texture_free_and_destroy(&depth_target)
     }
 
-    gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
+    gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All)
     gpu.queue_submit(.Main, {upload_cmd_buf})
+
+    bake: lm.Bake
+    {
+        lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
+        for &lm_instance, i in lm_instances
+        {
+            instance := gltf_scene.instances[i]
+            mesh := scene.meshes[gltf_scene.instances[i].mesh_idx]
+            gltf_mesh := gltf_scene.meshes[gltf_scene.instances[i].mesh_idx]
+            lm_instance = lm.Instance {
+                mesh_handle = mesh.lm_mesh_handle,
+                lm_uvs_handle = mesh.lm_uv_handle,
+                transform = instance.transform,
+                lm_uvs_offset = 0,
+                lm_uvs_scale = { 1.0, 1.0 },
+                albedo_tex_id = gltf_mesh.base_color_map,
+                albedo = { 1.0, 1.0, 1.0 },
+            }
+        }
+        bake = lm.bake_begin(&lm_ctx, LM_SIZE, lm_instances)
+    }
+    defer lm.bake_destroy(&bake)
+
+    gbuf_color_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_get_gbuffer_world_pos(&bake), {}))
 
     imgui_ctx := init_dear_imgui(window, &desc_pool)
     defer {
@@ -229,8 +271,6 @@ main :: proc()
         imgui_impl_sdl3.shutdown()
         imgui.destroy_context(imgui_ctx)
     }
-
-    // lm.bake_begin(4096)
 
     now_ts := sdl.GetPerformanceCounter()
 
@@ -268,8 +308,9 @@ main :: proc()
             gpu.swapchain_resize({u32(max(0, window_size_x)), u32(max(0, window_size_y))})
 
             gpu.texture_free_and_destroy(&color_target)
+            gpu.texture_free_and_destroy(&postprocess_target)
             gpu.texture_free_and_destroy(&depth_target)
-            color_target, depth_target = create_target_textures(u32(window_size_x), u32(window_size_y), &desc_pool)
+            color_target, postprocess_target, depth_target = create_target_textures(u32(window_size_x), u32(window_size_y), &desc_pool)
         }
 
         if shared.INPUT.pressing_right_click do pathtrace_gt_counter = 0
@@ -354,14 +395,13 @@ main :: proc()
                     imgui.end_combo()
                 }
             }
+
+            // Scene info
+            {
+                imgui.label_text("Scene Info", "Instances: %d, Meshes: %d", len(gltf_scene.instances), len(gltf_scene.meshes))
+            }
         }
         imgui.end()
-
-        if show_texture_viewer {
-            gui_show_debug_texture_window("Lightmap Viewer", 0, 1024, 1024, &show_texture_viewer)
-        }
-
-        imgui.render()
 
         swapchain := gpu.swapchain_acquire_next() // Blocks CPU until at least one frame is available.
 
@@ -380,6 +420,27 @@ main :: proc()
 
         gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
 
+        if show_texture_viewer
+        {
+            draw_calls := make([dynamic]UV_Mesh_Draw_Call, allocator = context.temp_allocator)
+            for mesh, mesh_idx in scene.meshes {
+                append(&draw_calls, UV_Mesh_Draw_Call {
+                    vert_shader = vert_shader_uv_debug_viz,
+                    frag_shader = frag_shader_uv_debug_viz,
+                    cmd_buf = cmd_buf,
+                    staging_arena = frame_arena,
+                    verts = scene.lm_uvs[mesh_idx],
+                    indices = scene.meshes[mesh_idx].indices,
+                    offset = {},
+                    scale = {},
+                })
+            }
+
+            gui_show_debug_texture_window("Lightmap Viewer", gbuf_color_id, LM_SIZE, LM_SIZE, gltf_scene, draw_calls[:], &show_texture_viewer)
+        }
+
+        imgui.render()
+
         switch output_type
         {
             case .Rasterized:
@@ -388,11 +449,18 @@ main :: proc()
 
                 gpu.cmd_begin_render_pass(cmd_buf, {
                     color_attachments = {
-                        { texture = color_target, clear_color = {0.0, 0.0, 0.0, 1.0} },
+                        {
+                            texture = color_target,
+                            resolve_texture = postprocess_target,
+                            clear_color = {0.0, 0.0, 0.0, 1.0},
+                            store_op = .Resolve_And_Store
+                        },
                     },
                     depth_attachment = gpu.Render_Attachment { texture = depth_target, clear_color = 1.0 },
                 })
                 gpu.cmd_set_shaders(cmd_buf, vert_shader_lit, frag_shader_lit)
+
+                gpu.cmd_set_raster_state(cmd_buf, { alpha_to_coverage = true })
 
                 // Set texture and sampler heaps
                 gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
@@ -454,45 +522,8 @@ main :: proc()
             {
                 if pathtrace_gt_counter < max_gt_accums
                 {
-                    Compute_Data :: struct #all_or_none {
-                        output_texture_id: u32,
-                        tlas_id: u32,
-                        linear_sampler: u32,
-                        scene: Scene_Shader,
-                        resolution: [2]f32,
-                        accum_counter: u32,
-                        camera_to_world: [16]f32,
-                    }
-
-                    camera_to_world := linalg.inverse(world_to_view)
-
-                    compute_data := gpu.arena_alloc(frame_arena, Compute_Data)
-                    compute_data.cpu^ = {
-                        output_texture_id = COLOR_TARGET_RW_IDX,
-                        tlas_id = bvh_id,
-                        linear_sampler = sampler_linear_id,
-                        scene = {
-                            instances = scene.instances.gpu.ptr,
-                            meshes = scene.meshes_shader.gpu.ptr,
-                            lights = {
-                                dir_light_dir   = linalg.normalize([3]f32 { 0.2, -1.0, -0.2 }),
-                                dir_light_angle = math.RAD_PER_DEG * 0.2,
-                                dir_light_emission = [3]f32 { 2000000.0, 1840000.0, 1640000.0 },
-                            }
-                        },
-                        accum_counter = pathtrace_gt_counter,
-                        resolution = { f32(window_size_x), f32(window_size_y) },
-                        camera_to_world = intr.matrix_flatten(camera_to_world),
-                    }
-
-                    gpu.cmd_set_compute_shader(cmd_buf, pathtrace_shader)
-
-                    num_groups_x := (u32(window_size_x) + 8 - 1) / 8
-                    num_groups_y := (u32(window_size_y) + 8 - 1) / 8
-                    num_groups_z := u32(1)
-                    gpu.cmd_dispatch(cmd_buf, compute_data.gpu, num_groups_x, num_groups_y, num_groups_z)
-
-                    gpu.cmd_barrier(cmd_buf, .Compute, .Fragment_Shader, {})
+                    gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
+                    lm.bake_debug_ground_truth(&bake, cmd_buf, frame_arena, linalg.inverse(world_to_view), POSTPROCESS_TARGET_RW_IDX, sampler_linear_id, { f32(window_size_x), f32(window_size_y) })
 
                     pathtrace_gt_counter += 1
                 }
@@ -527,7 +558,7 @@ main :: proc()
             }
             frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
             frag_data.cpu^ = {
-                texture_id = COLOR_TARGET_IDX,
+                texture_id = POSTPROCESS_TARGET_IDX,
                 sampler_id = sampler_linear_id,
             }
 
@@ -536,9 +567,7 @@ main :: proc()
 
             // Render ImGui on top
             draw_data := imgui.get_draw_data()
-            if draw_data != nil && draw_data.cmd_lists_count > 0 {
-                imgui_impl_nogfx.render_draw_data(draw_data, cmd_buf)
-            }
+            imgui_impl_nogfx.render_draw_data(draw_data, cmd_buf)
 
             gpu.cmd_end_render_pass(cmd_buf)
         }
@@ -548,6 +577,8 @@ main :: proc()
 
         gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
+
+        free_all(context.temp_allocator)
     }
 
     gpu.wait_idle()
@@ -555,13 +586,15 @@ main :: proc()
 
 Mesh_GPU :: struct
 {
-    pos: gpu.slice_t([4]f32),
-    normals: gpu.slice_t([4]f32),
+    pos: gpu.slice_t([3]f32),
+    normals: gpu.slice_t([3]f32),
     uvs: gpu.slice_t([2]f32),
     indices: gpu.slice_t(u32),
     idx_count: u32,
     vert_count: u32,
-    bvh: gpu.Owned_BVH,
+    // bvh: gpu.Owned_BVH,
+    lm_mesh_handle: lm.Mesh_Handle,
+    lm_uv_handle: lm.Lightmap_UV_Handle,
 }
 
 Mesh_Shader :: struct
@@ -577,8 +610,8 @@ upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh:
     assert(len(mesh.pos) == len(mesh.normals))
     assert(len(mesh.pos) == len(mesh.uvs))
 
-    positions_staging := gpu.arena_alloc(upload_arena, [4]f32, len(mesh.pos))
-    normals_staging := gpu.arena_alloc(upload_arena, [4]f32, len(mesh.normals))
+    positions_staging := gpu.arena_alloc(upload_arena, [3]f32, len(mesh.pos))
+    normals_staging := gpu.arena_alloc(upload_arena, [3]f32, len(mesh.normals))
     uvs_staging := gpu.arena_alloc(upload_arena, [2]f32, len(mesh.uvs))
     indices_staging := gpu.arena_alloc(upload_arena, u32, len(mesh.indices))
     copy(positions_staging.cpu, mesh.pos[:])
@@ -587,8 +620,8 @@ upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh:
     copy(indices_staging.cpu, mesh.indices[:])
 
     res: Mesh_GPU
-    res.pos = gpu.mem_alloc([4]f32, len(mesh.pos), mem_type = gpu.Memory.GPU)
-    res.normals = gpu.mem_alloc([4]f32, len(mesh.normals), mem_type = gpu.Memory.GPU)
+    res.pos = gpu.mem_alloc([3]f32, len(mesh.pos), mem_type = gpu.Memory.GPU)
+    res.normals = gpu.mem_alloc([3]f32, len(mesh.normals), mem_type = gpu.Memory.GPU)
     res.uvs = gpu.mem_alloc([2]f32, len(mesh.uvs), mem_type = gpu.Memory.GPU)
     res.indices = gpu.mem_alloc(u32, len(mesh.indices), mem_type = gpu.Memory.GPU)
     gpu.cmd_mem_copy(cmd_buf, res.pos, positions_staging, len(mesh.pos))
@@ -603,7 +636,7 @@ upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh:
 
 mesh_destroy :: proc(mesh: ^Mesh_GPU)
 {
-    gpu.bvh_free_and_destroy(&mesh.bvh)
+    // gpu.bvh_free_and_destroy(&mesh.bvh)
     gpu.mem_free(mesh.pos)
     gpu.mem_free(mesh.normals)
     gpu.mem_free(mesh.uvs)
@@ -643,6 +676,7 @@ build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, i
     return bvh
 }
 
+/*
 upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: []shared.Instance, meshes: []Mesh_GPU) -> gpu.slice_t(gpu.BVH_Instance)
 {
     instances_staging := gpu.arena_alloc(upload_arena, gpu.BVH_Instance, len(instances))
@@ -660,12 +694,14 @@ upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
     gpu.cmd_mem_copy(cmd_buf, instances_local, instances_staging, len(instances_staging.cpu))
     return instances_local
 }
+*/
 
 Scene_GPU :: struct
 {
-    bvh: gpu.Owned_BVH,
+    // bvh: gpu.Owned_BVH,
     meshes: [dynamic]Mesh_GPU,
     instances_bvh: gpu.slice_t(gpu.BVH_Instance),
+    lm_uvs: [dynamic]gpu.slice_t([2]f32),
 
     // Shader view
     instances: gpu.slice_t(Instance_Shader),
@@ -692,7 +728,7 @@ Instance_Shader :: struct
     albedo_tex_id: u32,
 }
 
-upload_scene :: proc(scene: shared.Scene, upload_arena: ^gpu.Arena, bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> Scene_GPU
+upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]Lightmap_UVs, upload_arena: ^gpu.Arena, bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> Scene_GPU
 {
     res: Scene_GPU
 
@@ -714,6 +750,16 @@ upload_scene :: proc(scene: shared.Scene, upload_arena: ^gpu.Arena, bvh_scratch_
     res.instances = gpu.mem_alloc(Instance_Shader, len(scene.instances), gpu.Memory.GPU)
     gpu.cmd_mem_copy(cmd_buf, res.instances, instances_gpu, len(scene.instances))
 
+    for uvs in lm_uvs
+    {
+        uvs_staging := gpu.arena_alloc(upload_arena, [2]f32, len(uvs.uvs))
+        copy(uvs_staging.cpu, uvs.uvs[:])
+
+        uvs_gpu := gpu.mem_alloc([2]f32, len(uvs.uvs), gpu.Memory.GPU)
+        gpu.cmd_mem_copy(cmd_buf, uvs_gpu, uvs_staging, len(uvs.uvs))
+        append(&res.lm_uvs, uvs_gpu)
+    }
+
     meshes_gpu := gpu.arena_alloc(upload_arena, Mesh_Shader, len(scene.meshes))
     for &mesh, i in meshes_gpu.cpu {
         mesh.pos = res.meshes[i].pos.gpu.ptr
@@ -725,34 +771,62 @@ upload_scene :: proc(scene: shared.Scene, upload_arena: ^gpu.Arena, bvh_scratch_
     gpu.cmd_mem_copy(cmd_buf, res.meshes_shader, meshes_gpu, len(scene.meshes))
 
     // Build BVHs
-    gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
-    for &mesh in res.meshes {
-        mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count, mesh.vert_count)
+    gpu.cmd_barrier(cmd_buf, .Transfer, .All)
+    for &mesh, i in res.meshes
+    {
+        mesh_cpu := scene.meshes[i]
+
+        mesh.lm_mesh_handle = lm.add_mesh(lm_ctx, cmd_buf, lm.Mesh_Desc {
+            positions_cpu = mesh_cpu.pos[:],
+            normals_cpu = mesh_cpu.normals[:],
+            uvs_cpu = mesh_cpu.uvs[:],
+            indices_cpu = mesh_cpu.indices[:],
+
+            positions_gpu = mesh.pos,
+            normals_gpu = mesh.normals,
+            uvs_gpu = mesh.uvs,
+            indices_gpu = mesh.indices,
+        })
+
+        mesh.lm_uv_handle = lm.add_lightmap_uvs(lm_ctx, lm.Lightmap_UVs_Desc {
+            positions_cpu = mesh_cpu.pos[:],
+            normals_cpu = mesh_cpu.normals[:],
+            uvs_cpu = mesh_cpu.uvs[:],
+            // lm_uvs_cpu = lm_uvs.uvs[:],
+
+            lm_uvs_gpu = res.lm_uvs[i],
+        })
+
+        // mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count, mesh.vert_count)
     }
 
-    res.instances_bvh = upload_bvh_instances(upload_arena, cmd_buf, scene.instances[:], res.meshes[:])
-    gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
+    //res.instances_bvh = upload_bvh_instances(upload_arena, cmd_buf, scene.instances[:], res.meshes[:])
+    //gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
 
-    res.bvh = build_tlas(upload_arena, cmd_buf, res.instances_bvh, u32(len(scene.instances)))
-    gpu.cmd_barrier(cmd_buf, .Build_BVH, .All)
+    //res.bvh = build_tlas(upload_arena, cmd_buf, res.instances_bvh, u32(len(scene.instances)))
+    //gpu.cmd_barrier(cmd_buf, .Build_BVH, .All)
 
     return res
 }
 
 scene_destroy :: proc(scene: ^Scene_GPU)
 {
-    gpu.bvh_free_and_destroy(&scene.bvh)
     gpu.mem_free(scene.instances)
     gpu.mem_free(scene.meshes_shader)
-    gpu.mem_free(scene.instances_bvh)
+    // gpu.mem_free(scene.instances_bvh)
     for &mesh in scene.meshes {
         mesh_destroy(&mesh)
     }
     delete(scene.meshes)
+    for &lm_uvs in scene.lm_uvs {
+        gpu.mem_free(lm_uvs)
+    }
+    delete(scene.lm_uvs)
+
     scene^ = {}
 }
 
-create_target_textures :: proc(window_size_x: u32, window_size_y: u32, desc_pool: ^gpu.Descriptor_Pool) -> (color_target: gpu.Owned_Texture, depth_target: gpu.Owned_Texture)
+create_target_textures :: proc(window_size_x: u32, window_size_y: u32, desc_pool: ^gpu.Descriptor_Pool) -> (color_target: gpu.Owned_Texture, postprocess_target: gpu.Owned_Texture, depth_target: gpu.Owned_Texture)
 {
     // Color
     {
@@ -761,11 +835,21 @@ create_target_textures :: proc(window_size_x: u32, window_size_y: u32, desc_pool
             format       = .RGBA16_Float,
             mip_count    = 1,
             layer_count  = 1,
+            sample_count = 4,
+            usage        = { .Color_Attachment, .Sampled },
+        })
+        COLOR_TARGET_IDX = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(color_target, {}))
+
+        postprocess_target = gpu.texture_alloc_and_create(gpu.Texture_Desc {
+            dimensions   = { u32(window_size_x), u32(window_size_y), 1 },
+            format       = .RGBA16_Float,
+            mip_count    = 1,
+            layer_count  = 1,
             sample_count = 1,
             usage        = { .Color_Attachment, .Sampled, .Storage },
         })
-        COLOR_TARGET_IDX = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(color_target, {}))
-        COLOR_TARGET_RW_IDX = gpu.desc_pool_alloc_texture_rw(desc_pool, gpu.texture_rw_view_descriptor(color_target, {}))
+        POSTPROCESS_TARGET_IDX = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(postprocess_target, {}))
+        POSTPROCESS_TARGET_RW_IDX = gpu.desc_pool_alloc_texture_rw(desc_pool, gpu.texture_rw_view_descriptor(postprocess_target, {}))
     }
 
     // Depth
@@ -775,7 +859,7 @@ create_target_textures :: proc(window_size_x: u32, window_size_y: u32, desc_pool
             format       = .D32_Float,
             mip_count    = 1,
             layer_count  = 1,
-            sample_count = 1,
+            sample_count = 4,
             usage        = { .Depth_Stencil_Attachment },
         })
     }
@@ -942,7 +1026,7 @@ upload_texture :: proc(img: ^image.Image, upload_arena: ^gpu.Arena) -> gpu.Owned
 
     // Generate mipmaps
     mipmaps_cmd_buf := gpu.commands_begin(.Main)
-    gpu.cmd_barrier(mipmaps_cmd_buf, .Transfer, .Transfer, {})
+    gpu.cmd_barrier(mipmaps_cmd_buf, .Transfer, .Transfer)
     gpu.cmd_generate_mipmaps(mipmaps_cmd_buf, texture)
     gpu.cmd_add_wait_semaphore(mipmaps_cmd_buf, upload_sem, upload_sem_value_old + 1)
     gpu.queue_submit(.Main, {mipmaps_cmd_buf})
@@ -962,7 +1046,7 @@ init_dear_imgui :: proc(window: ^sdl.Window, desc_pool: ^gpu.Descriptor_Pool) ->
     result := imgui_impl_nogfx.init({
         frames_in_flight = Frames_In_Flight
     }, desc_pool)
-    assert(result, "Failed to initialize imgui vulkan backend")
+    assert(result, "Failed to initialize imgui no_gfx backend")
 
     dpi_scale := sdl.GetWindowDisplayScale(window)
     set_dear_imgui_font_and_style(dpi_scale)
@@ -1119,7 +1203,7 @@ set_dear_imgui_font_and_style :: proc(dpi_scale: f32)
         colors[imgui.Col.Text_Selected_Bg]         = { 0.20, 0.22, 0.23, 1.00 }
         colors[imgui.Col.Drag_Drop_Target]         = { 0.33, 0.67, 0.86, 1.00 }
         //colors[imgui.Col.Nav_Highlight]           = { 0.80, 0.30, 0.20, 1.00 }
-        colors[imgui.Col.Nav_Windowing_Highlight]  = { 1.00, 0.00, 0.00, 0.70 }
+        colors[imgui.Col.Nav_Windowing_Highlight]  = { 0.33, 0.67, 0.86, 1.00 }
         colors[imgui.Col.Nav_Windowing_Dim_Bg]      = { 1.00, 0.00, 0.00, 0.20 }
         colors[imgui.Col.Modal_Window_Dim_Bg]       = { 1.00, 0.00, 0.00, 0.35 }
         colors[imgui.Col.Docking_Preview]         = { 0.33, 0.67, 0.86, 1.00 }
@@ -1161,15 +1245,15 @@ set_dear_imgui_font_and_style :: proc(dpi_scale: f32)
     }
 }
 
-gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_int: int, tex_height_int: int, show: ^bool = nil)
+gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_int: int, tex_height_int: int, scene: shared.Scene, uv_mesh_data: []UV_Mesh_Draw_Call, show: ^bool = nil)
 {
     tex_width   := f32(tex_width_int)
     tex_height  := f32(tex_height_int)
+    tex_size    := [2]f32 { tex_width, tex_height }
 
     @(static) zoom    : f32 = 8.0
     @(static) pan     : imgui.Vec2 = {0, 0}
-    @(static) selected_px : int = -1
-    @(static) selected_py : int = -1
+    @(static) selected_p : [2]int = { -1, -1 }
 
     imgui.begin(name, show)
 
@@ -1226,7 +1310,7 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
         } else {
             zoom /= f32(1.1)
         }
-        zoom = clamp(zoom, 1.0, 64.0)
+        zoom = clamp(zoom, 0.1, 64.0)
 
         // Mouse position relative to canvas origin
         mouse_canvas := io.mouse_pos - canvas_pos
@@ -1252,9 +1336,9 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
     imgui.draw_list_add_callback(draw_list, set_nearest_sampler_callback, nil)
 
     imgui.im_draw_list_add_image(draw_list, imgui.Texture_ID(texture_id),
-        img_p0, img_p1,
-        {0, 0}, {1, 1},
-        rgba8_to_u32(255, 255, 255, 255))
+                                 img_p0, img_p1,
+                                 {0, 0}, {1, 1},
+                                 rgba8_to_u32(255, 255, 255, 255))
 
     // Restore sampler
     imgui.draw_list_add_callback(draw_list, set_linear_sampler_callback, nil)
@@ -1271,9 +1355,9 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
             if lx < canvas_pos.x || lx > canvas_pos.x + canvas_size.x { continue }
 
             imgui.draw_list_add_line(draw_list,
-                {lx, max(img_p0.y, canvas_pos.y)},
-                {lx, min(img_p1.y, canvas_pos.y + canvas_size.y)},
-                grid_col, 1.0)
+                                     {lx, max(img_p0.y, canvas_pos.y)},
+                                     {lx, min(img_p1.y, canvas_pos.y + canvas_size.y)},
+                                     grid_col, 1.0)
         }
 
         // Horizontal lines
@@ -1283,9 +1367,9 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
             if ly < canvas_pos.y || ly > canvas_pos.y + canvas_size.y { continue }
 
             imgui.draw_list_add_line(draw_list,
-                {max(img_p0.x, canvas_pos.x), ly},
-                {min(img_p1.x, canvas_pos.x + canvas_size.x), ly},
-                grid_col, 1.0)
+                                     {max(img_p0.x, canvas_pos.x), ly},
+                                     {min(img_p1.x, canvas_pos.x + canvas_size.x), ly},
+                                     grid_col, 1.0)
         }
     }
 
@@ -1296,70 +1380,212 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
 
         // Map mouse from screen-space into texture pixel coords
         rel   := mouse - img_p0
-        px    := int(rel.x / zoom)
-        py    := int(rel.y / zoom)
+        p     := [2]int { int(rel.x / zoom), int(rel.y / zoom) }
 
         if is_hovered && imgui.is_mouse_clicked(.Left)
         {
-            if px >= 0 && px < int(tex_width) && py >= 0 && py < int(tex_height)
-            {
-                selected_px = px
-                selected_py = py
+            if p.x >= 0 && p.x < int(tex_width) && p.y >= 0 && p.y < int(tex_height) {
+                selected_p = p
             }
         }
 
-        if px >= 0 && px < int(tex_width) && py >= 0 && py < int(tex_height)
+        if p.x >= 0 && p.x < int(tex_width) && p.y >= 0 && p.y < int(tex_height)
         {
             // Screen-space corners of that pixel
-            px0 := img_p0.x + f32(px) * zoom
-            py0 := img_p0.y + f32(py) * zoom
-            px1 := px0 + zoom
-            py1 := py0 + zoom
+            p0 := img_p0 + [2]f32 { f32(p.x), f32(p.y) } * zoom
+            p1 := p0 + zoom
 
             outline_col := rgba8_to_u32(255, 255, 255, 220)
             shadow_col  := rgba8_to_u32(0,   0,   0,   160)
 
             // Shadow for contrast on any background
-            imgui.draw_list_add_rect(draw_list, {px0 - 1, py0 - 1}, {px1 + 1, py1 + 1},
-                shadow_col, 0.0, {}, 2.0)
+            imgui.draw_list_add_rect(draw_list, p0 - 1, p1 + 1, shadow_col, 0.0, {}, 2.0)
             // Bright outline
-            imgui.draw_list_add_rect(draw_list, {px0, py0}, {px1, py1},
-                outline_col, 0.0, {}, 1.5)
+            imgui.draw_list_add_rect(draw_list, p0, p1, outline_col, 0.0, {}, 1.5)
 
             // Tooltip: pixel coordinates
-            imgui.set_tooltip("Pixel (%d, %d)", px, py)
+            imgui.set_tooltip("Pixel (%d, %d)", p.x, p.y)
         }
 
         // Draw selected pixel highlight
-        if selected_px >= 0
+        if selected_p.x >= 0
         {
-            spx0 := img_p0.x + f32(selected_px) * zoom
-            spy0 := img_p0.y + f32(selected_py) * zoom
-            spx1 := spx0 + zoom
-            spy1 := spy0 + zoom
-            imgui.draw_list_add_rect(draw_list, {spx0, spy0}, {spx1, spy1},
-                rgba8_to_u32(255, 80, 0, 220), 0.0, {}, 2.0)
+            spx0 := img_p0.x + f32(selected_p.x) * zoom
+            spy0 := img_p0.y + f32(selected_p.y) * zoom
+            sp0  := [2]f32 { spx0, spy0 }
+            sp1 := sp0 + zoom
+            imgui.draw_list_add_rect(draw_list, sp0, sp1, rgba8_to_u32(255, 80, 0, 220), 0.0, {}, 2.0)
         }
     }
+
+    // Draw uvs
+    vp := imgui.get_main_viewport().size
+
+    for draw_call in uv_mesh_data
+    {
+        tmp := draw_call
+        tmp.scale = {
+            tex_width  * zoom / vp.x * 2.0,
+            tex_height * zoom / vp.y * 2.0,
+        }
+        tmp.offset = {
+            img_p0.x / vp.x * 2.0 - 1.0,
+            img_p0.y / vp.y * 2.0 - 1.0,
+        }
+        imgui.draw_list_add_callback(draw_list, draw_uv_mesh_callback, &tmp, size_of(tmp))
+    }
+    imgui.draw_list_add_callback(draw_list, Callback_Reset_Render_State, nil)
 
     imgui.draw_list_pop_clip_rect(draw_list)
 
     imgui.end()
 }
 
-set_nearest_sampler_callback :: proc(draw_list: ^imgui.Draw_List, cmd: ^imgui.Draw_Cmd)
+set_nearest_sampler_callback :: proc "c"(draw_list: ^imgui.Draw_List, cmd: ^imgui.Draw_Cmd)
 {
     render_state := cast(^imgui_impl_nogfx.Render_State) imgui.get_platform_io().renderer_render_state
     render_state.sampler_current_id = render_state.sampler_nearest_id
 }
 
-set_linear_sampler_callback :: proc(draw_list: ^imgui.Draw_List, cmd: ^imgui.Draw_Cmd)
+set_linear_sampler_callback :: proc "c"(draw_list: ^imgui.Draw_List, cmd: ^imgui.Draw_Cmd)
 {
     render_state := cast(^imgui_impl_nogfx.Render_State) imgui.get_platform_io().renderer_render_state
     render_state.sampler_current_id = render_state.sampler_linear_id
 }
 
+UV_Mesh_Draw_Call :: struct #all_or_none
+{
+    vert_shader: gpu.Shader,
+    frag_shader: gpu.Shader,
+    cmd_buf: gpu.Command_Buffer,
+    staging_arena: ^gpu.Arena,
+    verts: gpu.slice_t([2]f32),
+    indices: gpu.slice_t(u32),
+
+    offset: [2]f32,
+    scale: [2]f32,
+}
+
+draw_uv_mesh_callback :: proc "c"(draw_list: ^imgui.Draw_List, cmd: ^imgui.Draw_Cmd)
+{
+    context = runtime.default_context()
+
+    render_state := cast(^imgui_impl_nogfx.Render_State) imgui.get_platform_io().renderer_render_state
+    data := cast(^UV_Mesh_Draw_Call) cmd.user_callback_data
+
+    gpu.cmd_set_shaders(data.cmd_buf, data.vert_shader, data.frag_shader)
+
+    Vert_Data :: struct {
+        verts: rawptr,
+        scale: [2]f32,
+        translate: [2]f32,
+    }
+    vert_data := gpu.arena_alloc(data.staging_arena, Vert_Data)
+    vert_data.cpu^ = Vert_Data {
+        verts = data.verts.gpu.ptr,
+        scale = data.scale,
+        translate = data.offset
+    }
+
+    gpu.cmd_draw_indexed_instanced(data.cmd_buf, vert_data, {}, data.indices, u32(len(data.indices.cpu)))
+}
+
+Callback_Reset_Render_State := transmute(imgui.Draw_Callback) i64(-8)
+
 rgba8_to_u32 :: proc(r: u8, g: u8, b: u8, a: u8) -> u32
 {
     return u32(a) << 24 | u32(b) << 16 | u32(g) << 8 | u32(r)
+}
+
+Lightmap_UVs :: struct
+{
+    uvs: [dynamic][2]f32,
+}
+
+generate_lm_uvs :: proc(scene: ^shared.Scene) -> [dynamic]Lightmap_UVs
+{
+    fmt.println("XAtlas: Begin...")
+    defer fmt.println("XAtlas: End!")
+
+    atlas := xa.Create()
+    defer xa.Destroy(atlas)
+
+    lm_uvs: [dynamic]Lightmap_UVs
+
+    for mesh in scene.meshes
+    {
+        mesh_decl := xa.make_mesh_decl()
+        mesh_decl.vertexPositionData = raw_data(mesh.pos)
+        mesh_decl.vertexNormalData = raw_data(mesh.normals)
+        mesh_decl.vertexUvData = raw_data(mesh.uvs)
+        mesh_decl.indexData = raw_data(mesh.indices)
+        mesh_decl.vertexCount = u32(len(mesh.pos))
+        mesh_decl.vertexPositionStride = size_of(mesh.pos[0])
+        mesh_decl.vertexNormalStride = size_of(mesh.normals[0])
+        mesh_decl.vertexUvStride = size_of(mesh.uvs[0])
+        mesh_decl.indexCount = u32(len(mesh.indices))
+        mesh_decl.indexFormat = .UInt32
+
+        res := xa.AddMesh(atlas, mesh_decl, 0)
+        if res != .SUCCESS {
+            fmt.printfln("XAtlas Error: %v", xa.StringForEnum(res))
+            return {}
+        }
+    }
+
+    pack_options := xa.make_pack_options()
+    pack_options.blockAlign = true
+    pack_options.resolution = 4096
+    pack_options.padding = 2
+    pack_options.bilinear = true
+    xa.Generate(atlas, xa.make_chart_options(), pack_options)
+
+    for &mesh, mesh_idx in scene.meshes
+    {
+        new_mesh := shared.Mesh {
+            pos = make(type_of(mesh.pos), atlas.meshes[mesh_idx].vertexCount),
+            normals = make(type_of(mesh.normals), atlas.meshes[mesh_idx].vertexCount),
+            uvs = make(type_of(mesh.uvs), atlas.meshes[mesh_idx].vertexCount),
+            indices = make(type_of(mesh.indices), atlas.meshes[mesh_idx].indexCount),
+            base_color_map = mesh.base_color_map,
+            metallic_roughness_map = mesh.metallic_roughness_map,
+            normal_map = mesh.normal_map,
+        }
+        defer {
+            shared.destroy_mesh(&mesh)
+            mesh = new_mesh
+        }
+
+        uvs := Lightmap_UVs {
+            uvs = make([dynamic][2]f32, atlas.meshes[mesh_idx].vertexCount)
+        }
+        append(&lm_uvs, uvs)
+
+        xa_mesh := atlas.meshes[mesh_idx]
+
+        for xa_vert, xa_vert_idx in xa_mesh.vertexArray[:xa_mesh.vertexCount]
+        {
+            old_idx := xa_vert.xref
+            new_mesh.pos[xa_vert_idx] = mesh.pos[old_idx]
+            new_mesh.normals[xa_vert_idx] = mesh.normals[old_idx]
+            new_mesh.uvs[xa_vert_idx] = mesh.uvs[old_idx]
+
+            lm_uvs[mesh_idx].uvs[xa_vert_idx] = {
+                xa_vert.uv[0] / f32(atlas.width),
+                xa_vert.uv[1] / f32(atlas.height),
+            }
+
+        }
+
+        copy(new_mesh.indices[:], xa_mesh.indexArray[:xa_mesh.indexCount])
+    }
+
+    return lm_uvs
+}
+
+destroy_lm_uvs :: proc(lm_uvs: ^[dynamic]Lightmap_UVs)
+{
+    for &uvs in lm_uvs do delete(uvs.uvs)
+    delete(lm_uvs^)
+    lm_uvs^ = {}
 }

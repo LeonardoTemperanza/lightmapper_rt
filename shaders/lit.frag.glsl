@@ -36,6 +36,7 @@ struct Data
 };
 Data Data_ZERO;
 void main();
+float fwidth_(float v_);
 layout(buffer_reference, scalar) readonly buffer _res_ptr_void { uint _res_void_; };
 layout(buffer_reference, scalar) readonly buffer _res_ptr_Data { Data _res_; };
 _res_ptr_Data _res_ptr_Data_ZERO;
@@ -64,16 +65,17 @@ void main()
     vec4 metallic_roughness_sample_ = vec4_ZERO;
     vec4 albedo_ = vec4_ZERO;
     base_color_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.base_color_map_)], _res_samplers_[nonuniformEXT(data_._res_.base_color_map_sampler_)]), uv_);
-    if((base_color_.w < 0.1))
-    {
-        discard;
-    }
-
+    base_color_.a = (((base_color_.a - 0.3) / max(fwidth_(base_color_.a), 0.0001)) + 0.5);
     normal_map_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.normal_map_)], _res_samplers_[nonuniformEXT(data_._res_.normal_map_sampler_)]), uv_);
     world_normal_ = normalize(normal_vert_.xyz);
     packed_normal_ = vec4(((world_normal_ * 0.5) + 0.5), 1.0);
     metallic_roughness_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.metallic_roughness_map_)], _res_samplers_[nonuniformEXT(data_._res_.metallic_roughness_map_sampler_)]), uv_);
     albedo_ = base_color_;
     _res_out_loc0_ = albedo_;
+}
+
+float fwidth_(float v_)
+{
+    return (abs(dFdxFine(v_)) + abs(dFdyFine(v_)));
 }
 

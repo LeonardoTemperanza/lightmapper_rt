@@ -18,18 +18,18 @@ uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
 layout(location = 2) out vec4 _res_out_loc2_;
-layout(location = 1) out vec2 _res_out_loc1_;
 layout(location = 0) out vec4 _res_out_loc0_;
+layout(location = 1) out vec2 _res_out_loc1_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
-layout(buffer_reference) readonly buffer _res_slice_vec4;
+layout(buffer_reference) readonly buffer _res_slice_vec3;
 layout(buffer_reference) readonly buffer _res_slice_vec2;
 layout(buffer_reference) readonly buffer _res_ptr_Data;
 
 struct Data
 {
-    _res_slice_vec4 positions_;
-    _res_slice_vec4 normals_;
+    _res_slice_vec3 positions_;
+    _res_slice_vec3 normals_;
     _res_slice_vec2 uvs_;
     mat4 model_to_world_;
     mat4 model_to_world_normal_;
@@ -47,8 +47,8 @@ struct Output
 Output Output_ZERO;
 void main();
 layout(buffer_reference, scalar) readonly buffer _res_ptr_void { uint _res_void_; };
-layout(buffer_reference, scalar) readonly buffer _res_slice_vec4 { vec4 _res_[]; };
-_res_slice_vec4 _res_slice_vec4_ZERO;
+layout(buffer_reference, scalar) readonly buffer _res_slice_vec3 { vec3 _res_[]; };
+_res_slice_vec3 _res_slice_vec3_ZERO;
 layout(buffer_reference, scalar) readonly buffer _res_slice_vec2 { vec2 _res_[]; };
 _res_slice_vec2 _res_slice_vec2_ZERO;
 layout(buffer_reference, scalar) readonly buffer _res_ptr_Data { Data _res_; };
@@ -78,7 +78,7 @@ void main()
     clip_pos_ = (data_._res_.world_to_view_ * world_pos_);
     clip_pos_ = (data_._res_.view_to_proj_ * clip_pos_);
     clip_pos_.y = (0.0 - clip_pos_.y);
-    world_normal_ = (data_._res_.model_to_world_normal_ * data_._res_.normals_._res_[vert_id_]);
+    world_normal_ = (data_._res_.model_to_world_normal_ * vec4(data_._res_.normals_._res_[vert_id_], 1));
     vert_out_.pos_ = clip_pos_;
     vert_out_.normal_ = world_normal_;
     vert_out_.uv_ = data_._res_.uvs_._res_[vert_id_];

@@ -13,13 +13,13 @@ vec2 vec2_ZERO;
 vec3 vec3_ZERO;
 vec4 vec4_ZERO;
 mat4 mat4_ZERO;
-uint textureid_ZERO;
-uint samplerid_ZERO;
+uint texture_id_ZERO;
+uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
+layout(location = 2) out vec2 _res_out_loc2_;
 layout(location = 1) out vec3 _res_out_loc1_;
 layout(location = 0) out vec3 _res_out_loc0_;
-layout(location = 2) out vec2 _res_out_loc2_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_slice_vec3;
@@ -28,20 +28,20 @@ layout(buffer_reference) readonly buffer _res_ptr_Data;
 
 struct Output
 {
-    vec4 out_pos;
-    vec3 world_pos;
-    vec3 world_normal;
-    vec2 uv;
+    vec4 out_pos_;
+    vec3 world_pos_;
+    vec3 world_normal_;
+    vec2 uv_;
 };
 Output Output_ZERO;
 struct Data
 {
-    _res_slice_vec3 pos;
-    _res_slice_vec3 normals;
-    _res_slice_vec2 uvs;
-    _res_slice_vec2 lightmap_uvs;
-    mat4 model_to_world;
-    mat4 model_to_world_normals;
+    _res_slice_vec3 pos_;
+    _res_slice_vec3 normals_;
+    _res_slice_vec2 uvs_;
+    _res_slice_vec2 lightmap_uvs_;
+    mat4 model_to_world_;
+    mat4 model_to_world_normals_;
 };
 Data Data_ZERO;
 void main();
@@ -69,10 +69,10 @@ void main()
     uint vert_id_ = gl_VertexIndex;
     _res_ptr_Data data_ = _res_vert_data_;
     Output vert_out_ = Output_ZERO;
-    vert_out_.out_pos = vec4(data_._res_.lightmap_uvs._res_[vert_id_], 0, 1);
-    vert_out_.world_pos = (data_._res_.model_to_world * vec4(data_._res_.pos._res_[vert_id_], 1)).xyz;
-    vert_out_.world_normal = (data_._res_.model_to_world_normals * vec4(data_._res_.normals._res_[vert_id_], 0)).xyz;
-    vert_out_.uv = data_._res_.uvs._res_[vert_id_];
-    gl_Position = vert_out_.out_pos; _res_out_loc0_ = vert_out_.world_pos; _res_out_loc1_ = vert_out_.world_normal; _res_out_loc2_ = vert_out_.uv; 
+    vert_out_.out_pos_ = vec4(((data_._res_.lightmap_uvs_._res_[vert_id_] * 2) - 1), 0, 1);
+    vert_out_.world_pos_ = (data_._res_.model_to_world_ * vec4(data_._res_.pos_._res_[vert_id_], 1)).xyz;
+    vert_out_.world_normal_ = (data_._res_.model_to_world_normals_ * vec4(data_._res_.normals_._res_[vert_id_], 0)).xyz;
+    vert_out_.uv_ = data_._res_.uvs_._res_[vert_id_];
+    gl_Position = vert_out_.out_pos_; _res_out_loc0_ = vert_out_.world_pos_; _res_out_loc1_ = vert_out_.world_normal_; _res_out_loc2_ = vert_out_.uv_; 
 }
 

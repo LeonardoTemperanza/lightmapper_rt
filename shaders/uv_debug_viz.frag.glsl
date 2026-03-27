@@ -18,19 +18,9 @@ uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
 layout(location = 0) out vec4 _res_out_loc0_;
-layout(location = 1) out vec4 _res_out_loc1_;
-layout(location = 1) in vec3 _res_in_loc1_;
-layout(location = 0) in vec3 _res_in_loc0_;
-layout(location = 2) in vec2 _res_in_loc2_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 
-struct Output
-{
-    vec4 world_pos_;
-    vec4 world_normal_;
-};
-Output Output_ZERO;
 void main();
 layout(buffer_reference, scalar) readonly buffer _res_ptr_void { uint _res_void_; };
 
@@ -47,11 +37,6 @@ layout(push_constant, scalar) uniform Push
 
 void main()
 {
-    vec3 world_pos_ = _res_in_loc0_;
-    vec3 world_normal_ = _res_in_loc1_;
-    vec2 uv_ = _res_in_loc2_;
-    Output out_ = Output_ZERO;
-    out_.world_pos_ = vec4(1, 0, 0, 1);
-    _res_out_loc0_ = out_.world_pos_; _res_out_loc1_ = out_.world_normal_; 
+    _res_out_loc0_ = vec4(1, 1, 1, 0.5);
 }
 

@@ -31,8 +31,8 @@ Gltf_Texture_Info :: struct {
 }
 
 Mesh :: struct {
-	pos:                    [dynamic][4]f32,
-	normals:                [dynamic][4]f32,
+	pos:                    [dynamic][3]f32,
+	normals:                [dynamic][3]f32,
 	uvs:                    [dynamic][2]f32,
 	indices:                [dynamic]u32,
 	base_color_map:         u32,
@@ -707,8 +707,8 @@ load_scene_gltf :: proc(
 			}
 
 			// Convert vec3 to vec4 (adding w=0 component)
-			pos_final := to_vec4_array(positions, allocator = context.temp_allocator)
-			normals_final := to_vec4_array(normals, allocator = context.temp_allocator)
+			//pos_final := to_vec4_array(positions, allocator = context.temp_allocator)
+			//normals_final := to_vec4_array(normals, allocator = context.temp_allocator)
 			// Use TEXCOORD_0 if available, otherwise create default UVs
 			uvs_final: [][2]f32
 			if len(uvs) > 0 {
@@ -722,8 +722,8 @@ load_scene_gltf :: proc(
 			}
 
 			loaded := Mesh {
-				pos = slice.clone_to_dynamic(pos_final),
-				normals = slice.clone_to_dynamic(normals_final),
+				pos = slice.clone_to_dynamic(positions),
+				normals = slice.clone_to_dynamic(normals),
 				uvs = slice.clone_to_dynamic(uvs_final),
 				indices = slice.clone_to_dynamic(indices_u32[:]),
 				base_color_map = base_color_map,
