@@ -24,7 +24,7 @@ import gltf2 "shared/gltf2"
 
 import vk "vendor:vulkan"
 import "no_gfx_api/gpu"
-import xa "../xatlas_odin"
+import xa "xatlas_odin"
 
 import imgui "odin-imgui"
 import imgui_impl_sdl3 "odin-imgui/imgui_impl_sdl3"

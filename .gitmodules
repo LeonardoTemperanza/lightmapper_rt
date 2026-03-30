@@ -1,3 +1,9 @@
 [submodule "oidn_odin_bindings"]
 	path = oidn_odin_bindings
 	url = https://github.com/LeonardoTemperanza/oidn_odin_bindings.git
+[submodule "no_gfx_api"]
+	path = no_gfx_api
+	url = https://github.com/LeonardoTemperanza/no_gfx_api
+[submodule "xatlas_odin"]
+	path = xatlas_odin
+	url = https://github.com/LeonardoTemperanza/xatlas_odin
