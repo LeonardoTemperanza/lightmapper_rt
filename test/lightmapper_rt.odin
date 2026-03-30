@@ -116,6 +116,7 @@ Bake :: struct
     gbufs: GBuffers,
     instances: [dynamic]Instance,
     scene_gpu: Scene_GPU,
+    lightmap_size: u32,
 }
 
 Instance :: struct
@@ -134,10 +135,13 @@ Instance :: struct
 
 bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, instances: []Instance) -> Bake
 {
+    assert(lightmap_size > 0)
+
     bake: Bake
     bake.ctx = ctx
     bake.gbufs = gbufs_create(lightmap_size)
     bake.instances = slice.clone_to_dynamic(instances)
+    bake.lightmap_size = u32(lightmap_size)
 
     cmd_buf := gpu.commands_begin(.Main)
 
@@ -169,7 +173,8 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, instances: []Inst
 
     bake.scene_gpu.bvh_id = gpu.desc_pool_alloc_bvh(ctx.desc_pool, gpu.bvh_descriptor(bake.scene_gpu.bvh))
 
-    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, ctx.meshes[:], ctx.lm_uvs[:])
+    resolution := [2]f32 { f32(lightmap_size), f32(lightmap_size) }
+    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, ctx.meshes[:], ctx.lm_uvs[:], resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
     gpu.queue_submit(.Main, { cmd_buf })
@@ -191,7 +196,8 @@ bake_iteration :: proc(bake: ^Bake)
     cmd_buf := gpu.commands_begin(.Main)
 
     ctx := bake.ctx
-    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, bake.instances[:], ctx.meshes[:], ctx.lm_uvs[:])
+    resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
+    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, bake.instances[:], ctx.meshes[:], ctx.lm_uvs[:], resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
     // pathtrace(cmd_buf, bake.gbufs, bake.shaders, bake.scene)
@@ -365,7 +371,7 @@ gbufs_destroy :: proc(gbufs: ^GBuffers)
     gbufs^ = {}
 }
 
-gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbufs: ^GBuffers, shaders: Shaders, instances: []Instance, meshes: []Mesh, lm_uvs: []gpu.slice_t([2]f32))
+gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbufs: ^GBuffers, shaders: Shaders, instances: []Instance, meshes: []Mesh, lm_uvs: []gpu.slice_t([2]f32), resolution: [2]f32)
 {
     gpu.cmd_scoped_render_pass(cmd_buf, {
         color_attachments = {
@@ -388,6 +394,7 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
             normals: rawptr,
             uvs: rawptr,
             lightmap_uvs: rawptr,
+            resolution: [2]f32,
             model_to_world: [16]f32,
             model_to_world_normals: [16]f32,
         }
@@ -397,11 +404,12 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
             normals = mesh.normals.gpu.ptr,
             uvs = mesh.uvs.gpu.ptr,
             lightmap_uvs = lightmap_uvs.gpu.ptr,
+            resolution = resolution,
             model_to_world = intr.matrix_flatten(instance.transform),
             model_to_world_normals = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),
         }
 
-        gpu.cmd_draw_indexed_instanced(cmd_buf, vert_data, {}, mesh.indices, u32(len(mesh.indices.cpu)))
+        gpu.cmd_draw_indexed_instanced(cmd_buf, vert_data, {}, mesh.indices, u32(len(mesh.indices.cpu)), instance_count = 25)
     }
 }
 

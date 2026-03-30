@@ -17,9 +17,9 @@ uint texture_id_ZERO;
 uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
-layout(location = 2) out vec2 _res_out_loc2_;
 layout(location = 1) out vec3 _res_out_loc1_;
 layout(location = 0) out vec3 _res_out_loc0_;
+layout(location = 2) out vec2 _res_out_loc2_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_slice_vec3;
@@ -40,6 +40,7 @@ struct Data
     _res_slice_vec3 normals_;
     _res_slice_vec2 uvs_;
     _res_slice_vec2 lightmap_uvs_;
+    vec2 resolution_;
     mat4 model_to_world_;
     mat4 model_to_world_normals_;
 };
@@ -67,9 +68,187 @@ layout(push_constant, scalar) uniform Push
 void main()
 {
     uint vert_id_ = gl_VertexIndex;
+    uint instance_id_ = gl_InstanceIndex;
     _res_ptr_Data data_ = _res_vert_data_;
+    vec2 uv_offset_ = vec2_ZERO;
+    vec2 ndc_offset_ = vec2_ZERO;
     Output vert_out_ = Output_ZERO;
-    vert_out_.out_pos_ = vec4(((data_._res_.lightmap_uvs_._res_[vert_id_] * 2) - 1), 0, 1);
+    uv_offset_ = vec2(0);
+    if((instance_id_ == 0))
+    {
+        uv_offset_ = vec2((-2.0), (-2.0));
+    }
+    else
+    {
+if((instance_id_ == 1))
+        {
+            uv_offset_ = vec2(2.0, (-2.0));
+        }
+        else
+        {
+if((instance_id_ == 2))
+            {
+                uv_offset_ = vec2((-2.0), 2.0);
+            }
+            else
+            {
+if((instance_id_ == 3))
+                {
+                    uv_offset_ = vec2(2.0, 2.0);
+                }
+                else
+                {
+if((instance_id_ == 4))
+                    {
+                        uv_offset_ = vec2((-1.0), (-2.0));
+                    }
+                    else
+                    {
+if((instance_id_ == 5))
+                        {
+                            uv_offset_ = vec2(1.0, (-2.0));
+                        }
+                        else
+                        {
+if((instance_id_ == 6))
+                            {
+                                uv_offset_ = vec2((-2.0), (-1.0));
+                            }
+                            else
+                            {
+if((instance_id_ == 7))
+                                {
+                                    uv_offset_ = vec2(2.0, (-1.0));
+                                }
+                                else
+                                {
+if((instance_id_ == 8))
+                                    {
+                                        uv_offset_ = vec2((-2.0), 1.0);
+                                    }
+                                    else
+                                    {
+if((instance_id_ == 9))
+                                        {
+                                            uv_offset_ = vec2(2.0, 1.0);
+                                        }
+                                        else
+                                        {
+if((instance_id_ == 10))
+                                            {
+                                                uv_offset_ = vec2((-1.0), 2.0);
+                                            }
+                                            else
+                                            {
+if((instance_id_ == 11))
+                                                {
+                                                    uv_offset_ = vec2(1.0, 2.0);
+                                                }
+                                                else
+                                                {
+if((instance_id_ == 12))
+                                                    {
+                                                        uv_offset_ = vec2((-2.0), 0.0);
+                                                    }
+                                                    else
+                                                    {
+if((instance_id_ == 13))
+                                                        {
+                                                            uv_offset_ = vec2(2.0, 0.0);
+                                                        }
+                                                        else
+                                                        {
+if((instance_id_ == 14))
+                                                            {
+                                                                uv_offset_ = vec2(0.0, (-2.0));
+                                                            }
+                                                            else
+                                                            {
+if((instance_id_ == 15))
+                                                                {
+                                                                    uv_offset_ = vec2(0.0, 2.0);
+                                                                }
+                                                                else
+                                                                {
+if((instance_id_ == 16))
+                                                                    {
+                                                                        uv_offset_ = vec2((-1.0), (-1.0));
+                                                                    }
+                                                                    else
+                                                                    {
+if((instance_id_ == 17))
+                                                                        {
+                                                                            uv_offset_ = vec2(1.0, (-1.0));
+                                                                        }
+                                                                        else
+                                                                        {
+if((instance_id_ == 18))
+                                                                            {
+                                                                                uv_offset_ = vec2((-1.0), 0.0);
+                                                                            }
+                                                                            else
+                                                                            {
+if((instance_id_ == 19))
+                                                                                {
+                                                                                    uv_offset_ = vec2(1.0, 0.0);
+                                                                                }
+                                                                                else
+                                                                                {
+if((instance_id_ == 20))
+                                                                                    {
+                                                                                        uv_offset_ = vec2((-1.0), 1.0);
+                                                                                    }
+                                                                                    else
+                                                                                    {
+if((instance_id_ == 21))
+                                                                                        {
+                                                                                            uv_offset_ = vec2(1.0, 1.0);
+                                                                                        }
+                                                                                        else
+                                                                                        {
+if((instance_id_ == 22))
+                                                                                            {
+                                                                                                uv_offset_ = vec2(0.0, (-1.0));
+                                                                                            }
+                                                                                            else
+                                                                                            {
+if((instance_id_ == 23))
+                                                                                                {
+                                                                                                    uv_offset_ = vec2(0.0, 1.0);
+                                                                                                }
+                                                                                                else
+                                                                                                {
+if((instance_id_ == 24))
+                                                                                                    {
+                                                                                                        uv_offset_ = vec2(0.0, 0.0);
+                                                                                                    }
+                                                                                                }
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ndc_offset_ = ((uv_offset_ / data_._res_.resolution_) / 2.0);
+    vert_out_.out_pos_ = vec4((((data_._res_.lightmap_uvs_._res_[vert_id_] * 2) - 1) + ndc_offset_), 0, 1);
     vert_out_.world_pos_ = (data_._res_.model_to_world_ * vec4(data_._res_.pos_._res_[vert_id_], 1)).xyz;
     vert_out_.world_normal_ = (data_._res_.model_to_world_normals_ * vec4(data_._res_.normals_._res_[vert_id_], 0)).xyz;
     vert_out_.uv_ = data_._res_.uvs_._res_[vert_id_];
