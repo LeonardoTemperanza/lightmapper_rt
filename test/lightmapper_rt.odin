@@ -102,7 +102,7 @@ Lightmap_UVs_Desc :: struct
 add_lightmap_uvs :: proc(ctx: ^Context, desc: Lightmap_UVs_Desc) -> Lightmap_UV_Handle
 {
     append(&ctx.lm_uvs, desc.lm_uvs_gpu)
-    return {}
+    return { idx = u32(len(ctx.lm_uvs) - 1), gen = 0 }
 }
 
 remove_lightmap_uvs :: proc(ctx: ^Context, handle: ^Lightmap_UV_Handle)
@@ -189,6 +189,11 @@ bake_reset :: proc(bake: ^Bake)
 bake_iteration :: proc(bake: ^Bake)
 {
     cmd_buf := gpu.commands_begin(.Main)
+
+    ctx := bake.ctx
+    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, bake.instances[:], ctx.meshes[:], ctx.lm_uvs[:])
+    gpu.cmd_barrier(cmd_buf, .All, .All, {})
+
     // pathtrace(cmd_buf, bake.gbufs, bake.shaders, bake.scene)
     gpu.queue_submit(.Main, { cmd_buf })
 }
@@ -370,6 +375,7 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
     })
 
     gpu.cmd_set_shaders(cmd_buf, shaders.uv_space, shaders.gbuffers)
+    gpu.cmd_set_raster_state(cmd_buf, { cull_mode = .None })
 
     // Render the entire scene
     for instance in instances
@@ -389,12 +395,11 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
         vert_data.cpu^ = Vertex_Data {
             pos = mesh.positions.gpu.ptr,
             normals = mesh.normals.gpu.ptr,
-            uvs = mesh.normals.gpu.ptr,
+            uvs = mesh.uvs.gpu.ptr,
             lightmap_uvs = lightmap_uvs.gpu.ptr,
             model_to_world = intr.matrix_flatten(instance.transform),
             model_to_world_normals = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),
         }
-
 
         gpu.cmd_draw_indexed_instanced(cmd_buf, vert_data, {}, mesh.indices, u32(len(mesh.indices.cpu)))
     }

@@ -441,6 +441,8 @@ main :: proc()
 
         imgui.render()
 
+        lm.bake_iteration(&bake)
+
         switch output_type
         {
             case .Rasterized:
