@@ -37,8 +37,6 @@ Example_Name_Format :: "Right-click + WASD for first-person controls. Left click
 
 Sponza_Scene :: #load("shared/assets/sponza.glb")
 
-Num_Async_Worker_Threads := clamp(info.cpu.logical_cores - 1, 2, 6)
-
 // How many textures to load in a single batch / command buffer
 Loader_Chunk_Size :: 16
 
@@ -204,7 +202,9 @@ main :: proc()
             }
         }
 
-        for i := 0; i < Num_Async_Worker_Threads; i += 1 {
+        _, num_async_worker_threads, ok_cpu := info.cpu_core_count()
+		ensure(ok_cpu)
+        for i := 0; i < num_async_worker_threads; i += 1 {
             texture_loader_thread := thread.create(texture_loader_thread_proc)
             texture_loader_thread.data = &loader_data
             thread.start(texture_loader_thread)

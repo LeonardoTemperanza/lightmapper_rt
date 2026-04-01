@@ -181,6 +181,7 @@ struct Material_Point
 Material_Point Material_Point_ZERO;
 void main();
 vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_, uint sampler_);
+Hit_Info test_simple(Ray ray_, Scene scene_, uint tlas_);
 Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_);
 Hit_Info ray_skip_alpha_stochastically(Ray start_ray_, Scene scene_, uint tlas_);
 float get_alpha(Scene scene_, Hit_Info hit_);
@@ -251,7 +252,7 @@ void main()
     world_camera_lookat_ = normalize((data_._res_.camera_to_world_ * vec4(camera_lookat_, 0.0))).xyz;
     camera_ray_.ori_ = world_camera_pos_;
     camera_ray_.dir_ = world_camera_lookat_;
-    color_ = clamp_radiance(pathtrace(camera_ray_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_));
+    color_ = (test_simple(camera_ray_, data_._res_.scene_, data_._res_.tlas_).hit_) ? (vec3(1, 0, 0)) : (vec3(0));
     if(((global_invocation_id_.x < data_._res_.resolution_.x) && (global_invocation_id_.y < data_._res_.resolution_.y)))
     {
         vec2 output_pixel_;
@@ -354,6 +355,43 @@ incoming_ = sample_lights(scene_.lights_, hit_pos_, hit_.normal_, outgoing_);   
     }
 
     return radiance_;
+}
+
+Hit_Info test_simple(Ray ray_, Scene scene_, uint tlas_)
+{
+    uint Ray_Flags_Opaque_ = uint_ZERO;
+    uint Ray_Flags_Terminate_On_First_Hit_ = uint_ZERO;
+    uint Ray_Flags_Skip_Closest_Hit_Shader_ = uint_ZERO;
+    uint Ray_Result_Kind_Miss_ = uint_ZERO;
+    uint Ray_Result_Kind_Hit_Mesh_ = uint_ZERO;
+    uint Ray_Result_Kind_Hit_AABB_ = uint_ZERO;
+    Hit_Info hit_info_ = Hit_Info_ZERO;
+    Ray_Desc desc_ = Ray_Desc_ZERO;
+    rayQueryEXT rq_;
+    Ray_Result hit_ = Ray_Result_ZERO;
+    Ray_Flags_Opaque_ = 1;
+    Ray_Flags_Terminate_On_First_Hit_ = 4;
+    Ray_Flags_Skip_Closest_Hit_Shader_ = 8;
+    Ray_Result_Kind_Miss_ = 0;
+    Ray_Result_Kind_Hit_Mesh_ = 1;
+    Ray_Result_Kind_Hit_AABB_ = 2;
+    desc_.flags_ = Ray_Flags_Opaque_;
+    desc_.cull_mask_ = 0xFF;
+    desc_.t_min_ = 0.001;
+    desc_.t_max_ = 1000000000.0;
+    desc_.origin_ = ray_.ori_;
+    desc_.dir_ = ray_.dir_;
+    rayquery_init(rq_, desc_, tlas_);
+    rayquery_proceed(rq_);
+    hit_ = rayquery_result(rq_);
+    if((hit_.kind_ != Ray_Result_Kind_Hit_Mesh_))
+    {
+        hit_info_.hit_ = false;
+        return hit_info_;
+    }
+
+    hit_info_.hit_ = true;
+    return hit_info_;
 }
 
 Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_)

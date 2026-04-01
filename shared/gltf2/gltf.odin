@@ -25,8 +25,8 @@ load_from_file :: proc(file_name: string, allocator := context.allocator) -> (da
         return nil, GLTF_Error{type = .No_File, proc_name = #procedure, param = {name = file_name}}
     }
 
-    file_content, ok := os.read_entire_file(file_name, allocator)
-    if !ok {
+    file_content, err_r := os.read_entire_file(file_name, allocator)
+    if err_r != nil {
         return nil, GLTF_Error{type = .Cant_Read_File, proc_name = #procedure, param = {name = file_name}}
     }
 
@@ -199,8 +199,8 @@ uri_parse :: proc(uri: Uri, gltf_dir: string) -> Uri {
     type_idx := strings.index_rune(str_data, ':')
     if type_idx == -1 {
         // Check if this is possible file and if so load it
-        bytes, ok := os.read_entire_file(fmt.tprintf("%s/%s", gltf_dir, str_data))
-        if !ok {
+        bytes, err_r := os.read_entire_file(fmt.tprintf("%s/%s", gltf_dir, str_data), allocator = context.allocator)
+        if err_r != nil {
             return uri
         }
         return cast([]byte)bytes
