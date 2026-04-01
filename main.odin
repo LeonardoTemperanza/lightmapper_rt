@@ -263,7 +263,8 @@ main :: proc()
     }
     defer lm.bake_destroy(&bake)
 
-    gbuf_color_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_get_gbuffer_world_pos(&bake), {}))
+    gbuf_world_pos_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_get_gbuffer_world_pos(&bake), {}))
+    gbuf_world_normals_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_get_gbuffer_world_normals(&bake), {}))
 
     imgui_ctx := init_dear_imgui(window, &desc_pool)
     defer {
@@ -436,7 +437,7 @@ main :: proc()
                 })
             }
 
-            gui_show_debug_texture_window("Lightmap Viewer", gbuf_color_id, LM_SIZE, LM_SIZE, gltf_scene, draw_calls[:], &show_texture_viewer)
+            gui_show_debug_texture_window("Lightmap Viewer", { gbuf_world_pos_id, gbuf_world_normals_id }, { "World Position", "World Normals" }, LM_SIZE, LM_SIZE, gltf_scene, draw_calls[:], &show_texture_viewer)
         }
 
         imgui.render()
@@ -525,7 +526,7 @@ main :: proc()
                 if pathtrace_gt_counter < max_gt_accums
                 {
                     gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
-                    lm.bake_debug_ground_truth(&bake, cmd_buf, frame_arena, linalg.inverse(world_to_view), POSTPROCESS_TARGET_RW_IDX, sampler_linear_id, { f32(window_size_x), f32(window_size_y) })
+                    lm.bake_debug_ground_truth(&bake, cmd_buf, frame_arena, linalg.inverse(world_to_view), POSTPROCESS_TARGET_RW_IDX, sampler_linear_id, { f32(window_size_x), f32(window_size_y) }, pathtrace_gt_counter)
 
                     pathtrace_gt_counter += 1
                 }
@@ -597,14 +598,6 @@ Mesh_GPU :: struct
     // bvh: gpu.Owned_BVH,
     lm_mesh_handle: lm.Mesh_Handle,
     lm_uv_handle: lm.Lightmap_UV_Handle,
-}
-
-Mesh_Shader :: struct
-{
-    pos: rawptr,
-    normals: rawptr,
-    uvs: rawptr,
-    indices: rawptr,
 }
 
 upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh: shared.Mesh) -> Mesh_GPU
@@ -704,10 +697,6 @@ Scene_GPU :: struct
     meshes: [dynamic]Mesh_GPU,
     instances_bvh: gpu.slice_t(gpu.BVH_Instance),
     lm_uvs: [dynamic]gpu.slice_t([2]f32),
-
-    // Shader view
-    instances: gpu.slice_t(Instance_Shader),
-    meshes_shader: gpu.slice_t(Mesh_Shader),
 }
 
 Scene_Shader :: struct
@@ -724,12 +713,6 @@ Lights_Shader :: struct
     dir_light_emission: [3]f32,
 }
 
-Instance_Shader :: struct
-{
-    mesh_idx: u32,
-    albedo_tex_id: u32,
-}
-
 upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]Lightmap_UVs, upload_arena: ^gpu.Arena, bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> Scene_GPU
 {
     res: Scene_GPU
@@ -741,17 +724,6 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]
         append(&res.meshes, to_add)
     }
 
-    // Construct structures used by the shader
-    instances_gpu := gpu.arena_alloc(upload_arena, Instance_Shader, len(scene.instances))
-    for &instance, i in instances_gpu.cpu {
-        instance = {
-            mesh_idx = scene.instances[i].mesh_idx,
-            albedo_tex_id = scene.meshes[scene.instances[i].mesh_idx].base_color_map,
-        }
-    }
-    res.instances = gpu.mem_alloc(Instance_Shader, len(scene.instances), gpu.Memory.GPU)
-    gpu.cmd_mem_copy(cmd_buf, res.instances, instances_gpu, len(scene.instances))
-
     for uvs in lm_uvs
     {
         uvs_staging := gpu.arena_alloc(upload_arena, [2]f32, len(uvs.uvs))
@@ -761,16 +733,6 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]
         gpu.cmd_mem_copy(cmd_buf, uvs_gpu, uvs_staging, len(uvs.uvs))
         append(&res.lm_uvs, uvs_gpu)
     }
-
-    meshes_gpu := gpu.arena_alloc(upload_arena, Mesh_Shader, len(scene.meshes))
-    for &mesh, i in meshes_gpu.cpu {
-        mesh.pos = res.meshes[i].pos.gpu.ptr
-        mesh.normals = res.meshes[i].normals.gpu.ptr
-        mesh.uvs     = res.meshes[i].uvs.gpu.ptr
-        mesh.indices = res.meshes[i].indices.gpu.ptr
-    }
-    res.meshes_shader = gpu.mem_alloc(Mesh_Shader, len(scene.meshes), gpu.Memory.GPU)
-    gpu.cmd_mem_copy(cmd_buf, res.meshes_shader, meshes_gpu, len(scene.meshes))
 
     // Build BVHs
     gpu.cmd_barrier(cmd_buf, .Transfer, .All)
@@ -798,24 +760,13 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]
 
             lm_uvs_gpu = res.lm_uvs[i],
         })
-
-        // mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count, mesh.vert_count)
     }
-
-    //res.instances_bvh = upload_bvh_instances(upload_arena, cmd_buf, scene.instances[:], res.meshes[:])
-    //gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
-
-    //res.bvh = build_tlas(upload_arena, cmd_buf, res.instances_bvh, u32(len(scene.instances)))
-    //gpu.cmd_barrier(cmd_buf, .Build_BVH, .All)
 
     return res
 }
 
 scene_destroy :: proc(scene: ^Scene_GPU)
 {
-    gpu.mem_free(scene.instances)
-    gpu.mem_free(scene.meshes_shader)
-    // gpu.mem_free(scene.instances_bvh)
     for &mesh in scene.meshes {
         mesh_destroy(&mesh)
     }
@@ -1247,7 +1198,7 @@ set_dear_imgui_font_and_style :: proc(dpi_scale: f32)
     }
 }
 
-gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_int: int, tex_height_int: int, scene: shared.Scene, uv_mesh_data: []UV_Mesh_Draw_Call, show: ^bool = nil)
+gui_show_debug_texture_window :: proc(name: cstring, texture_ids: []u32, texture_names: []cstring, tex_width_int: int, tex_height_int: int, scene: shared.Scene, uv_mesh_data: []UV_Mesh_Draw_Call, show: ^bool = nil)
 {
     tex_width   := f32(tex_width_int)
     tex_height  := f32(tex_height_int)
@@ -1265,6 +1216,26 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_id: u32, tex_width_
         zoom = 8.0
         pan  = {0, 0}
     }
+
+    @(static) item_selected_idx: int = 0
+    combo_preview_value := texture_names[item_selected_idx]
+    if imgui.begin_combo("Texture", combo_preview_value, {})
+    {
+        for n := 0; n < len(texture_names); n += 1
+        {
+            is_selected := item_selected_idx == n
+            if imgui.selectable(texture_names[n], is_selected) {
+                item_selected_idx = n
+            }
+
+            if is_selected {
+                imgui.set_item_default_focus()
+            }
+        }
+        imgui.end_combo()
+    }
+
+    texture_id := texture_ids[item_selected_idx]
 
     // Canvas
     canvas_size := imgui.get_content_region_avail()

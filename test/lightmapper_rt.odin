@@ -1,5 +1,6 @@
 
 #+feature using-stmt
+#+vet !unused-imports
 
 package test
 
@@ -8,6 +9,7 @@ import "core:math/linalg"
 import "core:math"
 import intr "base:intrinsics"
 import "core:slice"
+import "core:fmt"
 
 Handle :: struct { idx: u32, gen: u32 }
 Mesh_Handle :: distinct Handle
@@ -117,6 +119,8 @@ Bake :: struct
     instances: [dynamic]Instance,
     scene_gpu: Scene_GPU,
     lightmap_size: u32,
+
+    ground_truth_accum_counter: u32,
 }
 
 Instance :: struct
@@ -197,7 +201,7 @@ bake_iteration :: proc(bake: ^Bake)
 
     ctx := bake.ctx
     resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
-    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, bake.instances[:], ctx.meshes[:], ctx.lm_uvs[:], resolution)
+    // gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, bake.instances[:], ctx.meshes[:], ctx.lm_uvs[:], resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
     // pathtrace(cmd_buf, bake.gbufs, bake.shaders, bake.scene)
@@ -214,7 +218,7 @@ bake_get_gbuffer_world_normals :: proc(bake: ^Bake) -> gpu.Texture
     return bake.gbufs.world_normals
 }
 
-bake_debug_ground_truth :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, camera_to_world: matrix[4, 4]f32, texture_rw_id: u32, sampler_id: u32, resolution: [2]f32)
+bake_debug_ground_truth :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, camera_to_world: matrix[4, 4]f32, texture_rw_id: u32, sampler_id: u32, resolution: [2]f32, accum_counter: u32)
 {
     Compute_Data :: struct #all_or_none {
         output_texture_id: u32,
@@ -240,7 +244,7 @@ bake_debug_ground_truth :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_
                 dir_light_emission = [3]f32 { 2000000.0, 1840000.0, 1640000.0 },
             }
         },
-        accum_counter = 0,
+        accum_counter = accum_counter,
         resolution = resolution,
         camera_to_world = intr.matrix_flatten(camera_to_world),
     }
@@ -314,7 +318,6 @@ Mesh_Shader :: struct
     positions: rawptr,
     normals: rawptr,
     uvs: rawptr,
-    lm_uvs: rawptr,
     indices: rawptr,
 }
 

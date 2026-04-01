@@ -19,9 +19,9 @@ uint bvh_id_ZERO;
 
 layout(location = 0) out vec4 _res_out_loc0_;
 layout(location = 1) out vec4 _res_out_loc1_;
-layout(location = 1) in vec3 _res_in_loc1_;
-layout(location = 0) in vec3 _res_in_loc0_;
 layout(location = 2) in vec2 _res_in_loc2_;
+layout(location = 0) in vec3 _res_in_loc0_;
+layout(location = 1) in vec3 _res_in_loc1_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 
@@ -50,8 +50,13 @@ void main()
     vec3 world_pos_ = _res_in_loc0_;
     vec3 world_normal_ = _res_in_loc1_;
     vec2 uv_ = _res_in_loc2_;
-    Output out_ = Output_ZERO;
-    out_.world_pos_ = vec4(1, 0, 0, 1);
-    _res_out_loc0_ = out_.world_pos_; _res_out_loc1_ = out_.world_normal_; 
+    vec3 d_uv_ = vec3_ZERO;
+    float texel_world_size_ = float_ZERO;
+    Output frag_out_ = Output_ZERO;
+    d_uv_ = max(abs(dFdxFine(world_pos_)), abs(dFdyFine(world_pos_)));
+    texel_world_size_ = (max(d_uv_.x, max(d_uv_.y, d_uv_.z)) * sqrt(2.0));
+    frag_out_.world_pos_ = vec4(world_pos_, 1);
+    frag_out_.world_normal_ = vec4(((normalize(world_normal_) * 0.5) + 0.5), 1);
+    _res_out_loc0_ = frag_out_.world_pos_; _res_out_loc1_ = frag_out_.world_normal_; 
 }
 

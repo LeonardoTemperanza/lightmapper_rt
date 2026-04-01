@@ -373,6 +373,7 @@ get_material_point :: (scene: Scene, hit: Hit_Info) -> Material_Point
 {
     // Sample textures.
     color_sample := vec4(1);
+
     // TODO: If it has uvs...
     if true
     {
