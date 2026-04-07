@@ -148,12 +148,12 @@ render_draw_data :: proc(draw_data: ^im.Draw_Data, cmd_buf: gpu.Command_Buffer)
 
     // Prepare verts
     verts: gpu.slice_t(im.Draw_Vert)
-    indices: gpu.slice_t(u32)
+    indices: gpu.slice_t(u16)
     colors: gpu.slice_t([4]f32)
     if draw_data.total_vtx_count > 0
     {
         verts   = gpu.arena_alloc(&fd.staging_arena, im.Draw_Vert, draw_data.total_vtx_count)
-        indices = gpu.arena_alloc(&fd.staging_arena, u32,          draw_data.total_idx_count)
+        indices = gpu.arena_alloc(&fd.staging_arena, u16,          draw_data.total_idx_count)
         dst_vert := 0
         dst_idx  := 0
         for i in 0..<draw_data.cmd_lists_count
@@ -163,15 +163,7 @@ render_draw_data :: proc(draw_data: ^im.Draw_Data, cmd_buf: gpu.Command_Buffer)
             vtx_buffer_vec := ptr_to_multi_ptr(draw_list.vtx_buffer.data)
 
             copy(verts.cpu[dst_vert:], vtx_buffer_vec[:draw_list.vtx_buffer.size])
-
-            // Convert indices from u16 to u32 as no_gfx only supports u32 for now.
-            for j in 0..<draw_list.idx_buffer.size
-            {
-                idx_u32 := u32(idx_buffer_vec[j])
-                assert(i64(idx_u32) < i64(draw_data.total_vtx_count))
-                indices.cpu[dst_idx + int(j)] = idx_u32
-            }
-
+            copy(indices.cpu[dst_idx:], idx_buffer_vec[:draw_list.idx_buffer.size])
             dst_vert += int(draw_list.vtx_buffer.size)
             dst_idx += int(draw_list.idx_buffer.size)
         }
@@ -246,9 +238,8 @@ render_draw_data :: proc(draw_data: ^im.Draw_Data, cmd_buf: gpu.Command_Buffer)
                     tex_id = u32(im.draw_cmd_get_tex_id(pcmd)),
                     sampler_id = render_state.sampler_current_id,
                 }
-                indices_shifted := indices.gpu
-                indices_shifted.ptr = rawptr(uintptr(indices_shifted.ptr) + uintptr(pcmd.idx_offset + u32(global_idx_offset)) * 4)
-                gpu.cmd_draw_indexed_instanced(cmd_buf, vert_data, frag_data, indices_shifted, pcmd.elem_count)
+                offset_start := i32(pcmd.idx_offset) + global_idx_offset
+                gpu.cmd_draw_indexed(cmd_buf, vert_data, frag_data, gpu.subslice(indices, offset_start, offset_start + i32(pcmd.elem_count)))
             }
         }
         global_idx_offset += draw_list.idx_buffer.size
@@ -290,7 +281,7 @@ create_fonts_texture :: proc(desc_pool: ^gpu.Descriptor_Pool)
         format = .RGBA8_Unorm,
         usage = { .Sampled },
     })
-    gpu.cmd_copy_to_texture(cmd_buf, bd.fonts_texture, staging, bd.fonts_texture.mem)
+    gpu.cmd_copy_to_texture(cmd_buf, bd.fonts_texture, staging)
 
     bd.fonts_texture_id = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(bd.fonts_texture, {}))
 

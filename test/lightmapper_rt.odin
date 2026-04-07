@@ -157,7 +157,7 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, instances: []Inst
         mesh.indices   = ctx.meshes[i].indices.gpu.ptr
     }
     bake.scene_gpu.meshes_shader = gpu.mem_alloc(Mesh_Shader, len(ctx.meshes), gpu.Memory.GPU)
-    gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.meshes_shader, meshes_gpu, len(ctx.meshes))
+    gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.meshes_shader, meshes_gpu)
 
     instances_gpu := gpu.arena_alloc(&ctx.upload_arena, Instance_Shader, len(instances))
     for &instance, i in instances_gpu.cpu {
@@ -167,7 +167,7 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, instances: []Inst
         }
     }
     bake.scene_gpu.instances = gpu.mem_alloc(Instance_Shader, len(instances), gpu.Memory.GPU)
-    gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.instances, instances_gpu, len(instances))
+    gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.instances, instances_gpu)
     gpu.cmd_barrier(cmd_buf, .All, .All)
 
     bake.scene_gpu.instances_bvh = upload_bvh_instances(&ctx.upload_arena, cmd_buf, instances, ctx.meshes[:])
@@ -412,7 +412,7 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
             model_to_world_normals = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),
         }
 
-        gpu.cmd_draw_indexed_instanced(cmd_buf, vert_data, {}, mesh.indices, u32(len(mesh.indices.cpu)), instance_count = 25)
+        gpu.cmd_draw_indexed(cmd_buf, vert_data, {}, mesh.indices, instance_count = 25)
     }
 }
 
@@ -437,7 +437,7 @@ build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, p
     }
     bvh := gpu.bvh_alloc_and_create(desc)
     scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, desc)
-    gpu.cmd_build_blas(cmd_buf, bvh, bvh.mem, scratch, { gpu.BVH_Mesh { verts = positions.gpu.ptr, indices = indices.gpu.ptr } })
+    gpu.cmd_build_blas(cmd_buf, bvh, scratch, { gpu.BVH_Mesh { verts = positions.gpu.ptr, indices = indices.gpu.ptr } })
     return bvh
 }
 
@@ -449,7 +449,7 @@ build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, i
     }
     bvh := gpu.bvh_alloc_and_create(desc)
     scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, desc)
-    gpu.cmd_build_tlas(cmd_buf, bvh, bvh.mem, scratch, instances)
+    gpu.cmd_build_tlas(cmd_buf, bvh, scratch, instances)
     return bvh
 }
 
@@ -467,7 +467,7 @@ upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
         }
     }
     instances_local := gpu.mem_alloc(gpu.BVH_Instance, len(instances), mem_type = gpu.Memory.GPU)
-    gpu.cmd_mem_copy(cmd_buf, instances_local, instances_staging, len(instances))
+    gpu.cmd_mem_copy(cmd_buf, instances_local, instances_staging)
     return instances_local
 }
 

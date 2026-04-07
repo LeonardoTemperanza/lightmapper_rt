@@ -515,7 +515,7 @@ main :: proc()
                         normal_map_sampler             = 0,
                     }
 
-                    gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, frag_data.gpu, mesh.indices, mesh.idx_count, 1)
+                    gpu.cmd_draw_indexed(cmd_buf, verts_data.gpu, frag_data.gpu, mesh.indices)
                 }
 
                 gpu.cmd_end_render_pass(cmd_buf)
@@ -566,7 +566,7 @@ main :: proc()
             }
 
             // Render fullscreen quad
-            gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, frag_data.gpu, fsq_indices, 6, 1)
+            gpu.cmd_draw_indexed(cmd_buf, verts_data.gpu, frag_data.gpu, fsq_indices)
 
             // Render ImGui on top
             draw_data := imgui.get_draw_data()
@@ -619,10 +619,10 @@ upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh:
     res.normals = gpu.mem_alloc([3]f32, len(mesh.normals), mem_type = gpu.Memory.GPU)
     res.uvs = gpu.mem_alloc([2]f32, len(mesh.uvs), mem_type = gpu.Memory.GPU)
     res.indices = gpu.mem_alloc(u32, len(mesh.indices), mem_type = gpu.Memory.GPU)
-    gpu.cmd_mem_copy(cmd_buf, res.pos, positions_staging, len(mesh.pos))
-    gpu.cmd_mem_copy(cmd_buf, res.normals, normals_staging, len(mesh.normals))
-    gpu.cmd_mem_copy(cmd_buf, res.uvs, uvs_staging, len(mesh.uvs))
-    gpu.cmd_mem_copy(cmd_buf, res.indices, indices_staging, len(mesh.indices))
+    gpu.cmd_mem_copy(cmd_buf, res.pos, positions_staging)
+    gpu.cmd_mem_copy(cmd_buf, res.normals, normals_staging)
+    gpu.cmd_mem_copy(cmd_buf, res.uvs, uvs_staging)
+    gpu.cmd_mem_copy(cmd_buf, res.indices, indices_staging)
 
     res.idx_count = u32(len(mesh.indices))
     res.vert_count = u32(len(mesh.pos))
@@ -655,7 +655,7 @@ build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, p
     }
     bvh := gpu.bvh_alloc_and_create(desc)
     scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, desc)
-    gpu.cmd_build_blas(cmd_buf, bvh, bvh.mem, scratch, { gpu.BVH_Mesh { verts = positions.gpu.ptr, indices = indices.gpu.ptr } })
+    gpu.cmd_build_blas(cmd_buf, bvh, scratch, { gpu.BVH_Mesh { verts = positions.gpu.ptr, indices = indices.gpu.ptr } })
     return bvh
 }
 
@@ -667,7 +667,7 @@ build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, i
     }
     bvh := gpu.bvh_alloc_and_create(desc)
     scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, desc)
-    gpu.cmd_build_tlas(cmd_buf, bvh, bvh.mem, scratch, instances)
+    gpu.cmd_build_tlas(cmd_buf, bvh, scratch, instances)
     return bvh
 }
 
@@ -730,7 +730,7 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]
         copy(uvs_staging.cpu, uvs.uvs[:])
 
         uvs_gpu := gpu.mem_alloc([2]f32, len(uvs.uvs), gpu.Memory.GPU)
-        gpu.cmd_mem_copy(cmd_buf, uvs_gpu, uvs_staging, len(uvs.uvs))
+        gpu.cmd_mem_copy(cmd_buf, uvs_gpu, uvs_staging)
         append(&res.lm_uvs, uvs_gpu)
     }
 
@@ -857,13 +857,11 @@ create_fullscreen_quad :: proc(
         cmd_buf,
         full_screen_quad_verts_local,
         fsq_verts,
-        len(fsq_verts.cpu),
     )
     gpu.cmd_mem_copy(
         cmd_buf,
         full_screen_quad_indices_local,
         fsq_indices,
-        len(fsq_indices.cpu),
     )
 
     return full_screen_quad_verts_local, full_screen_quad_indices_local
@@ -972,7 +970,7 @@ upload_texture :: proc(img: ^image.Image, upload_arena: ^gpu.Arena) -> gpu.Owned
     {
         // Upload texture to GPU
         upload_cmd_buf := gpu.commands_begin(.Transfer)
-        gpu.cmd_copy_to_texture(upload_cmd_buf, texture, staging, texture.mem)
+        gpu.cmd_copy_to_texture(upload_cmd_buf, texture, staging)
         gpu.cmd_add_signal_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old + 1)
         gpu.queue_submit(.Transfer, {upload_cmd_buf})
     }
@@ -1460,7 +1458,7 @@ draw_uv_mesh_callback :: proc "c"(draw_list: ^imgui.Draw_List, cmd: ^imgui.Draw_
         translate = data.offset
     }
 
-    gpu.cmd_draw_indexed_instanced(data.cmd_buf, vert_data, {}, data.indices, u32(len(data.indices.cpu)))
+    gpu.cmd_draw_indexed(data.cmd_buf, vert_data, {}, data.indices)
 }
 
 Callback_Reset_Render_State := transmute(imgui.Draw_Callback) i64(-8)
