@@ -22,13 +22,15 @@ Instance :: struct
 
 Data :: struct
 {
-    output_texture_id: texture_id,
+    output_texture_id: texture_rw_id,
     tlas: bvh_id,
     linear_sampler: sampler_id,
     scene: Scene,
     resolution: vec2,
     accum_counter: uint,
+    is_lightmap: bool,  // False for first-person ground truth mode. If true, "camera_to_world" is ignored.
     camera_to_world: mat4,
+    gbufs_id: texture_rw_id,
 }
 
 Lights :: struct
@@ -42,34 +44,50 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
 {
     init_rng(uint(global_invocation_id.y * data.resolution.x + global_invocation_id.x), data.accum_counter);
 
-    uv := global_invocation_id.xy / data.resolution;
-    coord := 2.0 * uv - 1.0;
+    start_ray: Ray;
+    if data.is_lightmap
+    {
+        if global_invocation_id.x >= data.resolution.x || global_invocation_id.y >= data.resolution.y {
+            return;
+        }
 
-    coord = coord * tan((90.0 * pi / 180.0) / 2.0);
-    coord.y = coord.y * data.resolution.y / data.resolution.x;
+        pos_sample    := texture_load(data.gbufs_id + 0, global_invocation_id.xy);
+        normal_sample := texture_load(data.gbufs_id + 1, global_invocation_id.xy);
+        if normal_sample.a < 0.1 { return; }
 
-    world_camera_pos := (data.camera_to_world * vec4(0, 0, 0, 1)).xyz;
-    camera_lookat := normalize(vec3(coord, 1));
-    world_camera_lookat := normalize(data.camera_to_world * vec4(camera_lookat, 0.0)).xyz;
+        start_ray.ori = pos_sample.xyz;
+        start_ray.dir = sample_matte(vec3(1), normal_sample.xyz, -normal_sample.xyz, random_vec2());
+    }
+    else
+    {
+        uv := global_invocation_id.xy / data.resolution;
+        coord := 2.0 * uv - 1.0;
+        coord.y *= -1.0;
 
-    camera_ray: Ray;
-    camera_ray.ori = world_camera_pos;
-    camera_ray.dir = world_camera_lookat;
-    color := clamp_radiance(pathtrace(camera_ray, data.scene, data.tlas, data.linear_sampler));
+        coord = coord * tan((90.0 * pi / 180.0) / 2.0);
+        coord.y = coord.y * data.resolution.y / data.resolution.x;
+
+        world_camera_pos := (data.camera_to_world * vec4(0, 0, 0, 1)).xyz;
+        camera_lookat := normalize(vec3(coord, 1));
+        world_camera_lookat := normalize(data.camera_to_world * vec4(camera_lookat, 0.0)).xyz;
+
+        start_ray.ori = world_camera_pos;
+        start_ray.dir = world_camera_lookat;
+    }
+
+    color := clamp_radiance(pathtrace(start_ray, data.scene, data.tlas, data.linear_sampler));
 
     if global_invocation_id.x < data.resolution.x && global_invocation_id.y < data.resolution.y
     {
-        output_pixel := vec2(global_invocation_id.x, data.resolution.y - global_invocation_id.y);
-
         if data.accum_counter > 1
         {
             weight := 1.0 / float(data.accum_counter);
-            prev_color := texture_load(data.output_texture_id, output_pixel).xyz;
+            prev_color := texture_load(data.output_texture_id, global_invocation_id.xy).xyz;
             color = prev_color * (1 - weight) + color * weight;
             color = max(color, vec3(0, 0, 0));
         }
 
-        texture_store(data.output_texture_id, output_pixel, vec4(color, 1));
+        texture_store(data.output_texture_id, global_invocation_id.xy, vec4(color, 1));
     }
 }
 

@@ -20,6 +20,7 @@ Context :: struct
     shaders: Shaders,
 
     desc_pool: ^gpu.Descriptor_Pool,
+    linear_sampler_id: u32,
 
     // Upload resources
     bvh_scratch_arena: gpu.Arena,  // GPU local
@@ -37,6 +38,7 @@ init :: proc(desc_pool: ^gpu.Descriptor_Pool) -> Context
     ctx.bvh_scratch_arena = gpu.arena_init(mem_type = gpu.Memory.GPU)
     ctx.upload_arena = gpu.arena_init()
     ctx.desc_pool = desc_pool
+    ctx.linear_sampler_id = gpu.desc_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({}))
     return ctx
 }
 
@@ -119,8 +121,11 @@ Bake :: struct
     instances: [dynamic]Instance,
     scene_gpu: Scene_GPU,
     lightmap_size: u32,
+    lightmap: gpu.Texture,
+    lightmap_rw_id: u32,
+    gbufs_id: u32,
 
-    ground_truth_accum_counter: u32,
+    accum_counter: u32,
 }
 
 Instance :: struct
@@ -137,7 +142,7 @@ Instance :: struct
     albedo: [3]f32,
 }
 
-bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, instances: []Instance) -> Bake
+bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, lightmap: gpu.Texture, instances: []Instance) -> Bake
 {
     assert(lightmap_size > 0)
 
@@ -146,6 +151,8 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, instances: []Inst
     bake.gbufs = gbufs_create(lightmap_size)
     bake.instances = slice.clone_to_dynamic(instances)
     bake.lightmap_size = u32(lightmap_size)
+    bake.lightmap = lightmap
+    bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
 
     cmd_buf := gpu.commands_begin(.Main)
 
@@ -181,6 +188,11 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, instances: []Inst
     gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, ctx.meshes[:], ctx.lm_uvs[:], resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
+    bake.gbufs_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, []gpu.Texture_Descriptor {
+        gpu.texture_rw_view_descriptor(bake.gbufs.world_pos, {}),
+        gpu.texture_rw_view_descriptor(bake.gbufs.world_normals, {}),
+    })
+
     gpu.queue_submit(.Main, { cmd_buf })
     return bake
 }
@@ -195,69 +207,16 @@ bake_reset :: proc(bake: ^Bake)
 
 }
 
-bake_iteration :: proc(bake: ^Bake)
+bake_iteration :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena)
 {
     cmd_buf := gpu.commands_begin(.Main)
 
     ctx := bake.ctx
     resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
-    // gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, bake.instances[:], ctx.meshes[:], ctx.lm_uvs[:], resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
-
-    // pathtrace(cmd_buf, bake.gbufs, bake.shaders, bake.scene)
+    pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.lightmap_rw_id, 4096, bake.accum_counter)  // TODO
+    bake.accum_counter += 1
     gpu.queue_submit(.Main, { cmd_buf })
-}
-
-bake_get_gbuffer_world_pos :: proc(bake: ^Bake) -> gpu.Texture
-{
-    return bake.gbufs.world_pos
-}
-
-bake_get_gbuffer_world_normals :: proc(bake: ^Bake) -> gpu.Texture
-{
-    return bake.gbufs.world_normals
-}
-
-bake_debug_ground_truth :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, camera_to_world: matrix[4, 4]f32, texture_rw_id: u32, sampler_id: u32, resolution: [2]f32, accum_counter: u32)
-{
-    Compute_Data :: struct #all_or_none {
-        output_texture_id: u32,
-        tlas_id: u32,
-        linear_sampler: u32,
-        scene: Scene_Shader,
-        resolution: [2]f32,
-        accum_counter: u32,
-        camera_to_world: [16]f32,
-    }
-
-    compute_data := gpu.arena_alloc(frame_arena, Compute_Data)
-    compute_data.cpu^ = {
-        output_texture_id = texture_rw_id,
-        tlas_id = bake.scene_gpu.bvh_id,
-        linear_sampler = sampler_id,
-        scene = {
-            instances = bake.scene_gpu.instances.gpu.ptr,
-            meshes = bake.scene_gpu.meshes_shader.gpu.ptr,
-            lights = {
-                dir_light_dir   = linalg.normalize([3]f32 { 0.2, -1.0, -0.2 }),
-                dir_light_angle = math.RAD_PER_DEG * 0.2,
-                dir_light_emission = [3]f32 { 2000000.0, 1840000.0, 1640000.0 },
-            }
-        },
-        accum_counter = accum_counter,
-        resolution = resolution,
-        camera_to_world = intr.matrix_flatten(camera_to_world),
-    }
-
-    gpu.cmd_set_compute_shader(cmd_buf, bake.ctx.shaders.pathtrace)
-
-    num_groups_x := (u32(resolution.x) + 8 - 1) / 8
-    num_groups_y := (u32(resolution.y) + 8 - 1) / 8
-    num_groups_z := u32(1)
-    gpu.cmd_dispatch(cmd_buf, compute_data.gpu, num_groups_x, num_groups_y, num_groups_z)
-
-    gpu.cmd_barrier(cmd_buf, .Compute, .Fragment_Shader, {})
-    gpu.cmd_barrier(cmd_buf, .Compute, .Compute, {})
 }
 
 bake_end :: proc(bake: ^Bake)
@@ -271,7 +230,24 @@ bake_destroy :: proc(bake: ^Bake)
     bake^ = {}
 }
 
-// internal
+// For debug visualizations
+
+bake_get_gbuffer_world_pos :: proc(bake: ^Bake) -> gpu.Texture
+{
+    return bake.gbufs.world_pos
+}
+
+bake_get_gbuffer_world_normals :: proc(bake: ^Bake) -> gpu.Texture
+{
+    return bake.gbufs.world_normals
+}
+
+bake_debug_ground_truth :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, camera_to_world: matrix[4, 4]f32, output_rw_id: u32, resolution: [2]f32, accum_counter: u32)
+{
+    pathtrace(bake, cmd_buf, frame_arena, .First_Person, camera_to_world, output_rw_id, resolution, accum_counter)
+}
+
+// Internal
 
 Scene_GPU :: struct #all_or_none
 {
@@ -378,8 +354,8 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
 {
     gpu.cmd_scoped_render_pass(cmd_buf, {
         color_attachments = {
-            { texture = gbufs.world_pos, clear_color = { 0, 0, 0, 1 } },
-            { texture = gbufs.world_normals, clear_color = { 0, 0, 0, 1 } }
+            { texture = gbufs.world_pos, clear_color = { 0, 0, 0, 0 } },
+            { texture = gbufs.world_normals, clear_color = { 0, 0, 0, 0 } }
         }
     })
 
@@ -416,9 +392,57 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
     }
 }
 
-pathtrace :: proc(cmd_buf: gpu.Command_Buffer, output: gpu.Texture, shaders: Shaders)
+Pathtrace_Mode :: enum
 {
-    // gpu.cmd_set_compute_shader(cmd_buf,
+    Lightmap,
+    First_Person,
+}
+
+pathtrace :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, mode: Pathtrace_Mode, camera_to_world: matrix[4, 4]f32, texture_rw_id: u32, resolution: [2]f32, accum_counter: u32)
+{
+    Compute_Data :: struct #all_or_none {
+        output_texture_id: u32,
+        tlas_id: u32,
+        linear_sampler: u32,
+        scene: Scene_Shader,
+        resolution: [2]f32,
+        accum_counter: u32,
+        is_lightmap: b32,
+        camera_to_world: [16]f32,
+        gbufs_id: u32,
+    }
+
+    compute_data := gpu.arena_alloc(frame_arena, Compute_Data)
+    compute_data.cpu^ = {
+        output_texture_id = texture_rw_id,
+        tlas_id = bake.scene_gpu.bvh_id,
+        linear_sampler = bake.ctx.linear_sampler_id,
+        scene = {
+            instances = bake.scene_gpu.instances.gpu.ptr,
+            meshes = bake.scene_gpu.meshes_shader.gpu.ptr,
+            lights = {
+                dir_light_dir   = linalg.normalize([3]f32 { 0.2, -1.0, -0.2 }),
+                dir_light_angle = math.RAD_PER_DEG * 0.2,
+                dir_light_emission = [3]f32 { 2000000.0, 1840000.0, 1640000.0 },
+            }
+        },
+        accum_counter = accum_counter,
+        is_lightmap = mode == .Lightmap,
+        resolution = resolution,
+        camera_to_world = intr.matrix_flatten(camera_to_world),
+        gbufs_id = bake.gbufs_id,
+    }
+
+    gpu.cmd_set_compute_shader(cmd_buf, bake.ctx.shaders.pathtrace)
+    gpu.cmd_set_desc_pool(cmd_buf, bake.ctx.desc_pool^)
+
+    num_groups_x := (u32(resolution.x) + 8 - 1) / 8
+    num_groups_y := (u32(resolution.y) + 8 - 1) / 8
+    num_groups_z := u32(1)
+    gpu.cmd_dispatch(cmd_buf, compute_data.gpu, num_groups_x, num_groups_y, num_groups_z)
+
+    gpu.cmd_barrier(cmd_buf, .Compute, .Fragment_Shader, {})
+    gpu.cmd_barrier(cmd_buf, .Compute, .Compute, {})
 }
 
 build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, positions: gpu.slice_t([3]f32), indices: gpu.slice_t(u32), idx_count: u32, vert_count: u32) -> gpu.Owned_BVH

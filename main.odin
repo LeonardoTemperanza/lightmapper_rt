@@ -241,6 +241,13 @@ main :: proc()
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All)
     gpu.queue_submit(.Main, {upload_cmd_buf})
 
+    lightmap := gpu.texture_alloc_and_create({
+        format = .RGBA16_Float,
+        dimensions = { LM_SIZE, LM_SIZE, 1 },
+        usage = { .Sampled, .Storage }
+    })
+    defer gpu.texture_free_and_destroy(&lightmap)
+
     bake: lm.Bake
     {
         lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
@@ -259,12 +266,13 @@ main :: proc()
                 albedo = { 1.0, 1.0, 1.0 },
             }
         }
-        bake = lm.bake_begin(&lm_ctx, LM_SIZE, lm_instances)
+        bake = lm.bake_begin(&lm_ctx, LM_SIZE, lightmap, lm_instances)
     }
     defer lm.bake_destroy(&bake)
 
     gbuf_world_pos_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_get_gbuffer_world_pos(&bake), {}))
     gbuf_world_normals_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_get_gbuffer_world_normals(&bake), {}))
+    lightmap_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lightmap, {}))
 
     imgui_ctx := init_dear_imgui(window, &desc_pool)
     defer {
@@ -437,12 +445,13 @@ main :: proc()
                 })
             }
 
-            gui_show_debug_texture_window("Lightmap Viewer", { gbuf_world_pos_id, gbuf_world_normals_id }, { "World Position", "World Normals" }, LM_SIZE, LM_SIZE, gltf_scene, draw_calls[:], &show_texture_viewer)
+            gui_show_debug_texture_window("Lightmap Viewer", { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" }, LM_SIZE, LM_SIZE, gltf_scene, draw_calls[:], &show_texture_viewer)
         }
 
         imgui.render()
 
-        lm.bake_iteration(&bake)
+        gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
+        lm.bake_iteration(&bake, cmd_buf, frame_arena)
 
         switch output_type
         {
@@ -525,8 +534,7 @@ main :: proc()
             {
                 if pathtrace_gt_counter < max_gt_accums
                 {
-                    gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
-                    lm.bake_debug_ground_truth(&bake, cmd_buf, frame_arena, linalg.inverse(world_to_view), POSTPROCESS_TARGET_RW_IDX, sampler_linear_id, { f32(window_size_x), f32(window_size_y) }, pathtrace_gt_counter)
+                    lm.bake_debug_ground_truth(&bake, cmd_buf, frame_arena, linalg.inverse(world_to_view), POSTPROCESS_TARGET_RW_IDX, { f32(window_size_x), f32(window_size_y) }, pathtrace_gt_counter)
 
                     pathtrace_gt_counter += 1
                 }

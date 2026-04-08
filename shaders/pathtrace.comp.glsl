@@ -153,7 +153,9 @@ struct Data
     Scene scene_;
     vec2 resolution_;
     uint accum_counter_;
+    bool is_lightmap_;
     mat4 camera_to_world_;
+    uint gbufs_id_;
     uint _res_padding_1;
 };
 Data Data_ZERO;
@@ -234,39 +236,61 @@ void main()
 {
     _res_ptr_Data data_ = _res_compute_data_;
     vec3 global_invocation_id_ = gl_GlobalInvocationID;
+    Ray start_ray_ = Ray_ZERO;
     vec2 uv_ = vec2_ZERO;
     vec2 coord_ = vec2_ZERO;
     vec3 world_camera_pos_ = vec3_ZERO;
     vec3 camera_lookat_ = vec3_ZERO;
     vec3 world_camera_lookat_ = vec3_ZERO;
-    Ray camera_ray_ = Ray_ZERO;
     vec3 color_ = vec3_ZERO;
     init_rng(uint(((global_invocation_id_.y * data_._res_.resolution_.x) + global_invocation_id_.x)), data_._res_.accum_counter_);
-    uv_ = (global_invocation_id_.xy / data_._res_.resolution_);
-    coord_ = ((2.0 * uv_) - 1.0);
-    coord_ = (coord_ * tan((((90.0 * pi) / 180.0) / 2.0)));
-    coord_.y = ((coord_.y * data_._res_.resolution_.y) / data_._res_.resolution_.x);
-    world_camera_pos_ = (data_._res_.camera_to_world_ * vec4(0, 0, 0, 1)).xyz;
-    camera_lookat_ = normalize(vec3(coord_, 1));
-    world_camera_lookat_ = normalize((data_._res_.camera_to_world_ * vec4(camera_lookat_, 0.0))).xyz;
-    camera_ray_.ori_ = world_camera_pos_;
-    camera_ray_.dir_ = world_camera_lookat_;
-    color_ = clamp_radiance(pathtrace(camera_ray_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_));
+    if(data_._res_.is_lightmap_)
+    {
+        vec4 pos_sample_;
+        vec4 normal_sample_;
+        if(((global_invocation_id_.x >= data_._res_.resolution_.x) || (global_invocation_id_.y >= data_._res_.resolution_.y)))
+        {
+            return ;
+        }
+
+        pos_sample_ = imageLoad(_res_textures_rw_[nonuniformEXT((data_._res_.gbufs_id_ + 0))], ivec2(global_invocation_id_.xy));
+        normal_sample_ = imageLoad(_res_textures_rw_[nonuniformEXT((data_._res_.gbufs_id_ + 1))], ivec2(global_invocation_id_.xy));
+        if((normal_sample_.a < 0.1))
+        {
+            return ;
+        }
+
+        start_ray_.ori_ = pos_sample_.xyz;
+        start_ray_.dir_ = sample_matte(vec3(1), normal_sample_.xyz, (-normal_sample_.xyz), random_vec2());
+    }
+    else
+    {
+        uv_ = (global_invocation_id_.xy / data_._res_.resolution_);
+        coord_ = ((2.0 * uv_) - 1.0);
+        coord_.y *= (-1.0);
+        coord_ = (coord_ * tan((((90.0 * pi) / 180.0) / 2.0)));
+        coord_.y = ((coord_.y * data_._res_.resolution_.y) / data_._res_.resolution_.x);
+        world_camera_pos_ = (data_._res_.camera_to_world_ * vec4(0, 0, 0, 1)).xyz;
+        camera_lookat_ = normalize(vec3(coord_, 1));
+        world_camera_lookat_ = normalize((data_._res_.camera_to_world_ * vec4(camera_lookat_, 0.0))).xyz;
+        start_ray_.ori_ = world_camera_pos_;
+        start_ray_.dir_ = world_camera_lookat_;
+uv_ = (global_invocation_id_.xy / data_._res_.resolution_);coord_ = ((2.0 * uv_) - 1.0);coord_.y *= (-1.0);coord_ = (coord_ * tan((((90.0 * pi) / 180.0) / 2.0)));coord_.y = ((coord_.y * data_._res_.resolution_.y) / data_._res_.resolution_.x);world_camera_pos_ = (data_._res_.camera_to_world_ * vec4(0, 0, 0, 1)).xyz;camera_lookat_ = normalize(vec3(coord_, 1));world_camera_lookat_ = normalize((data_._res_.camera_to_world_ * vec4(camera_lookat_, 0.0))).xyz;start_ray_.ori_ = world_camera_pos_;start_ray_.dir_ = world_camera_lookat_;    }
+
+    color_ = clamp_radiance(pathtrace(start_ray_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_));
     if(((global_invocation_id_.x < data_._res_.resolution_.x) && (global_invocation_id_.y < data_._res_.resolution_.y)))
     {
-        vec2 output_pixel_;
-        output_pixel_ = vec2(global_invocation_id_.x, (data_._res_.resolution_.y - global_invocation_id_.y));
         if((data_._res_.accum_counter_ > 1))
         {
             float weight_;
             vec3 prev_color_;
             weight_ = (1.0 / float(data_._res_.accum_counter_));
-            prev_color_ = imageLoad(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(output_pixel_)).xyz;
+            prev_color_ = imageLoad(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(global_invocation_id_.xy)).xyz;
             color_ = ((prev_color_ * (1 - weight_)) + (color_ * weight_));
             color_ = max(color_, vec3(0, 0, 0));
         }
 
-        imageStore(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(output_pixel_), vec4(color_, 1));
+        imageStore(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(global_invocation_id_.xy), vec4(color_, 1));
     }
 
 }
