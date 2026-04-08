@@ -21,60 +21,34 @@ Data :: struct
 main :: (vert_id: uint @vert_id, instance_id: uint @instance_id, data: ^Data @data) -> Output
 {
     // Simulate conservative rasterization
-    uv_offset := vec2(0);
-    // TODO: We need arrays!
-    if instance_id == 0 {
-        uv_offset = vec2(-2.0, -2.0);
-    } else if instance_id == 1 {
-        uv_offset = vec2(2.0, -2.0);
-    } else if instance_id == 2 {
-        uv_offset = vec2(-2.0, 2.0);
-    } else if instance_id == 3 {
-        uv_offset = vec2(2.0, 2.0);
-    } else if instance_id == 4 {
-        uv_offset = vec2(-1.0, -2.0);
-    } else if instance_id == 5 {
-        uv_offset = vec2(1.0, -2.0);
-    } else if instance_id == 6 {
-        uv_offset = vec2(-2.0, -1.0);
-    } else if instance_id == 7 {
-        uv_offset = vec2(2.0, -1.0);
-    } else if instance_id == 8 {
-        uv_offset = vec2(-2.0, 1.0);
-    } else if instance_id == 9 {
-        uv_offset = vec2(2.0, 1.0);
-    } else if instance_id == 10 {
-        uv_offset = vec2(-1.0, 2.0);
-    } else if instance_id == 11 {
-        uv_offset = vec2(1.0, 2.0);
-    } else if instance_id == 12 {
-        uv_offset = vec2(-2.0, 0.0);
-    } else if instance_id == 13 {
-        uv_offset = vec2(2.0, 0.0);
-    } else if instance_id == 14 {
-        uv_offset = vec2(0.0, -2.0);
-    } else if instance_id == 15 {
-        uv_offset = vec2(0.0, 2.0);
-    } else if instance_id == 16 {
-        uv_offset = vec2(-1.0, -1.0);
-    } else if instance_id == 17 {
-        uv_offset = vec2(1.0, -1.0);
-    } else if instance_id == 18 {
-        uv_offset = vec2(-1.0, 0.0);
-    } else if instance_id == 19 {
-        uv_offset = vec2(1.0, 0.0);
-    } else if instance_id == 20 {
-        uv_offset = vec2(-1.0, 1.0);
-    } else if instance_id == 21 {
-        uv_offset = vec2(1.0, 1.0);
-    } else if instance_id == 22 {
-        uv_offset = vec2(0.0, -1.0);
-    } else if instance_id == 23 {
-        uv_offset = vec2(0.0, 1.0);
-    } else if instance_id == 24 {
-        uv_offset = vec2(0.0, 0.0);
-    }
+    offsets: [25]vec2;
+    offsets[0]  = vec2(-2.0, -2.0);
+    offsets[1]  = vec2(2.0, -2.0);
+    offsets[2]  = vec2(-2.0, 2.0);
+    offsets[3]  = vec2(2.0, 2.0);
+    offsets[4]  = vec2(-1.0, -2.0);
+    offsets[5]  = vec2(1.0, -2.0);
+    offsets[6]  = vec2(-2.0, -1.0);
+    offsets[7]  = vec2(2.0, -1.0);
+    offsets[8]  = vec2(-2.0, 1.0);
+    offsets[9]  = vec2(2.0, 1.0);
+    offsets[10] = vec2(-1.0, 2.0);
+    offsets[11] = vec2(1.0, 2.0);
+    offsets[12] = vec2(-2.0, 0.0);
+    offsets[13] = vec2(2.0, 0.0);
+    offsets[14] = vec2(0.0, -2.0);
+    offsets[15] = vec2(0.0, 2.0);
+    offsets[16] = vec2(-1.0, -1.0);
+    offsets[17] = vec2(1.0, -1.0);
+    offsets[18] = vec2(-1.0, 0.0);
+    offsets[19] = vec2(1.0, 0.0);
+    offsets[20] = vec2(-1.0, 1.0);
+    offsets[21] = vec2(1.0, 1.0);
+    offsets[22] = vec2(0.0, -1.0);
+    offsets[23] = vec2(0.0, 1.0);
+    offsets[24] = vec2(0.0, 0.0);
 
+    uv_offset := offsets[instance_id % 25];
     ndc_offset := (uv_offset / data.resolution) / 2.0;
 
     vert_out: Output;
