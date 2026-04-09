@@ -336,7 +336,7 @@ get_alpha :: (scene: Scene, hit: Hit_Info) -> float
 
 // RNG
 
-pi: float = 3.1415;
+pi: float = 3.14159265359;
 
 RNG_STATE: uint;
 

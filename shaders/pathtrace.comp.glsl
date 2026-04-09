@@ -208,7 +208,7 @@ vec3 sample_lights(Lights lights_, vec3 pos_, vec3 normal_, vec3 outgoing_);
 float sample_lights_pdf(Lights lights_, vec3 pos_, vec3 incoming_);
 vec3 sample_sky_emission(vec3 dir_, Scene scene_);
 vec3 clamp_radiance(vec3 radiance_);
-float pi = 3.1415;
+float pi = 3.14159265359;
 uint RNG_STATE;
 layout(buffer_reference, scalar) readonly buffer _res_ptr_void { uint _res_void_; };
 layout(buffer_reference, scalar) readonly buffer _res_slice_Instance { Instance _res_[]; };
