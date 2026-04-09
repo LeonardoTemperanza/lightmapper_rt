@@ -7,6 +7,20 @@
 #extension GL_EXT_debug_printf : require
 #extension GL_EXT_ray_query : require
 layout(local_size_x_id = 13370, local_size_y_id = 13371, local_size_z_id = 13372) in;
+layout(set = 0, binding = 0) uniform texture2D _res_textures_[];
+layout(set = 1, binding = 0) uniform image2D _res_textures_rw_[];
+layout(set = 2, binding = 0) uniform sampler _res_samplers_[];
+
+
+// Intrinsics:
+
+vec2 texture_size(uint t, uint s, int lod)
+{
+   return textureSize(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), lod);
+}
+
+// Intrinsics end.
+
 
 // Raytracing intrinsics:
 
@@ -223,10 +237,6 @@ layout(buffer_reference, scalar) readonly buffer _res_slice_uint { uint _res_[];
 _res_slice_uint _res_slice_uint_ZERO;
 layout(buffer_reference, scalar) readonly buffer _res_ptr_Data { Data _res_; };
 _res_ptr_Data _res_ptr_Data_ZERO;
-
-layout(set = 0, binding = 0) uniform texture2D _res_textures_[];
-layout(set = 1, binding = 0) uniform image2D _res_textures_rw_[];
-layout(set = 2, binding = 0) uniform sampler _res_samplers_[];
 
 layout(push_constant, scalar) uniform Push
 {

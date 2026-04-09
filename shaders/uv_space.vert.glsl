@@ -5,6 +5,20 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_image_load_formatted : require
 #extension GL_EXT_debug_printf : require
+layout(set = 0, binding = 0) uniform texture2D _res_textures_[];
+layout(set = 1, binding = 0) uniform image2D _res_textures_rw_[];
+layout(set = 2, binding = 0) uniform sampler _res_samplers_[];
+
+
+// Intrinsics:
+
+vec2 texture_size(uint t, uint s, int lod)
+{
+   return textureSize(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), lod);
+}
+
+// Intrinsics end.
+
 bool bool_ZERO;
 int int_ZERO;
 uint uint_ZERO;
@@ -55,10 +69,6 @@ layout(buffer_reference, scalar) readonly buffer _res_ptr_Data { Data _res_; };
 _res_ptr_Data _res_ptr_Data_ZERO;
 struct _res_array_25_vec2 { vec2 data[25]; };
 _res_array_25_vec2 _res_array_25_vec2_ZERO;
-
-layout(set = 0, binding = 0) uniform texture2D _res_textures_[];
-layout(set = 1, binding = 0) uniform image2D _res_textures_rw_[];
-layout(set = 2, binding = 0) uniform sampler _res_samplers_[];
 
 layout(push_constant, scalar) uniform Push
 {

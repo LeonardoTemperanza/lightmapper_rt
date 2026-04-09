@@ -37,8 +37,14 @@ main :: (normal_vert: vec4 @in_loc(0), uv: vec2 @in_loc(1), lm_uv: vec2 @in_loc(
     // Sample metallic/roughness texture
     metallic_roughness_sample := texture_sample(data.metallic_roughness_map, data.metallic_roughness_map_sampler, uv);
 
+    irradiance: vec3;
+    if data.do_bicubic_sampling {
+        irradiance = texture_sample_bicubic(data.lightmap, data.lightmap_sampler, lm_uv).rgb;
+    } else {
+        irradiance = texture_sample(data.lightmap, data.lightmap_sampler, lm_uv).rgb;
+    }
+
     out := vec3(1);
-    irradiance := texture_sample(data.lightmap, data.lightmap_sampler, lm_uv).rgb;
     if data.sample_diffuse && data.sample_lightmap {
         out = base_color.rgb / PI * irradiance;
     } else if data.sample_diffuse && !data.sample_lightmap {
@@ -52,4 +58,47 @@ main :: (normal_vert: vec4 @in_loc(0), uv: vec2 @in_loc(1), lm_uv: vec2 @in_loc(
 fwidth_ :: (v: float) -> float
 {
     return abs(dfdx_fine(v)) + abs(dfdy_fine(v));
+}
+
+cubic :: (v: float) -> vec4
+{
+    n := vec4(1.0, 2.0, 3.0, 4.0) - v;
+    s := n * n * n;
+    x := s.x;
+    y := s.y - 4.0 * s.x;
+    z := s.z - 4.0 * s.y + 6.0 * s.x;
+    w := 6.0 - x - y - z;
+    return vec4(x, y, z, w) * (1.0/6.0);
+}
+
+// From: https://stackoverflow.com/questions/13501081/efficient-bicubic-filtering-code-in-glsl
+texture_sample_bicubic :: (texture: texture_id, linear_sampler: sampler_id, coords: vec2) -> vec4
+{
+    tex_size := texture_size(texture, linear_sampler, 0);
+    inv_tex_size := 1.0 / tex_size;
+
+    tex_coords := coords * tex_size - 0.5;
+
+    fxy := fract(tex_coords);
+    tex_coords -= fxy;
+
+    xcubic := cubic(fxy.x);
+    ycubic := cubic(fxy.y);
+
+    c := tex_coords.xxyy + vec2 (-0.5, +1.5).xyxy;
+
+    s := vec4(xcubic.xz + xcubic.yw, ycubic.xz + ycubic.yw);
+    offset := c + vec4 (xcubic.yw, ycubic.yw) / s;
+
+    offset *= inv_tex_size.xxyy;
+
+    sample0 := texture_sample(texture, linear_sampler, offset.xz);
+    sample1 := texture_sample(texture, linear_sampler, offset.yz);
+    sample2 := texture_sample(texture, linear_sampler, offset.xw);
+    sample3 := texture_sample(texture, linear_sampler, offset.yw);
+
+    sx := s.x / (s.x + s.y);
+    sy := s.z / (s.z + s.w);
+
+    return mix(mix(sample3, sample2, vec4(sx)), mix(sample1, sample0, vec4(sx)), vec4(sy));
 }
