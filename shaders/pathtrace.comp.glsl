@@ -182,6 +182,7 @@ struct Material_Point
 };
 Material_Point Material_Point_ZERO;
 void main();
+vec3 bake_texel(vec3 world_pos_, vec3 world_normal_, Scene scene_, uint tlas_, uint sampler_);
 vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_, uint sampler_);
 Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_);
 Hit_Info ray_skip_alpha_stochastically(Ray start_ray_, Scene scene_, uint tlas_);
@@ -196,9 +197,9 @@ mat4 basis_fromz(vec3 v_);
 vec3 sample_hemisphere_cos(vec3 normal_, vec2 ruv_);
 float sample_hemisphere_cos_pdf(vec3 normal_, vec3 direction_);
 Material_Point get_material_point(Scene scene_, Hit_Info hit_);
-vec3 sample_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec2 rn_);
-vec3 eval_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_);
-float sample_matte_pdf(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_);
+vec3 sample_matte(vec3 normal_, vec2 rn_);
+vec3 eval_matte(vec3 color_, vec3 normal_, vec3 incoming_);
+float sample_matte_pdf(vec3 normal_, vec3 incoming_);
 bool is_finite(vec3 v_);
 float sun_disk_falloff(vec3 ray_dir_, vec3 sun_dir_, float angular_radius_);
 vec3 sample_sun_direction(vec3 sun_dir_, float angular_radius_, vec2 u_);
@@ -236,18 +237,19 @@ void main()
 {
     _res_ptr_Data data_ = _res_compute_data_;
     vec3 global_invocation_id_ = gl_GlobalInvocationID;
+    vec3 color_ = vec3_ZERO;
     Ray start_ray_ = Ray_ZERO;
     vec2 uv_ = vec2_ZERO;
     vec2 coord_ = vec2_ZERO;
     vec3 world_camera_pos_ = vec3_ZERO;
     vec3 camera_lookat_ = vec3_ZERO;
     vec3 world_camera_lookat_ = vec3_ZERO;
-    vec3 color_ = vec3_ZERO;
     init_rng(uint(((global_invocation_id_.y * data_._res_.resolution_.x) + global_invocation_id_.x)), data_._res_.accum_counter_);
     if(data_._res_.is_lightmap_)
     {
         vec4 pos_sample_;
         vec4 normal_sample_;
+        vec3 normal_;
         if(((global_invocation_id_.x >= data_._res_.resolution_.x) || (global_invocation_id_.y >= data_._res_.resolution_.y)))
         {
             return ;
@@ -260,8 +262,10 @@ void main()
             return ;
         }
 
-        start_ray_.ori_ = pos_sample_.xyz;
-        start_ray_.dir_ = sample_matte(vec3(1), normal_sample_.xyz, (-normal_sample_.xyz), random_vec2());
+        normal_ = normalize(((normal_sample_ * 2.0) - 1.0).xyz);
+        start_ray_.ori_ = (pos_sample_.xyz + (normal_ * 0.0011));
+        start_ray_.dir_ = (-normal_);
+        color_ = bake_texel(pos_sample_.xyz, normal_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_);
     }
     else
     {
@@ -275,9 +279,9 @@ void main()
         world_camera_lookat_ = normalize((data_._res_.camera_to_world_ * vec4(camera_lookat_, 0.0))).xyz;
         start_ray_.ori_ = world_camera_pos_;
         start_ray_.dir_ = world_camera_lookat_;
-uv_ = (global_invocation_id_.xy / data_._res_.resolution_);coord_ = ((2.0 * uv_) - 1.0);coord_.y *= (-1.0);coord_ = (coord_ * tan((((90.0 * pi) / 180.0) / 2.0)));coord_.y = ((coord_.y * data_._res_.resolution_.y) / data_._res_.resolution_.x);world_camera_pos_ = (data_._res_.camera_to_world_ * vec4(0, 0, 0, 1)).xyz;camera_lookat_ = normalize(vec3(coord_, 1));world_camera_lookat_ = normalize((data_._res_.camera_to_world_ * vec4(camera_lookat_, 0.0))).xyz;start_ray_.ori_ = world_camera_pos_;start_ray_.dir_ = world_camera_lookat_;    }
+        color_ = clamp_radiance(pathtrace(start_ray_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_));
+uv_ = (global_invocation_id_.xy / data_._res_.resolution_);coord_ = ((2.0 * uv_) - 1.0);coord_.y *= (-1.0);coord_ = (coord_ * tan((((90.0 * pi) / 180.0) / 2.0)));coord_.y = ((coord_.y * data_._res_.resolution_.y) / data_._res_.resolution_.x);world_camera_pos_ = (data_._res_.camera_to_world_ * vec4(0, 0, 0, 1)).xyz;camera_lookat_ = normalize(vec3(coord_, 1));world_camera_lookat_ = normalize((data_._res_.camera_to_world_ * vec4(camera_lookat_, 0.0))).xyz;start_ray_.ori_ = world_camera_pos_;start_ray_.dir_ = world_camera_lookat_;color_ = clamp_radiance(pathtrace(start_ray_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_));    }
 
-    color_ = clamp_radiance(pathtrace(start_ray_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_));
     if(((global_invocation_id_.x < data_._res_.resolution_.x) && (global_invocation_id_.y < data_._res_.resolution_.y)))
     {
         if((data_._res_.accum_counter_ > 1))
@@ -293,6 +297,54 @@ uv_ = (global_invocation_id_.xy / data_._res_.resolution_);coord_ = ((2.0 * uv_)
         imageStore(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(global_invocation_id_.xy), vec4(color_, 1));
     }
 
+}
+
+vec3 bake_texel(vec3 world_pos_, vec3 world_normal_, Scene scene_, uint tlas_, uint sampler_)
+{
+    int N_ = int_ZERO;
+    vec3 accum_ = vec3_ZERO;
+    vec3 origin_ = vec3_ZERO;
+    N_ = 1;
+    accum_ = vec3(0, 0, 0);
+    origin_ = world_pos_;
+    // for construct
+    {
+        int i_;
+        float light_prob_;
+        float bsdf_prob_;
+        vec3 incoming_;
+        float prob_;
+        float cos_term_;
+        float mis_weight_;
+        Ray ray_;
+        for(i_ = 0; (i_ < N_); i_ += 1)
+        {
+            light_prob_ = 0.5;
+            bsdf_prob_ = 0.5;
+            if((random_f32() < bsdf_prob_))
+            {
+                incoming_ = sample_matte(world_normal_, random_vec2());
+            }
+            else
+            {
+                incoming_ = sample_lights(scene_.lights_, origin_, world_normal_, world_normal_);
+incoming_ = sample_lights(scene_.lights_, origin_, world_normal_, world_normal_);            }
+
+            if((incoming_ == vec3(0, 0, 0)))
+            {
+                continue;
+            }
+
+            prob_ = ((bsdf_prob_ * sample_matte_pdf(world_normal_, incoming_)) + (light_prob_ * sample_lights_pdf(scene_.lights_, origin_, incoming_)));
+            cos_term_ = max(0.0, dot(world_normal_, incoming_));
+            mis_weight_ = (cos_term_ / prob_);
+            ray_.ori_ = origin_;
+            ray_.dir_ = incoming_;
+            accum_ += clamp_radiance((pathtrace(ray_, scene_, tlas_, sampler_) * mis_weight_));
+        }
+    }
+
+    return (accum_ / float(N_));
 }
 
 vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_, uint sampler_)
@@ -339,7 +391,7 @@ vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_, uint sampler_)
                     vec2 rnd1_;
                     rnd0_ = random_f32();
                     rnd1_ = random_vec2();
-                    incoming_ = sample_matte(mat_point_.color_, hit_.normal_, outgoing_, rnd1_);
+                    incoming_ = sample_matte(hit_.normal_, rnd1_);
                 }
                 else
                 {
@@ -351,8 +403,8 @@ incoming_ = sample_lights(scene_.lights_, hit_pos_, hit_.normal_, outgoing_);   
                     break;
                 }
 
-                prob_ = ((bsdf_prob_ * sample_matte_pdf(mat_point_.color_, hit_.normal_, outgoing_, incoming_)) + (light_prob_ * sample_lights_pdf(scene_.lights_, hit_pos_, incoming_)));
-                weight_ *= (eval_matte(mat_point_.color_, hit_.normal_, outgoing_, incoming_) / prob_);
+                prob_ = ((bsdf_prob_ * sample_matte_pdf(hit_.normal_, incoming_)) + (light_prob_ * sample_lights_pdf(scene_.lights_, hit_pos_, incoming_)));
+                weight_ *= (eval_matte(mat_point_.color_, hit_.normal_, incoming_) / prob_);
             }
 
             ray_.ori_ = hit_pos_;
@@ -575,7 +627,7 @@ vec2 random_vec2()
 
 float copysignf(float mag_, float sgn_)
 {
-    return ((sgn_ > 0)) ? (mag_) : ((-mag_));
+    return (((sgn_ > 0)) ? (mag_) : ((-mag_)));
 }
 
 mat4 basis_fromz(vec3 v_)
@@ -659,17 +711,17 @@ Material_Point get_material_point(Scene scene_, Hit_Info hit_)
     return mat_point_;
 }
 
-vec3 sample_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec2 rn_)
+vec3 sample_matte(vec3 normal_, vec2 rn_)
 {
     return sample_hemisphere_cos(normal_, rn_);
 }
 
-vec3 eval_matte(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_)
+vec3 eval_matte(vec3 color_, vec3 normal_, vec3 incoming_)
 {
     return ((color_ / pi) * abs(dot(normal_, incoming_)));
 }
 
-float sample_matte_pdf(vec3 color_, vec3 normal_, vec3 outgoing_, vec3 incoming_)
+float sample_matte_pdf(vec3 normal_, vec3 incoming_)
 {
     return sample_hemisphere_cos_pdf(normal_, incoming_);
 }

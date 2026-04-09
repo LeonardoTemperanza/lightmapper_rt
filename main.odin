@@ -350,6 +350,9 @@ main :: proc()
             imgui.show_demo_window(&show_demo_window)
         }
 
+        @(static) do_bicubic_sampling: bool = false
+        @(static) sample_lightmap: bool = true
+        @(static) sample_diffuse: bool = false
         if show_settings && imgui.begin("Settings", &show_settings)
         {
             // Lightmap sampling
@@ -369,8 +372,9 @@ main :: proc()
                             {
                                 case .Point:    sampler_current_id = sampler_point_id
                                 case .Bilinear: sampler_current_id = sampler_linear_id
-                                case .Bicubic:  sampler_current_id = sampler_current_id
+                                case .Bicubic:  sampler_current_id = sampler_linear_id
                             }
+                            do_bicubic_sampling = Sampler_Type(n) == .Bicubic
                         }
 
                         if is_selected {
@@ -379,6 +383,9 @@ main :: proc()
                     }
                     imgui.end_combo()
                 }
+
+                imgui.checkbox("Sample lightmap", &sample_lightmap)
+                imgui.checkbox("Sample diffuse", &sample_diffuse)
             }
 
             // Output type
@@ -490,6 +497,7 @@ main :: proc()
                         positions:             rawptr,
                         normals:               rawptr,
                         uvs:                   rawptr,
+                        lm_uvs:                rawptr,
                         model_to_world:        [16]f32,
                         model_to_world_normal: [16]f32,
                         world_to_view:         [16]f32,
@@ -500,6 +508,7 @@ main :: proc()
                         positions             = mesh.pos.gpu.ptr,
                         normals               = mesh.normals.gpu.ptr,
                         uvs                   = mesh.uvs.gpu.ptr,
+                        lm_uvs                = scene.lm_uvs[instance.mesh_idx].gpu.ptr,
                         model_to_world        = intr.matrix_flatten(instance.transform),
                         model_to_world_normal = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),
                         world_to_view         = intr.matrix_flatten(world_to_view),
@@ -513,15 +522,27 @@ main :: proc()
                         metallic_roughness_map_sampler: u32,
                         normal_map:                     u32,
                         normal_map_sampler:             u32,
+
+                        lightmap: u32,
+                        lightmap_sampler: u32,
+                        do_bicubic_sampling: b32,
+                        sample_lightmap: b32,
+                        sample_diffuse: b32,
                     }
                     frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
                     frag_data.cpu^ = {
                         base_color_map                 = base_color_map,
-                        base_color_map_sampler         = sampler_current_id,
+                        base_color_map_sampler         = sampler_linear_id,
                         metallic_roughness_map         = metallic_roughness_map,
                         metallic_roughness_map_sampler = 0,
                         normal_map                     = normal_map,
                         normal_map_sampler             = 0,
+
+                        lightmap = lightmap_id,
+                        lightmap_sampler = sampler_current_id,
+                        do_bicubic_sampling = b32(do_bicubic_sampling),
+                        sample_lightmap = b32(sample_lightmap),
+                        sample_diffuse = b32(sample_diffuse),
                     }
 
                     gpu.cmd_draw_indexed(cmd_buf, verts_data.gpu, frag_data.gpu, mesh.indices)

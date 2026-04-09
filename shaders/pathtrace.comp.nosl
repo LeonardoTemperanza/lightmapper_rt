@@ -44,6 +44,8 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
 {
     init_rng(uint(global_invocation_id.y * data.resolution.x + global_invocation_id.x), data.accum_counter);
 
+    color: vec3;
+
     start_ray: Ray;
     if data.is_lightmap
     {
@@ -55,8 +57,11 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
         normal_sample := texture_load(data.gbufs_id + 1, global_invocation_id.xy);
         if normal_sample.a < 0.1 { return; }
 
-        start_ray.ori = pos_sample.xyz;
-        start_ray.dir = sample_matte(vec3(1), normal_sample.xyz, -normal_sample.xyz, random_vec2());
+        normal := normalize((normal_sample * 2.0 - 1.0).xyz);
+
+        start_ray.ori = pos_sample.xyz + normal * 0.0011;
+        start_ray.dir = -normal;
+        color = bake_texel(pos_sample.xyz, normal, data.scene, data.tlas, data.linear_sampler);
     }
     else
     {
@@ -73,9 +78,8 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
 
         start_ray.ori = world_camera_pos;
         start_ray.dir = world_camera_lookat;
+        color = clamp_radiance(pathtrace(start_ray, data.scene, data.tlas, data.linear_sampler));
     }
-
-    color := clamp_radiance(pathtrace(start_ray, data.scene, data.tlas, data.linear_sampler));
 
     if global_invocation_id.x < data.resolution.x && global_invocation_id.y < data.resolution.y
     {
@@ -89,6 +93,43 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
 
         texture_store(data.output_texture_id, global_invocation_id.xy, vec4(color, 1));
     }
+}
+
+bake_texel :: (world_pos: vec3, world_normal: vec3, scene: Scene, tlas: bvh_id, sampler: sampler_id) -> vec3
+{
+    N := 1;
+    accum := vec3(0, 0, 0);
+    origin := world_pos;
+
+    for i := 0; i < N; i += 1
+    {
+        light_prob := 0.5;
+        bsdf_prob  := 0.5;
+
+        incoming: vec3;
+        if random_f32() < bsdf_prob
+        {
+            incoming = sample_matte(world_normal, random_vec2());
+        }
+        else
+        {
+            incoming = sample_lights(scene.lights, origin, world_normal, world_normal);
+        }
+        if incoming == vec3(0, 0, 0) { continue; }
+
+        prob := bsdf_prob  * sample_matte_pdf(world_normal, incoming) +
+                light_prob * sample_lights_pdf(scene.lights, origin, incoming);
+
+        cos_term := max(0.0, dot(world_normal, incoming));
+        mis_weight := cos_term / prob;
+
+        ray: Ray;
+        ray.ori = origin;
+        ray.dir = incoming;
+        accum += clamp_radiance(pathtrace(ray, scene, tlas, sampler) * mis_weight);
+    }
+
+    return accum / float(N);
 }
 
 pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -> vec3
@@ -126,7 +167,7 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -
             {
                 rnd0 := random_f32();
                 rnd1 := random_vec2();
-                incoming = sample_matte(mat_point.color, hit.normal, outgoing, rnd1);
+                incoming = sample_matte(hit.normal, rnd1);
             }
             else
             {
@@ -135,9 +176,9 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -
 
             if incoming == vec3(0, 0, 0) { break; }
 
-            prob := bsdf_prob * sample_matte_pdf(mat_point.color, hit.normal, outgoing, incoming) +
+            prob := bsdf_prob * sample_matte_pdf(hit.normal, incoming) +
                     light_prob * sample_lights_pdf(scene.lights, hit_pos, incoming);
-            weight *= eval_matte(mat_point.color, hit.normal, outgoing, incoming) / prob;
+            weight *= eval_matte(mat_point.color, hit.normal, incoming) / prob;
         }
 
         // Update ray.
@@ -419,17 +460,17 @@ get_material_point :: (scene: Scene, hit: Hit_Info) -> Material_Point
 
 // BSDF sampling
 
-sample_matte :: (color: vec3, normal: vec3, outgoing: vec3, rn: vec2) -> vec3
+sample_matte :: (normal: vec3, rn: vec2) -> vec3
 {
     return sample_hemisphere_cos(normal, rn);
 }
 
-eval_matte :: (color: vec3, normal: vec3, outgoing: vec3, incoming: vec3) -> vec3
+eval_matte :: (color: vec3, normal: vec3, incoming: vec3) -> vec3
 {
     return color / pi * abs(dot(normal, incoming));
 }
 
-sample_matte_pdf :: (color: vec3, normal: vec3, outgoing: vec3, incoming: vec3) -> float
+sample_matte_pdf :: (normal: vec3, incoming: vec3) -> float
 {
     return sample_hemisphere_cos_pdf(normal, incoming);
 }

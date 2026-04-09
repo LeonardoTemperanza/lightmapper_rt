@@ -9,9 +9,15 @@ Data :: struct
 
     normal_map: texture_id,
     normal_map_sampler: sampler_id,
+
+    lightmap: texture_id,
+    lightmap_sampler: sampler_id,
+    do_bicubic_sampling: bool,
+    sample_lightmap: bool,
+    sample_diffuse: bool,
 }
 
-main :: (normal_vert: vec4 @in_loc(0), uv: vec2 @in_loc(1), world_pos: vec4 @in_loc(2), data: ^Data @data) -> vec4 @out_loc(0)
+main :: (normal_vert: vec4 @in_loc(0), uv: vec2 @in_loc(1), lm_uv: vec2 @in_loc(2), world_pos: vec4 @in_loc(3), data: ^Data @data) -> vec4 @out_loc(0)
 {
     // Sample base color texture
     base_color := texture_sample(data.base_color_map, data.base_color_map_sampler, uv);
@@ -29,8 +35,14 @@ main :: (normal_vert: vec4 @in_loc(0), uv: vec2 @in_loc(1), world_pos: vec4 @in_
     // Sample metallic/roughness texture
     metallic_roughness_sample := texture_sample(data.metallic_roughness_map, data.metallic_roughness_map_sampler, uv);
 
-    albedo := base_color;
-    return albedo;
+    out := vec4(1);
+    if data.sample_diffuse {
+        out *= base_color;
+    }
+    if data.sample_lightmap {
+        out.rgb *= texture_sample(data.lightmap, data.lightmap_sampler, lm_uv).rgb;
+    }
+    return out;
 }
 
 fwidth_ :: (v: float) -> float

@@ -19,7 +19,8 @@ uint bvh_id_ZERO;
 
 layout(location = 1) out vec2 _res_out_loc1_;
 layout(location = 0) out vec4 _res_out_loc0_;
-layout(location = 2) out vec4 _res_out_loc2_;
+layout(location = 3) out vec4 _res_out_loc3_;
+layout(location = 2) out vec2 _res_out_loc2_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_slice_vec3;
@@ -31,6 +32,7 @@ struct Data
     _res_slice_vec3 positions_;
     _res_slice_vec3 normals_;
     _res_slice_vec2 uvs_;
+    _res_slice_vec2 lm_uvs_;
     mat4 model_to_world_;
     mat4 model_to_world_normal_;
     mat4 world_to_view_;
@@ -42,6 +44,7 @@ struct Output
     vec4 pos_;
     vec4 normal_;
     vec2 uv_;
+    vec2 lm_uv_;
     vec4 world_pos_;
 };
 Output Output_ZERO;
@@ -82,7 +85,8 @@ void main()
     vert_out_.pos_ = clip_pos_;
     vert_out_.normal_ = world_normal_;
     vert_out_.uv_ = data_._res_.uvs_._res_[vert_id_];
+    vert_out_.lm_uv_ = data_._res_.lm_uvs_._res_[vert_id_];
     vert_out_.world_pos_ = world_pos_;
-    gl_Position = vert_out_.pos_; _res_out_loc0_ = vert_out_.normal_; _res_out_loc1_ = vert_out_.uv_; _res_out_loc2_ = vert_out_.world_pos_; 
+    gl_Position = vert_out_.pos_; _res_out_loc0_ = vert_out_.normal_; _res_out_loc1_ = vert_out_.uv_; _res_out_loc2_ = vert_out_.lm_uv_; _res_out_loc3_ = vert_out_.world_pos_; 
 }
 
