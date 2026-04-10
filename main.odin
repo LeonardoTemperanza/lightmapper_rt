@@ -555,8 +555,6 @@ main :: proc()
                         selected_lm_pixel = selected_pixel,
                     }
 
-                    fmt.println(is_pixel_selected, selected_pixel)
-
                     gpu.cmd_draw_indexed(cmd_buf, verts_data.gpu, frag_data.gpu, mesh.indices)
                 }
 
