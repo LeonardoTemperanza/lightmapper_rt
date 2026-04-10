@@ -155,12 +155,14 @@ main :: proc()
     // Spawn and wait for loading threads
     {
         worker_threads: [dynamic]^thread.Thread
+        /*
         defer {
             cancel_loading_textures = true
             for t in worker_threads {
                 thread.terminate(t, 0)
             }
         }
+        */
 
         Texture_Loader_Data :: struct {
             texture_infos: []shared.Gltf_Texture_Info,
