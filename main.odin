@@ -223,10 +223,12 @@ main :: proc()
     defer scene_destroy(&scene)
 
     max_anisotropy := min(16.0, gpu.device_limits().max_anisotropy)
+
+    sampler_linear_id := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ max_anisotropy = min(16.0, gpu.device_limits().max_anisotropy) }))
     // Lightmap samplers
-    sampler_linear_id  := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ max_anisotropy = min(16.0, gpu.device_limits().max_anisotropy) }))
-    sampler_point_id   := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ min_filter = .Nearest, mag_filter = .Nearest, mip_filter = .Nearest }))
-    sampler_current_id := sampler_linear_id
+    lm_sampler_linear_id  := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({}))
+    lm_sampler_point_id   := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ min_filter = .Nearest, mag_filter = .Nearest, mip_filter = .Nearest }))
+    lm_sampler_current_id := lm_sampler_linear_id
 
     //bvh_id := gpu.desc_pool_alloc_bvh(&desc_pool, gpu.bvh_descriptor(scene.bvh))
     bvh_id := u32(0)
@@ -266,7 +268,7 @@ main :: proc()
                 albedo = { 1.0, 1.0, 1.0 },
             }
         }
-        bake = lm.bake_begin(&lm_ctx, LM_SIZE, lightmap, lm_instances)
+        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 1000, lightmap, lm_instances)
     }
     defer lm.bake_destroy(&bake)
 
@@ -350,7 +352,7 @@ main :: proc()
             imgui.show_demo_window(&show_demo_window)
         }
 
-        @(static) do_bicubic_sampling: bool = false
+        @(static) do_bicubic_sampling: bool = true
         @(static) sample_lightmap: bool = true
         @(static) sample_diffuse: bool = false
         if show_settings && imgui.begin("Settings", &show_settings)
@@ -358,7 +360,7 @@ main :: proc()
             // Lightmap sampling
             {
                 items := []cstring { "Point", "Bilinear", "Bicubic" }
-                @(static) item_selected_idx: int = 1
+                @(static) item_selected_idx: int = 2
 
                 combo_preview_value := items[item_selected_idx]
                 if imgui.begin_combo("Lightmap Sampling", combo_preview_value, {})
@@ -370,9 +372,9 @@ main :: proc()
                             item_selected_idx = n
                             switch Sampler_Type(n)
                             {
-                                case .Point:    sampler_current_id = sampler_point_id
-                                case .Bilinear: sampler_current_id = sampler_linear_id
-                                case .Bicubic:  sampler_current_id = sampler_linear_id
+                                case .Point:    lm_sampler_current_id = lm_sampler_point_id
+                                case .Bilinear: lm_sampler_current_id = lm_sampler_linear_id
+                                case .Bicubic:  lm_sampler_current_id = lm_sampler_linear_id
                             }
                             do_bicubic_sampling = Sampler_Type(n) == .Bicubic
                         }
@@ -436,6 +438,8 @@ main :: proc()
 
         gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
 
+        is_pixel_selected := false
+        selected_pixel: [2]f32
         if show_texture_viewer
         {
             draw_calls := make([dynamic]UV_Mesh_Draw_Call, allocator = context.temp_allocator)
@@ -452,7 +456,7 @@ main :: proc()
                 })
             }
 
-            gui_show_debug_texture_window("Lightmap Viewer", { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" }, LM_SIZE, LM_SIZE, gltf_scene, draw_calls[:], &show_texture_viewer)
+            is_pixel_selected, selected_pixel = gui_show_debug_texture_window("Lightmap Viewer", { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" }, LM_SIZE, LM_SIZE, gltf_scene, draw_calls[:], &show_texture_viewer)
         }
 
         imgui.render()
@@ -528,6 +532,9 @@ main :: proc()
                         do_bicubic_sampling: b32,
                         sample_lightmap: b32,
                         sample_diffuse: b32,
+
+                        select_lm_pixel: b32,
+                        selected_lm_pixel: [2]f32,
                     }
                     frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
                     frag_data.cpu^ = {
@@ -539,11 +546,16 @@ main :: proc()
                         normal_map_sampler             = 0,
 
                         lightmap = lightmap_id,
-                        lightmap_sampler = sampler_current_id,
+                        lightmap_sampler = lm_sampler_current_id,
                         do_bicubic_sampling = b32(do_bicubic_sampling),
                         sample_lightmap = b32(sample_lightmap),
                         sample_diffuse = b32(sample_diffuse),
+
+                        select_lm_pixel = b32(is_pixel_selected),
+                        selected_lm_pixel = selected_pixel,
                     }
+
+                    fmt.println(is_pixel_selected, selected_pixel)
 
                     gpu.cmd_draw_indexed(cmd_buf, verts_data.gpu, frag_data.gpu, mesh.indices)
                 }
@@ -1225,7 +1237,7 @@ set_dear_imgui_font_and_style :: proc(dpi_scale: f32)
     }
 }
 
-gui_show_debug_texture_window :: proc(name: cstring, texture_ids: []u32, texture_names: []cstring, tex_width_int: int, tex_height_int: int, scene: shared.Scene, uv_mesh_data: []UV_Mesh_Draw_Call, show: ^bool = nil)
+gui_show_debug_texture_window :: proc(name: cstring, texture_ids: []u32, texture_names: []cstring, tex_width_int: int, tex_height_int: int, scene: shared.Scene, uv_mesh_data: []UV_Mesh_Draw_Call, show: ^bool = nil) -> (select_pixel: bool, selected: [2]f32)
 {
     tex_width   := f32(tex_width_int)
     tex_height  := f32(tex_height_int)
@@ -1439,6 +1451,8 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_ids: []u32, texture
     imgui.draw_list_pop_clip_rect(draw_list)
 
     imgui.end()
+
+    return selected_p.x >= 0, { f32(selected_p.x), f32(selected_p.y) }
 }
 
 set_nearest_sampler_callback :: proc "c"(draw_list: ^imgui.Draw_List, cmd: ^imgui.Draw_Cmd)

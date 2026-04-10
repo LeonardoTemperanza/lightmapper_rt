@@ -126,6 +126,7 @@ Bake :: struct
     gbufs_id: u32,
 
     accum_counter: u32,
+    max_samples: u32,
 }
 
 Instance :: struct
@@ -142,7 +143,7 @@ Instance :: struct
     albedo: [3]f32,
 }
 
-bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, lightmap: gpu.Texture, instances: []Instance) -> Bake
+bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance) -> Bake
 {
     assert(lightmap_size > 0)
 
@@ -153,6 +154,7 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, lightmap: gpu.Tex
     bake.lightmap_size = u32(lightmap_size)
     bake.lightmap = lightmap
     bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
+    bake.max_samples = samples
 
     cmd_buf := gpu.commands_begin(.Main)
 
@@ -209,6 +211,8 @@ bake_reset :: proc(bake: ^Bake)
 
 bake_iteration :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena)
 {
+    if bake.accum_counter >= bake.max_samples do return
+
     cmd_buf := gpu.commands_begin(.Main)
 
     ctx := bake.ctx

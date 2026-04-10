@@ -196,6 +196,7 @@ struct Material_Point
 };
 Material_Point Material_Point_ZERO;
 void main();
+vec3 test(uint gbufs_id_, vec2 global_invocation_id_, _res_ptr_Data data_);
 vec3 bake_texel(vec3 world_pos_, vec3 world_normal_, Scene scene_, uint tlas_, uint sampler_);
 vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_, uint sampler_);
 Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_);
@@ -257,25 +258,12 @@ void main()
     init_rng(uint(((global_invocation_id_.y * data_._res_.resolution_.x) + global_invocation_id_.x)), data_._res_.accum_counter_);
     if(data_._res_.is_lightmap_)
     {
-        vec4 pos_sample_;
-        vec4 normal_sample_;
-        vec3 normal_;
         if(((global_invocation_id_.x >= data_._res_.resolution_.x) || (global_invocation_id_.y >= data_._res_.resolution_.y)))
         {
             return ;
         }
 
-        pos_sample_ = imageLoad(_res_textures_rw_[nonuniformEXT((data_._res_.gbufs_id_ + 0))], ivec2(global_invocation_id_.xy));
-        normal_sample_ = imageLoad(_res_textures_rw_[nonuniformEXT((data_._res_.gbufs_id_ + 1))], ivec2(global_invocation_id_.xy));
-        if((normal_sample_.a < 0.1))
-        {
-            return ;
-        }
-
-        normal_ = normalize(((normal_sample_ * 2.0) - 1.0).xyz);
-        start_ray_.ori_ = (pos_sample_.xyz + (normal_ * 0.0011));
-        start_ray_.dir_ = (-normal_);
-        color_ = bake_texel(pos_sample_.xyz, normal_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_);
+        color_ = test(data_._res_.gbufs_id_, global_invocation_id_.xy, data_);
     }
     else
     {
@@ -307,6 +295,25 @@ uv_ = (global_invocation_id_.xy / data_._res_.resolution_);coord_ = ((2.0 * uv_)
         imageStore(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(global_invocation_id_.xy), vec4(color_, 1));
     }
 
+}
+
+vec3 test(uint gbufs_id_, vec2 global_invocation_id_, _res_ptr_Data data_)
+{
+    vec4 pos_sample_ = vec4_ZERO;
+    vec4 normal_sample_ = vec4_ZERO;
+    vec3 normal_ = vec3_ZERO;
+    Ray start_ray_ = Ray_ZERO;
+    pos_sample_ = imageLoad(_res_textures_rw_[nonuniformEXT((gbufs_id_ + 0))], ivec2(global_invocation_id_.xy));
+    normal_sample_ = imageLoad(_res_textures_rw_[nonuniformEXT((gbufs_id_ + 1))], ivec2(global_invocation_id_.xy));
+    if((normal_sample_.a < 0.1))
+    {
+        return vec3(0);
+    }
+
+    normal_ = normalize(((normal_sample_ * 2.0) - 1.0).xyz);
+    start_ray_.ori_ = (pos_sample_.xyz + (normal_ * 0.0011));
+    start_ray_.dir_ = (-normal_);
+    return bake_texel(pos_sample_.xyz, normal_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_);
 }
 
 vec3 bake_texel(vec3 world_pos_, vec3 world_normal_, Scene scene_, uint tlas_, uint sampler_)
@@ -500,7 +507,7 @@ Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_)
         normal_ *= (-1.0);
     }
 
-    world_normal_ = normalize((transpose(hit_.world_to_object_) * vec4(normal_.xyz, 1)));
+    world_normal_ = normalize((transpose(hit_.world_to_object_) * vec4(normal_.xyz, 0)));
     bary_ = hit_.barycentrics_;
     hit_info_.hit_ = true;
     hit_info_.t_ = hit_.t_;
@@ -801,7 +808,14 @@ float eval_sun_pdf(vec3 dir_, vec3 sun_dir_, float angular_radius_)
 
 vec3 sample_lights(Lights lights_, vec3 pos_, vec3 normal_, vec3 outgoing_)
 {
-    return sample_sun_direction((-lights_.dir_light_dir_), lights_.dir_light_angle_, random_vec2());
+    vec3 light_dir_ = vec3_ZERO;
+    light_dir_ = sample_sun_direction((-lights_.dir_light_dir_), lights_.dir_light_angle_, random_vec2());
+    if((dot(light_dir_, normal_) < 0))
+    {
+        return vec3(0);
+    }
+
+    return light_dir_;
 }
 
 float sample_lights_pdf(Lights lights_, vec3 pos_, vec3 incoming_)

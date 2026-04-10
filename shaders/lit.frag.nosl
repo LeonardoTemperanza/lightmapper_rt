@@ -15,6 +15,9 @@ Data :: struct
     do_bicubic_sampling: bool,
     sample_lightmap: bool,
     sample_diffuse: bool,
+
+    select_lm_pixel: bool,
+    selected_lm_pixel: vec2,
 }
 
 PI: float = 3.14159265359;
@@ -52,6 +55,17 @@ main :: (normal_vert: vec4 @in_loc(0), uv: vec2 @in_loc(1), lm_uv: vec2 @in_loc(
     } else if !data.sample_diffuse && data.sample_lightmap {
         out = irradiance;
     }
+
+    if data.select_lm_pixel
+    {
+        lm_size := texture_size(data.lightmap, data.lightmap_sampler, 0);
+        texel := lm_size * lm_uv;
+        if texel.x >= data.selected_lm_pixel.x && texel.x <= data.selected_lm_pixel.x + 1 &&
+           texel.y >= data.selected_lm_pixel.y && texel.y <= data.selected_lm_pixel.y + 1 {
+            out = vec3(1, 0, 1);
+        }
+    }
+
     return vec4(out, base_color.a);
 }
 

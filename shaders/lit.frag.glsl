@@ -32,10 +32,10 @@ uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
 layout(location = 0) out vec4 _res_out_loc0_;
-layout(location = 1) in vec2 _res_in_loc1_;
-layout(location = 0) in vec4 _res_in_loc0_;
 layout(location = 3) in vec4 _res_in_loc3_;
 layout(location = 2) in vec2 _res_in_loc2_;
+layout(location = 1) in vec2 _res_in_loc1_;
+layout(location = 0) in vec4 _res_in_loc0_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_ptr_Data;
@@ -53,6 +53,8 @@ struct Data
     bool do_bicubic_sampling_;
     bool sample_lightmap_;
     bool sample_diffuse_;
+    bool select_lm_pixel_;
+    vec2 selected_lm_pixel_;
 };
 Data Data_ZERO;
 void main();
@@ -118,6 +120,19 @@ if(((!data_._res_.sample_diffuse_) && data_._res_.sample_lightmap_))
                 out_ = irradiance_;
             }
         }
+    }
+
+    if(data_._res_.select_lm_pixel_)
+    {
+        vec2 lm_size_;
+        vec2 texel_;
+        lm_size_ = texture_size(data_._res_.lightmap_, data_._res_.lightmap_sampler_, 0);
+        texel_ = (lm_size_ * lm_uv_);
+        if(((((texel_.x >= data_._res_.selected_lm_pixel_.x) && (texel_.x <= (data_._res_.selected_lm_pixel_.x + 1))) && (texel_.y >= data_._res_.selected_lm_pixel_.y)) && (texel_.y <= (data_._res_.selected_lm_pixel_.y + 1))))
+        {
+            out_ = vec3(1, 0, 1);
+        }
+
     }
 
     _res_out_loc0_ = vec4(out_, base_color_.a);
