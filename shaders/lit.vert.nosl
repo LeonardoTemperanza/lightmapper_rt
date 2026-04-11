@@ -14,10 +14,10 @@ Data :: struct
 Output :: struct
 {
     pos: vec4 @position,
-    normal: vec4 @out_loc(0),
-    uv: vec2 @out_loc(1),
-    lm_uv: vec2 @out_loc(2),
-    world_pos: vec4 @out_loc(3),
+    normal: vec4 @output(0),
+    uv: vec2 @output(1),
+    lm_uv: vec2 @output(2),
+    world_pos: vec4 @output(3),
 }
 
 main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output

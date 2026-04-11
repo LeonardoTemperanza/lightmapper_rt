@@ -14,10 +14,10 @@ layout(set = 2, binding = 0) uniform sampler _res_samplers_[];
 
 // Intrinsics:
 
-vec2 texture_size(uint t, uint s, int lod)
-{
-   return textureSize(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), lod);
-}
+#define texture_sample(t, s, uv)       texture(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), uv)
+#define texture_load(t, coord)         imageLoad(_res_textures_rw_[nonuniformEXT(t)], ivec2(coord))
+#define texture_store(t, coord, value) imageStore(_res_textures_rw_[nonuniformEXT(t)], ivec2(coord), value)
+#define texture_size(t, s, lod)        textureSize(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), lod)
 
 // Intrinsics end.
 
@@ -287,12 +287,12 @@ uv_ = (global_invocation_id_.xy / data_._res_.resolution_);coord_ = ((2.0 * uv_)
             float weight_;
             vec3 prev_color_;
             weight_ = (1.0 / float(data_._res_.accum_counter_));
-            prev_color_ = imageLoad(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(global_invocation_id_.xy)).xyz;
+            prev_color_ = texture_load(data_._res_.output_texture_id_, global_invocation_id_.xy).xyz;
             color_ = ((prev_color_ * (1 - weight_)) + (color_ * weight_));
             color_ = max(color_, vec3(0, 0, 0));
         }
 
-        imageStore(_res_textures_rw_[nonuniformEXT(data_._res_.output_texture_id_)], ivec2(global_invocation_id_.xy), vec4(color_, 1));
+        texture_store(data_._res_.output_texture_id_, global_invocation_id_.xy, vec4(color_, 1));
     }
 
 }
@@ -303,8 +303,8 @@ vec3 test(uint gbufs_id_, vec2 global_invocation_id_, _res_ptr_Data data_)
     vec4 normal_sample_ = vec4_ZERO;
     vec3 normal_ = vec3_ZERO;
     Ray start_ray_ = Ray_ZERO;
-    pos_sample_ = imageLoad(_res_textures_rw_[nonuniformEXT((gbufs_id_ + 0))], ivec2(global_invocation_id_.xy));
-    normal_sample_ = imageLoad(_res_textures_rw_[nonuniformEXT((gbufs_id_ + 1))], ivec2(global_invocation_id_.xy));
+    pos_sample_ = texture_load((gbufs_id_ + 0), global_invocation_id_.xy);
+    normal_sample_ = texture_load((gbufs_id_ + 1), global_invocation_id_.xy);
     if((normal_sample_.a < 0.1))
     {
         return vec3(0);
@@ -585,7 +585,7 @@ float get_alpha(Scene scene_, Hit_Info hit_)
         texcoords_ = (((uv0_ * w_) + (uv1_ * hit_.uv_.x)) + (uv2_ * hit_.uv_.y));
         if(true)
         {
-            color_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(instance_.albedo_tex_)], _res_samplers_[nonuniformEXT(0)]), texcoords_);
+            color_sample_ = texture_sample(instance_.albedo_tex_, 0, texcoords_);
         }
 
     }
@@ -719,7 +719,7 @@ Material_Point get_material_point(Scene scene_, Hit_Info hit_)
         texcoords_ = (((uv0_ * w_) + (uv1_ * hit_.uv_.x)) + (uv2_ * hit_.uv_.y));
         if(true)
         {
-            color_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(instance_.albedo_tex_)], _res_samplers_[nonuniformEXT(0)]), texcoords_);
+            color_sample_ = texture_sample(instance_.albedo_tex_, 0, texcoords_);
         }
 
     }

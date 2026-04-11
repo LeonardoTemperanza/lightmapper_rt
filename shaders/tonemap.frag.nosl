@@ -5,7 +5,7 @@ Data :: struct
     sampler_id: sampler_id,
 }
 
-main :: (uv: vec2 @in_loc(0), data: ^Data @data) -> vec4 @out_loc(0)
+main :: (uv: vec2 @input(0), data: ^Data @data) -> vec4 @output(0)
 {
     linear := texture_sample(data.texture_id, data.sampler_id, uv);
     return linear_to_srgb(hdr_to_ldr(max(vec4(0, 0, 0, 0), linear)));

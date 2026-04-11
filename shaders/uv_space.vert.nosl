@@ -2,9 +2,9 @@
 Output :: struct
 {
     out_pos: vec4 @position,
-    world_pos: vec3 @out_loc(0),
-    world_normal: vec3 @out_loc(1),
-    uv: vec2 @out_loc(2),
+    world_pos: vec3 @output(0),
+    world_normal: vec3 @output(1),
+    uv: vec2 @output(2),
 }
 
 Data :: struct

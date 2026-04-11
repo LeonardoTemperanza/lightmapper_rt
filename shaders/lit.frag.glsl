@@ -12,10 +12,10 @@ layout(set = 2, binding = 0) uniform sampler _res_samplers_[];
 
 // Intrinsics:
 
-vec2 texture_size(uint t, uint s, int lod)
-{
-   return textureSize(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), lod);
-}
+#define texture_sample(t, s, uv)       texture(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), uv)
+#define texture_load(t, coord)         imageLoad(_res_textures_rw_[nonuniformEXT(t)], ivec2(coord))
+#define texture_store(t, coord, value) imageStore(_res_textures_rw_[nonuniformEXT(t)], ivec2(coord), value)
+#define texture_size(t, s, lod)        textureSize(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), lod)
 
 // Intrinsics end.
 
@@ -32,10 +32,10 @@ uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
 layout(location = 0) out vec4 _res_out_loc0_;
-layout(location = 3) in vec4 _res_in_loc3_;
+layout(location = 0) in vec4 _res_in_loc0_;
 layout(location = 2) in vec2 _res_in_loc2_;
 layout(location = 1) in vec2 _res_in_loc1_;
-layout(location = 0) in vec4 _res_in_loc0_;
+layout(location = 3) in vec4 _res_in_loc3_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_ptr_Data;
@@ -86,21 +86,39 @@ void main()
     vec4 packed_normal_ = vec4_ZERO;
     vec4 metallic_roughness_sample_ = vec4_ZERO;
     vec3 irradiance_ = vec3_ZERO;
+    vec4 lm_sample_ = vec4_ZERO;
     vec3 out_ = vec3_ZERO;
-    base_color_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.base_color_map_)], _res_samplers_[nonuniformEXT(data_._res_.base_color_map_sampler_)]), uv_);
+    base_color_ = texture_sample(data_._res_.base_color_map_, data_._res_.base_color_map_sampler_, uv_);
     base_color_.a = (((base_color_.a - 0.3) / max(fwidth_(base_color_.a), 0.0001)) + 0.5);
-    normal_map_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.normal_map_)], _res_samplers_[nonuniformEXT(data_._res_.normal_map_sampler_)]), uv_);
+    normal_map_sample_ = texture_sample(data_._res_.normal_map_, data_._res_.normal_map_sampler_, uv_);
     world_normal_ = normalize(normal_vert_.xyz);
     packed_normal_ = vec4(((world_normal_ * 0.5) + 0.5), 1.0);
-    metallic_roughness_sample_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.metallic_roughness_map_)], _res_samplers_[nonuniformEXT(data_._res_.metallic_roughness_map_sampler_)]), uv_);
+    metallic_roughness_sample_ = texture_sample(data_._res_.metallic_roughness_map_, data_._res_.metallic_roughness_map_sampler_, uv_);
     if(data_._res_.do_bicubic_sampling_)
     {
-        irradiance_ = texture_sample_bicubic(data_._res_.lightmap_, data_._res_.lightmap_sampler_, lm_uv_).rgb;
+        vec4 lm_sample_;
+        lm_sample_ = texture_sample_bicubic(data_._res_.lightmap_, data_._res_.lightmap_sampler_, lm_uv_);
+        irradiance_ = lm_sample_.rgb;
+        if((lm_sample_.a < 0.5))
+        {
+            _res_out_loc0_ = vec4(0, 0, 1, 1);
+        }
+
     }
     else
     {
-        irradiance_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.lightmap_)], _res_samplers_[nonuniformEXT(data_._res_.lightmap_sampler_)]), lm_uv_).rgb;
-irradiance_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.lightmap_)], _res_samplers_[nonuniformEXT(data_._res_.lightmap_sampler_)]), lm_uv_).rgb;    }
+        lm_sample_ = texture_sample(data_._res_.lightmap_, data_._res_.lightmap_sampler_, lm_uv_);
+        irradiance_ = lm_sample_.rgb;
+        if((lm_sample_.a < 0.5))
+        {
+            _res_out_loc0_ = vec4(0, 0, 1, 1);
+        }
+
+lm_sample_ = texture_sample(data_._res_.lightmap_, data_._res_.lightmap_sampler_, lm_uv_);irradiance_ = lm_sample_.rgb;if((lm_sample_.a < 0.5))
+        {
+            _res_out_loc0_ = vec4(0, 0, 1, 1);
+        }
+    }
 
     out_ = vec3(1);
     if((data_._res_.sample_diffuse_ && data_._res_.sample_lightmap_))
@@ -188,10 +206,10 @@ vec4 texture_sample_bicubic(uint texture_, uint linear_sampler_, vec2 coords_)
     s_ = vec4((xcubic_.xz + xcubic_.yw), (ycubic_.xz + ycubic_.yw));
     offset_ = (c_ + (vec4(xcubic_.yw, ycubic_.yw) / s_));
     offset_ *= inv_tex_size_.xxyy;
-    sample0_ = texture(sampler2D(_res_textures_[nonuniformEXT(texture_)], _res_samplers_[nonuniformEXT(linear_sampler_)]), offset_.xz);
-    sample1_ = texture(sampler2D(_res_textures_[nonuniformEXT(texture_)], _res_samplers_[nonuniformEXT(linear_sampler_)]), offset_.yz);
-    sample2_ = texture(sampler2D(_res_textures_[nonuniformEXT(texture_)], _res_samplers_[nonuniformEXT(linear_sampler_)]), offset_.xw);
-    sample3_ = texture(sampler2D(_res_textures_[nonuniformEXT(texture_)], _res_samplers_[nonuniformEXT(linear_sampler_)]), offset_.yw);
+    sample0_ = texture_sample(texture_, linear_sampler_, offset_.xz);
+    sample1_ = texture_sample(texture_, linear_sampler_, offset_.yz);
+    sample2_ = texture_sample(texture_, linear_sampler_, offset_.xw);
+    sample3_ = texture_sample(texture_, linear_sampler_, offset_.yw);
     sx_ = (s_.x / (s_.x + s_.y));
     sy_ = (s_.z / (s_.z + s_.w));
     return mix(mix(sample3_, sample2_, vec4(sx_)), mix(sample1_, sample0_, vec4(sx_)), vec4(sy_));

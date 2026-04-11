@@ -12,10 +12,10 @@ layout(set = 2, binding = 0) uniform sampler _res_samplers_[];
 
 // Intrinsics:
 
-vec2 texture_size(uint t, uint s, int lod)
-{
-   return textureSize(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), lod);
-}
+#define texture_sample(t, s, uv)       texture(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), uv)
+#define texture_load(t, coord)         imageLoad(_res_textures_rw_[nonuniformEXT(t)], ivec2(coord))
+#define texture_store(t, coord, value) imageStore(_res_textures_rw_[nonuniformEXT(t)], ivec2(coord), value)
+#define texture_size(t, s, lod)        textureSize(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), lod)
 
 // Intrinsics end.
 
@@ -63,7 +63,7 @@ void main()
     vec2 uv_ = _res_in_loc0_;
     _res_ptr_Data data_ = _res_frag_data_;
     vec4 linear_ = vec4_ZERO;
-    linear_ = texture(sampler2D(_res_textures_[nonuniformEXT(data_._res_.texture_id_)], _res_samplers_[nonuniformEXT(data_._res_.sampler_id_)]), uv_);
+    linear_ = texture_sample(data_._res_.texture_id_, data_._res_.sampler_id_, uv_);
     _res_out_loc0_ = linear_to_srgb(hdr_to_ldr(max(vec4(0, 0, 0, 0), linear_)));
 }
 
