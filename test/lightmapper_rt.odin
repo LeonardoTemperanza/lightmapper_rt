@@ -4,12 +4,18 @@
 
 package test
 
-import "../no_gfx_api/gpu"
 import "core:math/linalg"
 import "core:math"
 import intr "base:intrinsics"
 import "core:slice"
 import "core:fmt"
+import "core:c"
+import "core:log"
+import "base:runtime"
+
+import vk "vendor:vulkan"
+import "../no_gfx_api/gpu"
+import oidn "../oidn_odin_bindings"
 
 Handle :: struct { idx: u32, gen: u32 }
 Mesh_Handle :: distinct Handle
@@ -17,6 +23,8 @@ Lightmap_UV_Handle :: distinct Handle
 
 Context :: struct
 {
+    oidn_device: oidn.Device,
+
     shaders: Shaders,
 
     desc_pool: ^gpu.Descriptor_Pool,
@@ -34,6 +42,7 @@ Context :: struct
 init :: proc(desc_pool: ^gpu.Descriptor_Pool) -> Context
 {
     ctx: Context
+    ctx.oidn_device = create_oidn_context()
     ctx.shaders = shaders_create()
     ctx.bvh_scratch_arena = gpu.arena_init(mem_type = gpu.Memory.GPU)
     ctx.upload_arena = gpu.arena_init()
@@ -121,9 +130,14 @@ Bake :: struct
     instances: [dynamic]Instance,
     scene_gpu: Scene_GPU,
     lightmap_size: u32,
-    lightmap: gpu.Texture,
+    lightmap: gpu.Texture,  // Not owned
     lightmap_rw_id: u32,
     gbufs_id: u32,
+
+    // OIDN
+    shared_buf_vk: External_Buf,
+    shared_buf_oidn: oidn.Buffer,
+    filter: oidn.Filter,
 
     accum_counter: u32,
     max_samples: u32,
@@ -155,6 +169,9 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lig
     bake.lightmap = lightmap
     bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
     bake.max_samples = samples
+
+    bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size * lightmap_size * 2 * 4))  // TODO: What about other formats?
+    bake.shared_buf_oidn = oidn_shared_buffer_from_vk_buffer(ctx.oidn_device, bake.shared_buf_vk)
 
     cmd_buf := gpu.commands_begin(.Main)
 
@@ -504,4 +521,201 @@ transform_to_gpu_transform :: proc(transform: matrix[4, 4]f32) -> [12]f32
     transform_row_major := intr.transpose(transform)
     flattened := linalg.matrix_flatten(transform_row_major)
     return [12]f32 { flattened[0], flattened[1], flattened[2], flattened[3], flattened[4], flattened[5], flattened[6], flattened[7], flattened[8], flattened[9], flattened[10], flattened[11], }
+}
+
+// OIDN interop:
+
+create_oidn_context :: proc() -> oidn.Device
+{
+    vk_phys_device := gpu.vk_get_physical_device()
+
+    id_props := vk.PhysicalDeviceIDProperties {
+        sType = .PHYSICAL_DEVICE_ID_PROPERTIES
+    }
+    props := vk.PhysicalDeviceProperties2 {
+        sType = .PHYSICAL_DEVICE_PROPERTIES_2,
+        pNext = &id_props,
+    }
+    vk.GetPhysicalDeviceProperties2(vk_phys_device, &props)
+
+    device: oidn.Device
+    if device == nil && id_props.deviceLUIDValid {
+        device = oidn.NewDeviceByLUID(&id_props.deviceLUID[0])
+    }
+    if device == nil {
+        device = oidn.NewDeviceByUUID(&id_props.deviceUUID[0])
+    }
+
+    oidn.SetDeviceErrorFunction(device, oidn_error_callback, nil)
+    oidn.CommitDevice(device)
+
+    oidn_check(device)
+
+    return device
+}
+
+External_Buf :: struct
+{
+    linux_handle: c.int,
+    win_handle: vk.HANDLE,
+    buf: vk.Buffer,
+    mem: vk.DeviceMemory,
+    size: vk.DeviceSize,
+}
+
+create_vk_external_buffer_for_oidn :: proc(size: u32) -> External_Buf
+{
+    res: External_Buf
+    res.size = vk.DeviceSize(size)
+
+    vk_device := gpu.vk_get_device()
+    vk_phys_device := gpu.vk_get_physical_device()
+
+    next: rawptr
+    when ODIN_OS == .Windows
+    {
+        next = &vk.ExternalMemoryBufferCreateInfo {
+            sType = .EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+            handleTypes = { .OPAQUE_WIN32 },
+        }
+    }
+    else when ODIN_OS == .Linux
+    {
+        next = &vk.ExternalMemoryBufferCreateInfo {
+            sType = .EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+            handleTypes = { .OPAQUE_FD },
+        }
+    }
+    else do #panic("Unsupported OS.")
+
+    buf_ci := vk.BufferCreateInfo {
+        sType = .BUFFER_CREATE_INFO,
+        pNext = next,
+        size = vk.DeviceSize(size),
+        usage = { .TRANSFER_DST, .TRANSFER_SRC, .STORAGE_BUFFER },
+        sharingMode = .EXCLUSIVE,
+    }
+    vk.CreateBuffer(vk_device, &buf_ci, nil, &res.buf)
+
+    mem_reqs: vk.MemoryRequirements
+    vk.GetBufferMemoryRequirements(vk_device, res.buf, &mem_reqs)
+
+    next = nil
+    when ODIN_OS == .Windows
+    {
+        next = &vk.ExportMemoryAllocateInfo {
+            sType = .EXPORT_MEMORY_ALLOCATE_INFO,
+            pNext = next,
+            handleTypes = { .OPAQUE_WIN32 },
+        }
+    }
+    else when ODIN_OS == .Linux
+    {
+        next = &vk.ExportMemoryAllocateInfo {
+            sType = .EXPORT_MEMORY_ALLOCATE_INFO,
+            pNext = next,
+            handleTypes = { .OPAQUE_FD },
+        }
+    }
+    else do #panic("Unsupported OS.")
+
+    allocInfo := vk.MemoryAllocateInfo {
+        sType = .MEMORY_ALLOCATE_INFO,
+        pNext = next,
+        allocationSize = mem_reqs.size,
+        memoryTypeIndex = vk_find_mem_type(vk_phys_device, mem_reqs.memoryTypeBits, { .DEVICE_LOCAL }),
+    }
+    vk.AllocateMemory(vk_device, &allocInfo, nil, &res.mem);
+
+    vk.BindBufferMemory(vk_device, res.buf, res.mem, 0)
+
+    when ODIN_OS == .Windows
+    {
+        get_fd_info := vk.MemoryGetWin32HandleInfoKHR {
+            sType = .MEMORY_GET_WIN32_HANDLE_INFO_KHR,
+            memory = res.mem,
+            handleType = { .OPAQUE_WIN32 },
+        }
+        vk_check(vk.GetMemoryWin32HandleKHR(vk_device, &get_fd_info, &res.win_handle))
+    }
+    else when ODIN_OS == .Linux
+    {
+        get_fd_info := vk.MemoryGetFdInfoKHR {
+            sType = .GET_FD_INFO_KHR,
+            memory = res.buf.mem,
+            handleType = { .OPAQUE_FD },
+        }
+        vk_check(vk.GetMemoryFdKHR(device, &get_fd_info, &res.linux_handle))
+    }
+    else do #panic("Unsupported OS.")
+
+    return res
+}
+
+vk_find_mem_type :: proc(phys_device: vk.PhysicalDevice, type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32
+{
+    mem_properties: vk.PhysicalDeviceMemoryProperties
+    vk.GetPhysicalDeviceMemoryProperties(phys_device, &mem_properties)
+    for i in 0..<mem_properties.memoryTypeCount
+    {
+        if (type_filter & (1 << i) != 0) &&
+           (mem_properties.memoryTypes[i].propertyFlags & properties) == properties {
+            return i
+        }
+    }
+
+    panic("Vulkan Error: Could not find suitable memory type!")
+}
+
+vk_check :: proc(result: vk.Result, location := #caller_location)
+{
+    if result != .SUCCESS {
+        fatal_error("Vulkan failure: %", result, location = location)
+    }
+}
+
+fatal_error :: proc(fmt: string, args: ..any, location := #caller_location)
+{
+    when ODIN_DEBUG {
+        log.fatal(fmt, args, location = location)
+        runtime.panic("")
+    } else {
+        log.panicf(fmt, args, location = location)
+    }
+}
+
+oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf) -> oidn.Buffer
+{
+    when ODIN_OS == .Windows
+    {
+        return oidn.NewSharedBufferFromWin32Handle(device, { .OPAQUE_WIN32 }, buf.win_handle, nil, c.size_t(buf.size))
+    }
+    else when ODIN_OS == .Linux
+    {
+        return oidn.NewSharedBufferFromFD(device, { .OPAQUE_FD }, buf.linux_handle, buf.buf.size)
+    }
+    else do #panic("Unsupported OS.")
+}
+
+oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter)
+{
+    oidn.ExecuteFilter(filter)
+    oidn.SyncDevice(device)
+    oidn_check(device)
+}
+
+oidn_check :: proc(device: oidn.Device)
+{
+    msg: cstring
+    if oidn.GetDeviceError(device, &msg) != .NONE
+    {
+        log.error(msg)
+        panic("")
+    }
+}
+
+oidn_error_callback :: proc "c"(userPtr: rawptr, code: oidn.Error, message: cstring)
+{
+    context = runtime.default_context()
+    log.error(message)
 }

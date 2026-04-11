@@ -84,6 +84,7 @@ main :: proc()
     window_size_y: i32
     sdl.GetWindowSize(window, &window_size_x, &window_size_y)
 
+    gpu.vk_push_opt_device_extensions({ vk.KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, vk.KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME })
     ok := gpu.init()
     ensure(ok)
     defer gpu.cleanup()
@@ -357,71 +358,75 @@ main :: proc()
         @(static) do_bicubic_sampling: bool = true
         @(static) sample_lightmap: bool = true
         @(static) sample_diffuse: bool = false
-        if show_settings && imgui.begin("Settings", &show_settings)
+        if show_settings
         {
-            // Lightmap sampling
+            if imgui.begin("Settings", &show_settings)
             {
-                items := []cstring { "Point", "Bilinear", "Bicubic" }
-                @(static) item_selected_idx: int = 2
-
-                combo_preview_value := items[item_selected_idx]
-                if imgui.begin_combo("Lightmap Sampling", combo_preview_value, {})
+                // Lightmap sampling
                 {
-                    for n := 0; n < len(items); n += 1
+                    items := []cstring { "Point", "Bilinear", "Bicubic" }
+                    @(static) item_selected_idx: int = 2
+
+                    combo_preview_value := items[item_selected_idx]
+                    if imgui.begin_combo("Lightmap Sampling", combo_preview_value, {})
                     {
-                        is_selected := item_selected_idx == n
-                        if imgui.selectable(items[n], is_selected) {
-                            item_selected_idx = n
-                            switch Sampler_Type(n)
-                            {
-                                case .Point:    lm_sampler_current_id = lm_sampler_point_id
-                                case .Bilinear: lm_sampler_current_id = lm_sampler_linear_id
-                                case .Bicubic:  lm_sampler_current_id = lm_sampler_linear_id
-                            }
-                            do_bicubic_sampling = Sampler_Type(n) == .Bicubic
-                        }
-
-                        if is_selected {
-                            imgui.set_item_default_focus()
-                        }
-                    }
-                    imgui.end_combo()
-                }
-
-                imgui.checkbox("Sample lightmap", &sample_lightmap)
-                imgui.checkbox("Sample diffuse", &sample_diffuse)
-            }
-
-            // Output type
-            {
-                items := []cstring { "Default", "Ground Truth" }
-                @(static) item_selected_idx: int = 0
-                combo_preview_value := items[item_selected_idx]
-                if imgui.begin_combo("Output", combo_preview_value, {})
-                {
-                    for n := 0; n < len(items); n += 1
-                    {
-                        is_selected := item_selected_idx == n
-                        if imgui.selectable(items[n], is_selected)
+                        for n := 0; n < len(items); n += 1
                         {
-                            item_selected_idx = n
-                            output_type = Output_Type(n)
-                        }
+                            is_selected := item_selected_idx == n
+                            if imgui.selectable(items[n], is_selected) {
+                                item_selected_idx = n
+                                switch Sampler_Type(n)
+                                {
+                                    case .Point:    lm_sampler_current_id = lm_sampler_point_id
+                                    case .Bilinear: lm_sampler_current_id = lm_sampler_linear_id
+                                    case .Bicubic:  lm_sampler_current_id = lm_sampler_linear_id
+                                }
+                                do_bicubic_sampling = Sampler_Type(n) == .Bicubic
+                            }
 
-                        if is_selected {
-                            imgui.set_item_default_focus()
+                            if is_selected {
+                                imgui.set_item_default_focus()
+                            }
                         }
+                        imgui.end_combo()
                     }
-                    imgui.end_combo()
+
+                    imgui.checkbox("Sample lightmap", &sample_lightmap)
+                    imgui.checkbox("Sample diffuse", &sample_diffuse)
+                }
+
+                // Output type
+                {
+                    items := []cstring { "Default", "Ground Truth" }
+                    @(static) item_selected_idx: int = 0
+                    combo_preview_value := items[item_selected_idx]
+                    if imgui.begin_combo("Output", combo_preview_value, {})
+                    {
+                        for n := 0; n < len(items); n += 1
+                        {
+                            is_selected := item_selected_idx == n
+                            if imgui.selectable(items[n], is_selected)
+                            {
+                                item_selected_idx = n
+                                output_type = Output_Type(n)
+                            }
+
+                            if is_selected {
+                                imgui.set_item_default_focus()
+                            }
+                        }
+                        imgui.end_combo()
+                    }
+                }
+
+                // Scene info
+                {
+                    imgui.label_text("Scene Info", "Instances: %d, Meshes: %d", len(gltf_scene.instances), len(gltf_scene.meshes))
                 }
             }
 
-            // Scene info
-            {
-                imgui.label_text("Scene Info", "Instances: %d, Meshes: %d", len(gltf_scene.instances), len(gltf_scene.meshes))
-            }
+            imgui.end()
         }
-        imgui.end()
 
         swapchain := gpu.swapchain_acquire_next() // Blocks CPU until at least one frame is available.
 
