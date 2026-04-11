@@ -15,8 +15,8 @@ Output :: struct
 {
     pos: vec4 @position,
     normal: vec4 @output(0),
-    uv: vec2 @output(1),
-    lm_uv: vec2 @output(2),
+    uv: vec2 @output(1, centroid),
+    lm_uv: vec2 @output(2, centroid),
     world_pos: vec4 @output(3),
 }
 

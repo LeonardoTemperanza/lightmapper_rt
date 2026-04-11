@@ -22,7 +22,7 @@ Data :: struct
 
 PI: float = 3.14159265359;
 
-main :: (normal_vert: vec4 @input(0), uv: vec2 @input(1), lm_uv: vec2 @input(2), world_pos: vec4 @input(3), data: ^Data @data) -> vec4 @output(0)
+main :: (normal_vert: vec4 @input(0), uv: vec2 @input(1, centroid), lm_uv: vec2 @input(2, centroid), world_pos: vec4 @input(3), data: ^Data @data) -> vec4 @output(0)
 {
     // Sample base color texture
     base_color := texture_sample(data.base_color_map, data.base_color_map_sampler, uv);
