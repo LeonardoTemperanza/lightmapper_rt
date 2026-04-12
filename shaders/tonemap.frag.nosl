@@ -3,11 +3,15 @@ Data :: struct
 {
     texture_id: texture_id,
     sampler_id: sampler_id,
+    exposure: float,
 }
 
 main :: (uv: vec2 @input(0), data: ^Data @data) -> vec4 @output(0)
 {
     linear := texture_sample(data.texture_id, data.sampler_id, uv);
+    if data.exposure != 0 {
+        linear *= pow(vec4(2), vec4(data.exposure));
+    }
     return linear_to_srgb(hdr_to_ldr(max(vec4(0, 0, 0, 0), linear)));
 }
 

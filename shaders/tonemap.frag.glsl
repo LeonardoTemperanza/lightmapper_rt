@@ -41,6 +41,7 @@ struct Data
 {
     uint texture_id_;
     uint sampler_id_;
+    float exposure_;
 };
 Data Data_ZERO;
 void main();
@@ -64,6 +65,11 @@ void main()
     _res_ptr_Data data_ = _res_frag_data_;
     vec4 linear_ = vec4_ZERO;
     linear_ = texture_sample(data_._res_.texture_id_, data_._res_.sampler_id_, uv_);
+    if((data_._res_.exposure_ != 0))
+    {
+        linear_ *= pow(vec4(2), vec4(data_._res_.exposure_));
+    }
+
     _res_out_loc0_ = linear_to_srgb(hdr_to_ldr(max(vec4(0, 0, 0, 0), linear_)));
 }
 

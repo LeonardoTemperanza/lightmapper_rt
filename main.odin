@@ -294,6 +294,8 @@ main :: proc()
     lm_build_counter: u32
     output_type: Output_Type
 
+    exposure: f32
+
     frame_arenas: [Frames_In_Flight]gpu.Arena
     for &frame_arena in frame_arenas do frame_arena = gpu.arena_init()
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
@@ -424,6 +426,11 @@ main :: proc()
                 {
                     imgui.label_text("Scene Info", "Instances: %d, Meshes: %d", len(gltf_scene.instances), len(gltf_scene.meshes))
                 }
+
+                // Exposure
+                {
+                    imgui.drag_float("Exposure", &exposure)
+                }
             }
 
             imgui.end()
@@ -483,7 +490,7 @@ main :: proc()
                         {
                             texture = color_target,
                             resolve_texture = postprocess_target,
-                            clear_color = {0.0, 0.0, 0.0, 1.0},
+                            clear_color = {0.67, 0.76, 1.00, 1.0},
                             store_op = .Resolve_And_Store
                         },
                     },
@@ -605,11 +612,13 @@ main :: proc()
             Frag_Data :: struct #all_or_none {
                 texture_id: u32,
                 sampler_id: u32,
+                exposure: f32,
             }
             frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
             frag_data.cpu^ = {
                 texture_id = POSTPROCESS_TARGET_IDX,
                 sampler_id = sampler_linear_id,
+                exposure = exposure,
             }
 
             // Render fullscreen quad
