@@ -84,7 +84,8 @@ main :: proc()
     window_size_y: i32
     sdl.GetWindowSize(window, &window_size_x, &window_size_y)
 
-    gpu.vk_push_opt_device_extensions({ vk.KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, vk.KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME })
+    gpu.vk_add_opt_device_extension(vk.KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME)
+    gpu.vk_add_opt_device_extension(vk.KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)
     ok := gpu.init()
     ensure(ok)
     defer gpu.cleanup()
@@ -249,7 +250,7 @@ main :: proc()
     lightmap := gpu.texture_alloc_and_create({
         format = .RGBA16_Float,
         dimensions = { LM_SIZE, LM_SIZE, 1 },
-        usage = { .Sampled, .Storage }
+        usage = { .Sampled, .Storage, .Transfer_Src }
     })
     defer gpu.texture_free_and_destroy(&lightmap)
 
@@ -271,7 +272,7 @@ main :: proc()
                 albedo = { 1.0, 1.0, 1.0 },
             }
         }
-        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 1000, lightmap, lm_instances)
+        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 256, lightmap, lm_instances)
     }
     defer lm.bake_destroy(&bake)
 
@@ -469,7 +470,7 @@ main :: proc()
         imgui.render()
 
         gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
-        lm.bake_iteration(&bake, cmd_buf, frame_arena)
+        lm.bake_iteration(&bake, frame_arena)
 
         switch output_type
         {

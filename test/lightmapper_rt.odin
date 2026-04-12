@@ -132,7 +132,10 @@ Bake :: struct
     lightmap_size: u32,
     lightmap: gpu.Texture,  // Not owned
     lightmap_rw_id: u32,
+    lightmap_back_rw_id: u32,
     gbufs_id: u32,
+
+    lightmap_backbuffer: gpu.Owned_Texture,
 
     // OIDN
     shared_buf_vk: External_Buf,
@@ -167,11 +170,20 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lig
     bake.instances = slice.clone_to_dynamic(instances)
     bake.lightmap_size = u32(lightmap_size)
     bake.lightmap = lightmap
-    bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
     bake.max_samples = samples
+
+    bake.lightmap_backbuffer = gpu.texture_alloc_and_create({
+        format = .RGBA16_Float,
+        dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
+        usage = { .Sampled, .Storage, .Transfer_Src }
+    })
+
+    bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
+    bake.lightmap_back_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.lightmap_backbuffer, {}))
 
     bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size * lightmap_size * 2 * 4))  // TODO: What about other formats?
     bake.shared_buf_oidn = oidn_shared_buffer_from_vk_buffer(ctx.oidn_device, bake.shared_buf_vk)
+    bake.filter = oidn_create_lightmap_filter(ctx.oidn_device, bake.shared_buf_oidn, bake.shared_buf_oidn, u32(lightmap_size), .FAST)
 
     cmd_buf := gpu.commands_begin(.Main)
 
@@ -226,7 +238,7 @@ bake_reset :: proc(bake: ^Bake)
 
 }
 
-bake_iteration :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena)
+bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena)
 {
     if bake.accum_counter >= bake.max_samples do return
 
@@ -234,8 +246,23 @@ bake_iteration :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^g
 
     ctx := bake.ctx
     resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
-    gpu.cmd_barrier(cmd_buf, .All, .All, {})
-    pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.lightmap_rw_id, 4096, bake.accum_counter)  // TODO
+    gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
+    pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.lightmap_back_rw_id, 4096, bake.accum_counter)  // TODO
+    gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
+
+    // if denoise
+    {
+        oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.lightmap_backbuffer)
+        gpu.queue_submit(.Main, { cmd_buf })
+        gpu.queue_wait_idle(.Main)
+
+        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter)
+
+        cmd_buf = gpu.commands_begin(.Main)
+        oidn_copy_from_shared_buf(cmd_buf, bake.lightmap, bake.shared_buf_vk)
+        gpu.cmd_barrier(cmd_buf, .All, .All)
+    }
+
     bake.accum_counter += 1
     gpu.queue_submit(.Main, { cmd_buf })
 }
@@ -714,8 +741,78 @@ oidn_check :: proc(device: oidn.Device)
     }
 }
 
-oidn_error_callback :: proc "c"(userPtr: rawptr, code: oidn.Error, message: cstring)
+oidn_error_callback :: proc "c"(user_ptr: rawptr, code: oidn.Error, message: cstring)
 {
     context = runtime.default_context()
     log.error(message)
+}
+
+oidn_copy_to_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: External_Buf, src: gpu.Texture)
+{
+    vk_image := gpu.vk_get_image(src)
+    vk_cmd_buf := gpu.vk_get_command_buffer(cmd_buf)
+
+    vk.CmdCopyImageToBuffer2(vk_cmd_buf, &vk.CopyImageToBufferInfo2 {
+        sType = .COPY_IMAGE_TO_BUFFER_INFO_2,
+        pNext = nil,
+        srcImage = vk_image,
+        srcImageLayout = .GENERAL,
+        dstBuffer = dst.buf,
+        regionCount = 1,
+        pRegions = &vk.BufferImageCopy2 {
+            sType = .BUFFER_IMAGE_COPY_2,
+            bufferRowLength = 0,
+            bufferImageHeight = 0,
+            imageSubresource = vk.ImageSubresourceLayers {
+                aspectMask = { .COLOR },
+                layerCount = 1,
+            },
+            imageExtent = vk.Extent3D {
+                width = src.dimensions.x,
+                height = src.dimensions.y,
+                depth = 1,
+            },
+        },
+    })
+}
+
+oidn_copy_from_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: gpu.Texture, src: External_Buf)
+{
+    vk_image := gpu.vk_get_image(dst)
+    vk_cmd_buf := gpu.vk_get_command_buffer(cmd_buf)
+
+    vk.CmdCopyBufferToImage2(vk_cmd_buf, &vk.CopyBufferToImageInfo2 {
+        sType = .COPY_BUFFER_TO_IMAGE_INFO_2,
+        pNext = nil,
+        srcBuffer = src.buf,
+        dstImage = vk_image,
+        dstImageLayout = .GENERAL,
+        regionCount = 1,
+        pRegions = &vk.BufferImageCopy2 {
+            sType = .BUFFER_IMAGE_COPY_2,
+            bufferRowLength = 0,
+            bufferImageHeight = 0,
+            imageSubresource = vk.ImageSubresourceLayers {
+                aspectMask = { .COLOR },
+                layerCount = 1,
+            },
+            imageExtent = vk.Extent3D {
+                width = dst.dimensions.x,
+                height = dst.dimensions.y,
+                depth = 1,
+            },
+        },
+    })
+}
+
+oidn_create_lightmap_filter :: proc(oidn_device: oidn.Device, color: oidn.Buffer, output: oidn.Buffer, lightmap_size: u32, quality: oidn.Quality) -> oidn.Filter  // TODO: support different sizes in x and y
+{
+    filter := oidn.NewFilter(oidn_device, "RTLightmap")
+    // TODO: Different formats?
+    oidn.SetFilterImage(filter, "color", color, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
+    oidn.SetFilterImage(filter, "output", output, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
+    oidn.SetFilterInt(filter, "quality", i32(quality))
+    oidn.CommitFilter(filter)
+    oidn_check(oidn_device)
+    return filter
 }
