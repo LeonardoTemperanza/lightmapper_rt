@@ -12,6 +12,7 @@ import "core:fmt"
 import "core:c"
 import "core:log"
 import "base:runtime"
+import "core:sort"
 
 import vk "vendor:vulkan"
 import "../no_gfx_api/gpu"
@@ -36,7 +37,7 @@ Context :: struct
 
     // Global resources
     meshes: [dynamic]Mesh,
-    lm_uvs: [dynamic]gpu.slice_t([2]f32),
+    lm_uvs: [dynamic]LM_UVs,
 }
 
 init :: proc(desc_pool: ^gpu.Descriptor_Pool) -> Context
@@ -107,14 +108,26 @@ Lightmap_UVs_Desc :: struct
     normals_cpu:   [][3]f32,
     uvs_cpu:       [][2]f32,
     lm_uvs_cpu:    [][2]f32,
+    indices_cpu:   []u32,
 
     // Must stay alive until the removal of this Lightmap_UV_Handle.
     lm_uvs_gpu:    gpu.slice_t([2]f32),
 }
 
-add_lightmap_uvs :: proc(ctx: ^Context, desc: Lightmap_UVs_Desc) -> Lightmap_UV_Handle
+add_lightmap_uvs :: proc(ctx: ^Context, cmd_buf: gpu.Command_Buffer, desc: Lightmap_UVs_Desc) -> Lightmap_UV_Handle
 {
-    append(&ctx.lm_uvs, desc.lm_uvs_gpu)
+    seams_cpu := compute_seams(desc.positions_cpu, desc.normals_cpu, desc.lm_uvs_cpu, desc.indices_cpu)
+
+    seams_staging := gpu.arena_alloc(&ctx.upload_arena, Seam, len(seams_cpu))
+    copy(seams_staging.cpu, seams_cpu[:])
+
+    seams := gpu.mem_alloc(Seam, len(seams_cpu), gpu.Memory.GPU)
+    gpu.cmd_mem_copy(cmd_buf, seams, seams_staging)
+
+    append(&ctx.lm_uvs, LM_UVs {
+        uvs = desc.lm_uvs_gpu,
+        seams = seams,
+    })
     return { idx = u32(len(ctx.lm_uvs) - 1), gen = 0 }
 }
 
@@ -132,10 +145,13 @@ Bake :: struct
     lightmap_size: u32,
     lightmap: gpu.Texture,  // Not owned
     lightmap_rw_id: u32,
-    lightmap_back_rw_id: u32,
+    lightmap_id: u32,
     gbufs_id: u32,
 
-    lightmap_backbuffer: gpu.Owned_Texture,
+    pathtrace_output: gpu.Owned_Texture,
+    pathtrace_output_rw_id: u32,
+    tmp_tex: [2]gpu.Owned_Texture,
+    tmp_tex_ids: [2]u32,
 
     // OIDN
     shared_buf_vk: External_Buf,
@@ -172,14 +188,26 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lig
     bake.lightmap = lightmap
     bake.max_samples = samples
 
-    bake.lightmap_backbuffer = gpu.texture_alloc_and_create({
+    bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
+    bake.lightmap_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.lightmap, {}))
+
+    bake.pathtrace_output = gpu.texture_alloc_and_create({
         format = .RGBA16_Float,
         dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
-        usage = { .Sampled, .Storage, .Transfer_Src }
+        usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
     })
+    bake.pathtrace_output_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.pathtrace_output, {}))
 
-    bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
-    bake.lightmap_back_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.lightmap_backbuffer, {}))
+    for &tmp_tex in bake.tmp_tex {
+        tmp_tex = gpu.texture_alloc_and_create({
+            format = .RGBA16_Float,
+            dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
+            usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
+        })
+    }
+    for &tmp_tex_id, i in bake.tmp_tex_ids {
+        tmp_tex_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.tmp_tex[i], {}))
+    }
 
     bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size * lightmap_size * 2 * 4))  // TODO: What about other formats?
     bake.shared_buf_oidn = oidn_shared_buffer_from_vk_buffer(ctx.oidn_device, bake.shared_buf_vk)
@@ -238,32 +266,50 @@ bake_reset :: proc(bake: ^Bake)
 
 }
 
-bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena)
+bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, fix_seams: bool)
 {
-    if bake.accum_counter >= bake.max_samples do return
+    //if !fix_seams && bake.accum_counter >= bake.max_samples do return
 
     cmd_buf := gpu.commands_begin(.Main)
 
-    ctx := bake.ctx
     resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
-    gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
-    pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.lightmap_back_rw_id, 4096, bake.accum_counter)  // TODO
-    gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
-
-    // if denoise
+    if bake.accum_counter < bake.max_samples
     {
-        oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.lightmap_backbuffer)
-        gpu.queue_submit(.Main, { cmd_buf })
-        gpu.queue_wait_idle(.Main)
+        ctx := bake.ctx
 
-        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter)
+        gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
+        pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter)  // TODO
+        gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
 
-        cmd_buf = gpu.commands_begin(.Main)
-        oidn_copy_from_shared_buf(cmd_buf, bake.lightmap, bake.shared_buf_vk)
+        // if denoise
+        //if bake.accum_counter == bake.max_samples - 1
+        when false
+        {
+            oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output)
+            gpu.queue_submit(.Main, { cmd_buf })
+            gpu.queue_wait_idle(.Main)
+
+            oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter)
+
+            cmd_buf = gpu.commands_begin(.Main)
+            oidn_copy_from_shared_buf(cmd_buf, bake.pathtrace_output, bake.shared_buf_vk)
+            gpu.cmd_barrier(cmd_buf, .All, .All)
+        }
+    }
+
+    gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex[0], { {} }, { {} }, .Linear)
+    gpu.cmd_barrier(cmd_buf, .All, .All)
+
+    gpu.cmd_blit_texture(cmd_buf, bake.tmp_tex[0], bake.lightmap, { {} }, { {} }, .Linear)
+    gpu.cmd_barrier(cmd_buf, .All, .All)
+
+    if fix_seams
+    {
+        smooth_seams(bake, cmd_buf, frame_arena, bake.instances[:], bake.ctx.meshes[:], bake.ctx.lm_uvs[:], resolution)
         gpu.cmd_barrier(cmd_buf, .All, .All)
     }
 
-    bake.accum_counter += 1
+    bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
     gpu.queue_submit(.Main, { cmd_buf })
 }
 
@@ -296,6 +342,18 @@ bake_debug_ground_truth :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_
 }
 
 // Internal
+
+LM_UVs :: struct
+{
+    uvs: gpu.slice_t([2]f32),
+    seams: gpu.slice_t(Seam)
+}
+
+Seam :: struct
+{
+    line_a: [2]u32,
+    line_b: [2]u32,
+}
 
 Scene_GPU :: struct #all_or_none
 {
@@ -349,7 +407,9 @@ Shaders :: struct
 {
     uv_space: gpu.Shader,
     gbuffers: gpu.Shader,
-    pathtrace: gpu.Shader
+    pathtrace: gpu.Shader,
+    smooth_seams_vert: gpu.Shader,
+    smooth_seams_frag: gpu.Shader,
 }
 
 shaders_create :: proc() -> Shaders
@@ -358,6 +418,8 @@ shaders_create :: proc() -> Shaders
     res.uv_space = gpu.shader_create(#load("../shaders/uv_space.vert.spv", []u32), .Vertex)
     res.gbuffers = gpu.shader_create(#load("../shaders/gbuffers.frag.spv", []u32), .Fragment)
     res.pathtrace = gpu.shader_create_compute(#load("../shaders/pathtrace.comp.spv", []u32), 8, 8, 1)
+    res.smooth_seams_vert = gpu.shader_create(#load("../shaders/smooth_seams.vert.spv", []u32), .Vertex)
+    res.smooth_seams_frag = gpu.shader_create(#load("../shaders/smooth_seams.frag.spv", []u32), .Fragment)
     return res
 }
 
@@ -366,6 +428,8 @@ shaders_destroy :: proc(shaders: ^Shaders)
     gpu.shader_destroy(shaders.uv_space)
     gpu.shader_destroy(shaders.gbuffers)
     gpu.shader_destroy(shaders.pathtrace)
+    gpu.shader_destroy(shaders.smooth_seams_vert)
+    gpu.shader_destroy(shaders.smooth_seams_frag)
     shaders^ = {}
 }
 
@@ -398,7 +462,7 @@ gbufs_destroy :: proc(gbufs: ^GBuffers)
     gbufs^ = {}
 }
 
-gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbufs: ^GBuffers, shaders: Shaders, instances: []Instance, meshes: []Mesh, lm_uvs: []gpu.slice_t([2]f32), resolution: [2]f32)
+gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbufs: ^GBuffers, shaders: Shaders, instances: []Instance, meshes: []Mesh, lm_uvs: []LM_UVs, resolution: [2]f32)
 {
     gpu.cmd_scoped_render_pass(cmd_buf, {
         color_attachments = {
@@ -414,7 +478,7 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
     for instance in instances
     {
         mesh := meshes[instance.mesh_handle.idx]
-        lightmap_uvs := lm_uvs[instance.lm_uvs_handle.idx]
+        lightmap_uvs := lm_uvs[instance.lm_uvs_handle.idx].uvs
 
         Vertex_Data :: struct #all_or_none {
             pos: rawptr,
@@ -815,4 +879,209 @@ oidn_create_lightmap_filter :: proc(oidn_device: oidn.Device, color: oidn.Buffer
     oidn.CommitFilter(filter)
     oidn_check(oidn_device)
     return filter
+}
+
+// Seam smoothing
+
+compute_seams :: proc(positions: [][3]f32, normals: [][3]f32, lm_uvs: [][2]f32, indices: []u32) -> [dynamic]Seam
+{
+    assert(len(positions) == len(normals) && len(normals) == len(lm_uvs))
+
+    // Collect edges
+    Edge :: [2]u32
+    edges: [dynamic]Edge
+    defer delete(edges)
+
+    for i := 0; i < len(indices); i += 3
+    {
+        append(&edges, Edge { indices[i + 0], indices[i + 1] })
+        append(&edges, Edge { indices[i + 1], indices[i + 2] })
+        append(&edges, Edge { indices[i + 2], indices[i + 0] })
+    }
+
+    // Sort edges (for faster comparisons)
+    for &edge in edges
+    {
+        p0 := positions[edge[0]]
+        p1 := positions[edge[1]]
+        if p0.x > p1.x || (p0.x == p1.x && p0.y > p1.y) || (p0.x == p1.x && p0.y == p1.y && p0.z > p1.z) {
+            edge[0], edge[1] = edge[1], edge[0]
+        }
+    }
+
+    // Build acceleration structure for nearest neighbor searches
+    {
+        Collection :: struct
+        {
+            edges: []Edge,
+            positions: [][3]f32,
+        }
+
+        collection := Collection { edges[:], positions }
+
+        interface := sort.Interface {
+            collection = rawptr(&collection),
+            len = proc(it: sort.Interface) -> int {
+                c := (^Collection)(it.collection)
+                return len(c.edges)
+            },
+            less = proc(it: sort.Interface, i, j: int) -> bool {
+                c := (^Collection)(it.collection)
+                return c.positions[c.edges[i][0]].x < c.positions[c.edges[j][0]].x
+            },
+            swap = proc(it: sort.Interface, i, j: int) {
+                c := (^Collection)(it.collection)
+                c.edges[i], c.edges[j] = c.edges[j], c.edges[i]
+            },
+        }
+
+        sort.sort(interface)
+    }
+
+    res: [dynamic]Seam
+    EPSILON :: 0.00001
+    for i in 0..<len(edges)
+    {
+        pos0_x := min(positions[edges[i][0]].x, positions[edges[i][1]].x)
+
+        for j in i+1..<len(edges)
+        {
+            pos1_x := min(positions[edges[j][0]].x, positions[edges[j][1]].x)
+            if abs(pos1_x - pos0_x) > EPSILON do break
+
+            // Check first vertex
+            same_pos := linalg.length(positions[edges[i][0]] - positions[edges[j][0]]) < EPSILON
+            if !same_pos do continue
+            same_normal := linalg.length(normals[edges[i][0]] - normals[edges[j][0]]) < EPSILON
+            if !same_normal do continue
+            same_lm_uv := linalg.length(lm_uvs[edges[i][0]] - lm_uvs[edges[j][0]]) < EPSILON
+            if same_lm_uv do continue
+
+            // Check second vertex
+            same_pos = linalg.length(positions[edges[i][1]] - positions[edges[j][1]]) < EPSILON
+            if !same_pos do continue
+            same_normal = linalg.length(normals[edges[i][1]] - normals[edges[j][1]]) < EPSILON
+            if !same_normal do continue
+            same_lm_uv = linalg.length(lm_uvs[edges[i][1]] - lm_uvs[edges[j][1]]) < EPSILON
+            if same_lm_uv do continue
+
+            // Edges could be aligned and share a segment even though uv verts are not the same
+            if edges_share_segment(lm_uvs, edges[i], edges[j], EPSILON) do continue
+
+            // Found a seam
+            append(&res, Seam { edges[i], edges[j] })
+        }
+    }
+
+    return res
+
+    edges_share_segment :: proc(uvs: [][2]f32, edge0: Edge, edge1: Edge, eps: f32) -> bool
+    {
+        a := uvs[edge0[0]]
+        b := uvs[edge0[1]]
+        c := uvs[edge1[0]]
+        d := uvs[edge1[1]]
+
+        ab_dir := linalg.normalize(b - a)
+        ac_dir := linalg.normalize(c - a)
+        ad_dir := linalg.normalize(d - a)
+
+        // Check if aligned
+        if abs(linalg.dot(ab_dir, ac_dir) - 1) > eps ||
+           abs(linalg.dot(ab_dir, ad_dir) - 1) > eps {
+            return false
+        }
+
+        // Project verts to ab_dir
+        a_p := linalg.dot(ab_dir, a)
+        b_p := linalg.dot(ab_dir, b)
+        c_p := linalg.dot(ab_dir, c)
+        d_p := linalg.dot(ab_dir, d)
+
+        // Sort verts
+        if a_p > b_p do a_p, b_p = b_p, a_p
+        if c_p > d_p do c_p, d_p = d_p, c_p
+
+        // Check interval overlap
+        if c_p > a_p && d_p < b_p do return true
+        if a_p > c_p && b_p < d_p do return true
+        if c_p > a_p && c_p < b_p do return true
+        if d_p > a_p && d_p < b_p do return true
+
+        return false
+    }
+}
+
+smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, instances: []Instance, meshes: []Mesh, lm_uvs: []LM_UVs, resolution: [2]f32)
+{
+    textures := [2]gpu.Texture { bake.tmp_tex[0], bake.lightmap }
+    texture_ids := [2]u32 { bake.tmp_tex_ids[0], bake.lightmap_id }
+
+    for smooth_iter in 0..<100
+    {
+        tex_input  := texture_ids[smooth_iter % 2]
+        tex_output := textures[(smooth_iter + 1) % 2]
+
+        for i in 0..<2
+        {
+            a_to_b := i % 2 == 0
+
+            {
+                gpu.cmd_scoped_render_pass(cmd_buf, {
+                    color_attachments = {
+                        { texture = tex_output, load_op = .Load },
+                    }
+                })
+
+                gpu.cmd_set_shaders(cmd_buf, bake.ctx.shaders.smooth_seams_vert, bake.ctx.shaders.smooth_seams_frag)
+                gpu.cmd_set_blend_state(cmd_buf, {
+                    enable = true,
+                    color_op = .Add,
+                    src_color_factor = .Src_Alpha,
+                    dst_color_factor = .One_Minus_Src_Alpha,
+                    alpha_op = .Add,
+                    src_alpha_factor = .One,
+                    dst_alpha_factor = .One_Minus_Src_Alpha,
+                    color_write_mask = gpu.Color_Components_All,
+                })
+                gpu.cmd_set_desc_pool(cmd_buf, bake.ctx.desc_pool^)
+
+                // Render the entire scene
+                for instance in instances
+                {
+                    mesh := meshes[instance.mesh_handle.idx]
+                    lightmap_uvs := lm_uvs[instance.lm_uvs_handle.idx].uvs
+                    seams := lm_uvs[instance.lm_uvs_handle.idx].seams
+
+                    Vertex_Data :: struct #all_or_none {
+                        lm_uvs: rawptr,
+                        seams: rawptr,
+                        resolution: [2]f32,
+                        a_to_b: b32,
+                    }
+                    vert_data := gpu.arena_alloc(upload_arena, Vertex_Data)
+                    vert_data.cpu^ = Vertex_Data {
+                        lm_uvs = lightmap_uvs.gpu.ptr,
+                        seams = seams.gpu.ptr,
+                        resolution = resolution,
+                        a_to_b = b32(a_to_b),
+                    }
+                    Frag_Data :: struct #all_or_none {
+                        tex: u32,
+                        sampler: u32,
+                    }
+                    frag_data := gpu.arena_alloc(upload_arena, Frag_Data)
+                    frag_data.cpu^ = Frag_Data {
+                        tex = tex_input,
+                        sampler = bake.ctx.linear_sampler_id,
+                    }
+                    gpu.cmd_draw(cmd_buf, vert_data, frag_data, u32(gpu.slice_len(seams)) * 6)
+                }
+            }
+        }
+
+        gpu.cmd_barrier(cmd_buf, .Raster_Color_Out, .Fragment_Shader)
+    }
+
+    gpu.cmd_barrier(cmd_buf, .All, .All)
 }

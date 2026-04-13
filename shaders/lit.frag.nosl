@@ -61,7 +61,7 @@ main :: (normal_vert: vec4 @input(0), uv: vec2 @input(1, centroid), lm_uv: vec2 
     } else if data.sample_diffuse && !data.sample_lightmap {
         out = base_color.rgb;
     } else if !data.sample_diffuse && data.sample_lightmap {
-        out = irradiance;
+        out = irradiance / PI;
     }
 
     if data.select_lm_pixel
