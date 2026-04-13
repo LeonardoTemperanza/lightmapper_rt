@@ -16,6 +16,7 @@ layout(set = 2, binding = 0) uniform sampler _res_samplers_[];
 #define texture_load(t, coord)         imageLoad(_res_textures_rw_[nonuniformEXT(t)], ivec2(coord))
 #define texture_store(t, coord, value) imageStore(_res_textures_rw_[nonuniformEXT(t)], ivec2(coord), value)
 #define texture_size(t, s, lod)        textureSize(sampler2D(_res_textures_[nonuniformEXT(t)], _res_samplers_[nonuniformEXT(s)]), lod)
+#define image_size(t)                  imageSize(_res_textures_rw_[nonuniformEXT(t)])
 
 // Intrinsics end.
 
@@ -31,9 +32,9 @@ uint texture_id_ZERO;
 uint sampler_id_ZERO;
 uint bvh_id_ZERO;
 
+layout(location = 0) out vec3 _res_out_loc0_;
 layout(location = 1) out vec3 _res_out_loc1_;
 layout(location = 2) out vec2 _res_out_loc2_;
-layout(location = 0) out vec3 _res_out_loc0_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 layout(buffer_reference) readonly buffer _res_slice_vec3;

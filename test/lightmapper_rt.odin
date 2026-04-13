@@ -410,6 +410,7 @@ Shaders :: struct
     pathtrace: gpu.Shader,
     smooth_seams_vert: gpu.Shader,
     smooth_seams_frag: gpu.Shader,
+    dilate: gpu.Shader,
 }
 
 shaders_create :: proc() -> Shaders
@@ -420,6 +421,7 @@ shaders_create :: proc() -> Shaders
     res.pathtrace = gpu.shader_create_compute(#load("../shaders/pathtrace.comp.spv", []u32), 8, 8, 1)
     res.smooth_seams_vert = gpu.shader_create(#load("../shaders/smooth_seams.vert.spv", []u32), .Vertex)
     res.smooth_seams_frag = gpu.shader_create(#load("../shaders/smooth_seams.frag.spv", []u32), .Fragment)
+    res.dilate = gpu.shader_create_compute(#load("../shaders/dilate.comp.spv", []u32), 8, 8, 1)
     return res
 }
 
@@ -430,6 +432,7 @@ shaders_destroy :: proc(shaders: ^Shaders)
     gpu.shader_destroy(shaders.pathtrace)
     gpu.shader_destroy(shaders.smooth_seams_vert)
     gpu.shader_destroy(shaders.smooth_seams_frag)
+    gpu.shader_destroy(shaders.dilate)
     shaders^ = {}
 }
 
