@@ -343,12 +343,12 @@ bake_destroy :: proc(bake: ^Bake)
 
 // For debug visualizations
 
-bake_get_gbuffer_world_pos :: proc(bake: ^Bake) -> gpu.Texture
+bake_debug_get_gbuffer_world_pos :: proc(bake: ^Bake) -> gpu.Texture
 {
     return bake.gbufs.world_pos
 }
 
-bake_get_gbuffer_world_normals :: proc(bake: ^Bake) -> gpu.Texture
+bake_debug_get_gbuffer_world_normals :: proc(bake: ^Bake) -> gpu.Texture
 {
     return bake.gbufs.world_normals
 }

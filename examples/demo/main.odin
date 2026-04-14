@@ -265,8 +265,8 @@ main :: proc()
     }
     defer lm.bake_destroy(&bake)
 
-    gbuf_world_pos_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_get_gbuffer_world_pos(&bake), {}))
-    gbuf_world_normals_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_get_gbuffer_world_normals(&bake), {}))
+    gbuf_world_pos_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_debug_get_gbuffer_world_pos(&bake), {}))
+    gbuf_world_normals_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_debug_get_gbuffer_world_normals(&bake), {}))
     lightmap_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lightmap, {}))
 
     ui := make_ui_default()
