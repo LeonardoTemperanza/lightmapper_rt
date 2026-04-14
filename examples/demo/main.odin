@@ -212,7 +212,8 @@ main :: proc()
         }
     }
 
-    lm_ctx := lm.init(&desc_pool)
+    lm_ctx: lm.Context
+    lm.init(&lm_ctx, &desc_pool)
     defer lm.cleanup(&lm_ctx)
 
     scene := upload_scene(gltf_scene, &lm_ctx, lm_uvs, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
@@ -359,7 +360,27 @@ main :: proc()
         imgui.render()
 
         gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
-        lm.bake_iteration(&bake, frame_arena, ui.fix_seams)
+
+        lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
+        for &lm_instance, i in lm_instances
+        {
+            instance := gltf_scene.instances[i]
+            mesh := scene.meshes[gltf_scene.instances[i].mesh_idx]
+            gltf_mesh := gltf_scene.meshes[gltf_scene.instances[i].mesh_idx]
+            lm_instance = lm.Instance {
+                mesh_handle = mesh.lm_mesh_handle,
+                lm_uvs_handle = mesh.lm_uv_handle,
+                transform = instance.transform,
+                lm_uvs_offset = 0,
+                lm_uvs_scale = { 1.0, 1.0 },
+                albedo_tex_id = gltf_mesh.base_color_map,
+                albedo = { 1.0, 1.0, 1.0 },
+            }
+        }
+        if lm.bake_scene_changed(&bake, lm_instances) {
+            lm.bake_reset(&bake)
+        }
+        lm.bake_iteration(&bake, frame_arena, lm_instances, ui.fix_seams)
 
         switch ui.output_type
         {
@@ -682,11 +703,6 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]
         mesh_lm_uvs := lm_uvs[i]
 
         mesh.lm_mesh_handle = lm.add_mesh(lm_ctx, cmd_buf, lm.Mesh_Desc {
-            positions_cpu = mesh_cpu.pos[:],
-            normals_cpu = mesh_cpu.normals[:],
-            uvs_cpu = mesh_cpu.uvs[:],
-            indices_cpu = mesh_cpu.indices[:],
-
             positions_gpu = mesh.pos,
             normals_gpu = mesh.normals,
             uvs_gpu = mesh.uvs,
@@ -696,7 +712,6 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]
         mesh.lm_uv_handle = lm.add_lightmap_uvs(lm_ctx, cmd_buf, lm.Lightmap_UVs_Desc {
             positions_cpu = mesh_cpu.pos[:],
             normals_cpu = mesh_cpu.normals[:],
-            uvs_cpu = mesh_cpu.uvs[:],
             lm_uvs_cpu = mesh_lm_uvs.uvs[:],
             indices_cpu = mesh_cpu.indices[:],
 
