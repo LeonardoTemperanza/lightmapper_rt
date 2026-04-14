@@ -14,23 +14,23 @@ import "core:sys/info"
 
 import sdl "vendor:sdl3"
 
-import shared "shared"
-import gltf2 "shared/gltf2"
+import shared "../shared"
+import gltf2 "../shared/gltf2"
 
 import vk "vendor:vulkan"
-import "no_gfx_api/gpu"
-import xa "xatlas_odin"
+import "../../no_gfx_api/gpu"
+import xa "../shared/xatlas_odin"
 
-import imgui "odin-imgui"
-import imgui_impl_sdl3 "odin-imgui/imgui_impl_sdl3"
-import imgui_impl_nogfx "odin-imgui/imgui_impl_nogfx"
+import imgui "../shared/odin-imgui"
+import imgui_impl_sdl3 "../shared/odin-imgui/imgui_impl_sdl3"
+import imgui_impl_nogfx "../shared/odin-imgui/imgui_impl_nogfx"
 
-import lm "test"
+import lm "../../"
 
 Frames_In_Flight :: 3
 Example_Name_Format :: "Right-click + WASD for first-person controls. Left click to toggle texture type. Current: %v"
 
-Sponza_Scene :: #load("shared/assets/sponza.glb")
+Sponza_Scene :: #load("../shared/assets/sponza.glb")
 
 // How many textures to load in a single batch / command buffer
 Loader_Chunk_Size :: 16
@@ -86,9 +86,6 @@ main :: proc()
     defer gpu.cleanup()
 
     gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
-
-    pathtrace_shader := gpu.shader_create_compute(#load("shaders/pathtrace.comp.spv", []u32), 8, 8, 1)
-    defer gpu.shader_destroy(pathtrace_shader)
 
     vert_shader_lit := gpu.shader_create(#load("shaders/lit.vert.spv", []u32), .Vertex)
     frag_shader_lit := gpu.shader_create(#load("shaders/lit.frag.spv", []u32), .Fragment)

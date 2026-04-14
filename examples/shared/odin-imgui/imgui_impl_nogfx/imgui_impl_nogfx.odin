@@ -7,7 +7,7 @@ import "base:runtime"
 import "core:slice"
 
 import im "../"
-import "../../no_gfx_api/gpu"
+import "../../../../no_gfx_api/gpu"
 
 // no_gfx backend, written by basically porting over the SDL_GPU and Vulkan backends.
 // NOTE: Texture_IDs are just the texture indices (u32s).

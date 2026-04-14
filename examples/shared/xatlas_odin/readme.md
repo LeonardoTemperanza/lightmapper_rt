@@ -1,0 +1,1 @@
+Odin bindings for XAtlas. Used in [this project](https://github.com/LeonardoTemperanza/lightmapper_rt).

@@ -15,7 +15,7 @@ import "base:runtime"
 import "core:sort"
 
 import vk "vendor:vulkan"
-import "../no_gfx_api/gpu"
+import "no_gfx_api/gpu"
 import oidn "../oidn_odin_bindings"
 
 Handle :: struct { idx: u32, gen: u32 }
@@ -414,12 +414,12 @@ Shaders :: struct
 shaders_create :: proc() -> Shaders
 {
     res: Shaders
-    res.uv_space = gpu.shader_create(#load("../shaders/uv_space.vert.spv", []u32), .Vertex)
-    res.gbuffers = gpu.shader_create(#load("../shaders/gbuffers.frag.spv", []u32), .Fragment)
-    res.pathtrace = gpu.shader_create_compute(#load("../shaders/pathtrace.comp.spv", []u32), 8, 8, 1)
-    res.smooth_seams_vert = gpu.shader_create(#load("../shaders/smooth_seams.vert.spv", []u32), .Vertex)
-    res.smooth_seams_frag = gpu.shader_create(#load("../shaders/smooth_seams.frag.spv", []u32), .Fragment)
-    res.dilate = gpu.shader_create_compute(#load("../shaders/dilate.comp.spv", []u32), 8, 8, 1)
+    res.uv_space = gpu.shader_create(#load("shaders/uv_space.vert.spv", []u32), .Vertex)
+    res.gbuffers = gpu.shader_create(#load("shaders/gbuffers.frag.spv", []u32), .Fragment)
+    res.pathtrace = gpu.shader_create_compute(#load("shaders/pathtrace.comp.spv", []u32), 8, 8, 1)
+    res.smooth_seams_vert = gpu.shader_create(#load("shaders/smooth_seams.vert.spv", []u32), .Vertex)
+    res.smooth_seams_frag = gpu.shader_create(#load("shaders/smooth_seams.frag.spv", []u32), .Fragment)
+    res.dilate = gpu.shader_create_compute(#load("shaders/dilate.comp.spv", []u32), 8, 8, 1)
     return res
 }
 
