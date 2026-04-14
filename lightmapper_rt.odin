@@ -358,6 +358,7 @@ bake_debug_ground_truth :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_
     pathtrace(bake, cmd_buf, frame_arena, .First_Person, camera_to_world, output_rw_id, resolution, accum_counter)
 }
 
+/////////////////////////////
 // Internal
 
 LM_UVs :: struct
