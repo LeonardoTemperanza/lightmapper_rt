@@ -94,7 +94,6 @@ shutdown :: proc()
     bd := get_backend_data()
     assert(bd != nil, "No renderer backend to shutdown, or already shutdown?")
     io := im.get_io()
-    platform_io := im.get_platform_io()
 
     destroy_device_objects()
 
@@ -149,7 +148,6 @@ render_draw_data :: proc(draw_data: ^im.Draw_Data, cmd_buf: gpu.Command_Buffer)
     // Prepare verts
     verts: gpu.slice_t(im.Draw_Vert)
     indices: gpu.slice_t(u16)
-    colors: gpu.slice_t([4]f32)
     if draw_data.total_vtx_count > 0
     {
         verts   = gpu.arena_alloc(&fd.staging_arena, im.Draw_Vert, draw_data.total_vtx_count)
@@ -286,7 +284,7 @@ create_fonts_texture :: proc(desc_pool: ^gpu.Descriptor_Pool)
     bd.fonts_texture_id = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(bd.fonts_texture, {}))
 
     // Store our identifier
-    im.font_atlas_set_tex_id(io.fonts, transmute(im.Texture_ID)u64(bd.fonts_texture_id))
+    im.font_atlas_set_tex_id(io.fonts, im.Texture_ID(bd.fonts_texture_id))
 
     gpu.cmd_barrier(cmd_buf, .Transfer, .All)
     gpu.queue_submit(.Main, { cmd_buf })

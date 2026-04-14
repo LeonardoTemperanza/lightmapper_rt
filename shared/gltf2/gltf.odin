@@ -1,3 +1,6 @@
+
+#+vet !cast
+
 package gltf2
 
 import "core:encoding/base64"

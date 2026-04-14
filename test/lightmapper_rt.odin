@@ -275,8 +275,6 @@ bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, fix_seams: bool)
     resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
     if bake.accum_counter < bake.max_samples
     {
-        ctx := bake.ctx
-
         gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
         pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter)  // TODO
         gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
@@ -1020,7 +1018,7 @@ smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, upload_arena: ^gp
     textures := [2]gpu.Texture { bake.tmp_tex[0], bake.lightmap }
     texture_ids := [2]u32 { bake.tmp_tex_ids[0], bake.lightmap_id }
 
-    for smooth_iter in 0..<100
+    for smooth_iter in 0..<20
     {
         tex_input  := texture_ids[smooth_iter % 2]
         tex_output := textures[(smooth_iter + 1) % 2]
@@ -1052,7 +1050,6 @@ smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, upload_arena: ^gp
                 // Render the entire scene
                 for instance in instances
                 {
-                    mesh := meshes[instance.mesh_handle.idx]
                     lightmap_uvs := lm_uvs[instance.lm_uvs_handle.idx].uvs
                     seams := lm_uvs[instance.lm_uvs_handle.idx].seams
 

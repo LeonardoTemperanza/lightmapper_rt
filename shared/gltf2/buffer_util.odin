@@ -16,7 +16,7 @@ Alternatively you can use a switch statement to handle multiple data formats:
 buf := gltf.buffer_slice(data, accessor_index)
 #partial switch vals in buf {
 case [][4]u8:
-    for val, i in vals { 
+    for val, i in vals {
         // ...
     }
 case [][4]i16:
@@ -24,8 +24,11 @@ case [][4]i16:
         // ...
     }
 }
-```                           
+```
 */
+#+vet !cast
+#+vet !unused-imports
+
 package gltf2
 
 import "core:mem"

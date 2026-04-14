@@ -1,3 +1,6 @@
+
+#+vet !unused-imports
+
 package shared
 
 import "base:runtime"
@@ -10,8 +13,8 @@ import "core:mem"
 import "core:slice"
 import "gltf2"
 import "core:image"
-import "core:image/jpeg"
 import "core:image/png"
+import "core:image/jpeg"
 import intr "base:intrinsics"
 
 import sdl "vendor:sdl3"
@@ -602,10 +605,10 @@ load_scene_gltf :: proc(
 	meshes: [dynamic]Mesh
 	start_idx: [dynamic]u32
 	defer delete(start_idx)
-	for mesh, i in data.meshes {
+	for mesh in data.meshes {
 		append(&start_idx, u32(len(meshes)))
 
-		for primitive, j in mesh.primitives {
+		for primitive in mesh.primitives {
 			assert(primitive.mode == .Triangles)
 
 			positions := buffer_slice_with_stride(
@@ -716,7 +719,7 @@ load_scene_gltf :: proc(
 			} else {
 				// Create default UVs if not present
 				uvs_final = make([][2]f32, len(positions), allocator = context.temp_allocator)
-				for &uv, i in uvs_final {
+				for &uv in uvs_final {
 					uv = {0.0, 0.0}
 				}
 			}
@@ -737,8 +740,6 @@ load_scene_gltf :: proc(
 	// Load instances
 	instances: [dynamic]Instance
 	for node_idx in data.scenes[0].nodes {
-		node := data.nodes[node_idx]
-
 		traverse_node(&instances, data, 1, int(node_idx), meshes, start_idx)
 
 		traverse_node :: proc(
@@ -759,7 +760,7 @@ load_scene_gltf :: proc(
 				mesh_idx := node.mesh.?
 				mesh := data.meshes[mesh_idx]
 
-				for primitive, j in mesh.primitives {
+				for j in 0..<len(mesh.primitives) {
 					primitive_idx := start_idx[mesh_idx] + u32(j)
 					instance := Instance {
 						transform = flip_z * transform,

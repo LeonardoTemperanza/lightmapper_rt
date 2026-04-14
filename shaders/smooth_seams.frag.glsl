@@ -60,6 +60,6 @@ void main()
 {
     _res_ptr_Data data_ = _res_frag_data_;
     vec2 to_sample_ = _res_in_loc0_;
-    _res_out_loc0_ = (texture_sample(data_._res_.tex_, data_._res_.sampler_, to_sample_) * vec4(1, 1, 1, 0.1));
+    _res_out_loc0_ = (texture_sample(data_._res_.tex_, data_._res_.sampler_, to_sample_) * vec4(1, 1, 1, 0.5));
 }
 
