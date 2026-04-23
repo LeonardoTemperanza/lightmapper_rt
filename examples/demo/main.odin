@@ -243,6 +243,8 @@ main :: proc()
     })
     defer gpu.texture_free_and_destroy(&lightmap)
 
+    ui := make_ui_default()
+
     bake: lm.Bake
     {
         lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
@@ -261,7 +263,7 @@ main :: proc()
                 albedo = { 1.0, 1.0, 1.0 },
             }
         }
-        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 2000, lightmap, lm_instances)
+        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 2000, lightmap, lm_instances, ui.lights)
     }
     defer lm.bake_destroy(&bake)
 
@@ -269,7 +271,6 @@ main :: proc()
     gbuf_world_normals_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_debug_get_gbuffer_world_normals(&bake), {}))
     lightmap_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lightmap, {}))
 
-    ui := make_ui_default()
 
     imgui_ctx := init_dear_imgui(window, &desc_pool)
     defer {
@@ -377,10 +378,11 @@ main :: proc()
                 albedo = { 1.0, 1.0, 1.0 },
             }
         }
-        if lm.bake_scene_changed(&bake, lm_instances) {
+        if ui.do_reset_bake || lm.bake_scene_changed(&bake, lm_instances, ui.lights) {
             lm.bake_reset(&bake)
+            pathtrace_gt_counter = 0
         }
-        lm.bake_iteration(&bake, frame_arena, lm_instances, ui.fix_seams)
+        lm.bake_iteration(&bake, frame_arena, lm_instances, ui.lights, ui.fix_seams)
 
         switch ui.output_type
         {
@@ -1528,6 +1530,14 @@ UI_State :: struct
     show_texture_viewer: bool,
     show_settings: bool,
     show_demo_window: bool,
+
+    light_azimuth: f32,    // Degrees
+    light_elevation: f32,  // Degrees
+    light_radius_deg: f32, // Degrees
+
+    lights: lm.Lights,
+
+    do_reset_bake: bool,
 }
 
 make_ui_default :: proc() -> UI_State
@@ -1538,6 +1548,14 @@ make_ui_default :: proc() -> UI_State
     res.lm_sampling_type = .Bicubic
     res.sample_lightmap = true
     res.sample_diffuse = true
+
+    res.light_azimuth = -45.0
+    res.light_elevation = -75.0
+    res.light_radius_deg = 0.2
+
+    res.lights.sun_dir = dir_from_spherical_coords(math.RAD_PER_DEG * res.light_azimuth, math.RAD_PER_DEG * res.light_elevation)
+    res.lights.sun_emission = { 2000000.0, 1840000.0, 1640000.0 }
+    res.lights.sun_radius = math.RAD_PER_DEG * res.light_radius_deg
     return res
 }
 
@@ -1563,6 +1581,10 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
     {
         if imgui.begin("Settings", &ui.show_settings)
         {
+            SETTINGS_WIDTH :: 450
+            imgui.push_item_width(SETTINGS_WIDTH)
+            defer imgui.pop_item_width()
+
             // Lightmap sampling
             {
                 items := []cstring { "Point", "Bilinear", "Bicubic" }
@@ -1586,8 +1608,11 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
                     imgui.end_combo()
                 }
 
+                imgui.push_item_width(SETTINGS_WIDTH / 2)
                 imgui.checkbox("Sample lightmap", &ui.sample_lightmap)
+                imgui.same_line()
                 imgui.checkbox("Sample diffuse", &ui.sample_diffuse)
+                imgui.pop_item_width()
             }
 
             // Output type
@@ -1614,6 +1639,31 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
                 }
             }
 
+            imgui.separator_text("Scene settings (require bake reset)")
+            {
+                imgui.push_item_width(SETTINGS_WIDTH / 2)
+                imgui.drag_float("###azimuth", &ui.light_azimuth, 0.5, -180, 180)
+                imgui.same_line()
+                imgui.drag_float("Sun Angle", &ui.light_elevation, 0.5, -90, 90)
+                ui.lights.sun_dir = dir_from_spherical_coords(math.RAD_PER_DEG * ui.light_azimuth, math.RAD_PER_DEG * ui.light_elevation)
+                imgui.pop_item_width()
+
+                imgui.drag_float("Sun Radius (degrees)", &ui.light_radius_deg, 0.01)
+                ui.lights.sun_radius = math.RAD_PER_DEG * ui.light_radius_deg
+
+                imgui.push_item_width(SETTINGS_WIDTH / 3)
+                imgui.drag_float("###emission_x", &ui.lights.sun_emission.x, 1000)
+                imgui.same_line()
+                imgui.drag_float("###emission_y", &ui.lights.sun_emission.y, 1000)
+                imgui.same_line()
+                imgui.drag_float("Sun Strength", &ui.lights.sun_emission.z, 1000)
+                imgui.pop_item_width()
+
+                ui.do_reset_bake = false
+                if imgui.button("Reset Bake") do ui.do_reset_bake = true
+            }
+
+            imgui.separator_text("Postprocessing settings")
             imgui.drag_float("Exposure", &ui.exposure, 0.01)
             imgui.checkbox("Fix seams", &ui.fix_seams)
         }
@@ -1624,5 +1674,14 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
     if ui.show_texture_viewer
     {
         gui_show_debug_texture_window("Lightmap Viewer", texture_ids, texture_names, LM_SIZE, LM_SIZE, debug_viz_draw_calls, &ui.show_texture_viewer)
+    }
+}
+
+dir_from_spherical_coords :: proc(azimuth: f32, elevation: f32) -> [3]f32
+{
+    return [3]f32{
+        math.cos(elevation) * math.cos(azimuth),
+        math.sin(elevation),
+        math.cos(elevation) * math.sin(azimuth),
     }
 }

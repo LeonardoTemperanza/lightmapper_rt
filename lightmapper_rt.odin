@@ -156,6 +156,7 @@ Bake :: struct
     ctx: ^Context,
     gbufs: GBuffers,
     instances: [dynamic]Instance,
+    lights: Lights,
     scene_gpu: Scene_GPU,
     lightmap_size: u32,
     lightmap: gpu.Texture,  // Not owned
@@ -191,7 +192,14 @@ Instance :: struct
     albedo: [3]f32,
 }
 
-bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance) -> Bake
+Lights :: struct
+{
+    sun_dir: [3]f32,
+    sun_radius: f32,  // Radians
+    sun_emission: [3]f32,
+}
+
+bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, lights: Lights) -> Bake
 {
     assert(lightmap_size > 0)
 
@@ -199,6 +207,7 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lig
     bake.ctx = ctx
     bake.gbufs = gbufs_create(lightmap_size)
     bake.instances = slice.clone_to_dynamic(instances)
+    bake.lights = lights
     bake.lightmap_size = u32(lightmap_size)
     bake.lightmap = lightmap
     bake.max_samples = samples
@@ -267,10 +276,9 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lig
     return bake
 }
 
-bake_scene_changed :: proc(bake: ^Bake, instances: []Instance) -> bool
+bake_scene_changed :: proc(bake: ^Bake, instances: []Instance, lights: Lights) -> bool
 {
-
-    return false
+    return bake.lights != lights
 }
 
 bake_reset :: proc(bake: ^Bake)
@@ -278,12 +286,13 @@ bake_reset :: proc(bake: ^Bake)
     bake.accum_counter = 0
 }
 
-bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, fix_seams: bool)
+bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool)
 {
     //if !fix_seams && bake.accum_counter >= bake.max_samples do return
 
     delete(bake.instances)
     bake.instances = slice.clone_to_dynamic(instances)
+    bake.lights = lights
 
     cmd_buf := gpu.commands_begin(.Main)
 
@@ -291,7 +300,7 @@ bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instan
     if bake.accum_counter < bake.max_samples
     {
         gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
-        pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter)  // TODO
+        pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter, bake.lights)  // TODO
         gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
 
         // if denoise
@@ -355,7 +364,7 @@ bake_debug_get_gbuffer_world_normals :: proc(bake: ^Bake) -> gpu.Texture
 
 bake_debug_ground_truth :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, camera_to_world: matrix[4, 4]f32, output_rw_id: u32, resolution: [2]f32, accum_counter: u32)
 {
-    pathtrace(bake, cmd_buf, frame_arena, .First_Person, camera_to_world, output_rw_id, resolution, accum_counter)
+    pathtrace(bake, cmd_buf, frame_arena, .First_Person, camera_to_world, output_rw_id, resolution, accum_counter, bake.lights)
 }
 
 /////////////////////////////
@@ -552,7 +561,7 @@ Pathtrace_Mode :: enum
     First_Person,
 }
 
-pathtrace :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, mode: Pathtrace_Mode, camera_to_world: matrix[4, 4]f32, texture_rw_id: u32, resolution: [2]f32, accum_counter: u32)
+pathtrace :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, mode: Pathtrace_Mode, camera_to_world: matrix[4, 4]f32, texture_rw_id: u32, resolution: [2]f32, accum_counter: u32, lights: Lights)
 {
     Compute_Data :: struct #all_or_none {
         output_texture_id: u32,
@@ -575,9 +584,9 @@ pathtrace :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Ar
             instances = bake.scene_gpu.instances.gpu.ptr,
             meshes = bake.scene_gpu.meshes_shader.gpu.ptr,
             lights = {
-                dir_light_dir   = linalg.normalize([3]f32 { 0.2, -1.0, -0.2 }),
-                dir_light_angle = math.RAD_PER_DEG * 0.2,
-                dir_light_emission = [3]f32 { 2000000.0, 1840000.0, 1640000.0 },
+                dir_light_dir   = lights.sun_dir,
+                dir_light_angle = lights.sun_radius,
+                dir_light_emission = lights.sun_emission,
             }
         },
         accum_counter = accum_counter,
